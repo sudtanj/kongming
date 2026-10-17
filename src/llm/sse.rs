@@ -64,8 +64,15 @@ impl SseParser {
         out
     }
 
-    /// Flush a trailing event that was not terminated by a blank line.
+    /// Flush a trailing event that was not terminated by a blank line
+    /// (including a last line without its newline).
     pub fn finish(&mut self) -> Option<SseEvent> {
+        if !self.buf.is_empty() {
+            let mut done = self.feed(b"\n");
+            if let Some(ev) = done.pop() {
+                return Some(ev);
+            }
+        }
         if self.has_data {
             let mut ev = std::mem::take(&mut self.cur);
             if ev.data.ends_with('\n') {

@@ -2,7 +2,7 @@
 name = "kongming"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.82"
 description = "kongming: a small agentic AI daemon (nanobot UI, hermes-style self-improving loop, grokbot-style agent roles) for 1 GB boards; all state lives in Turso"
 license = "MIT"
 repository = "https://github.com/sudtanj/kongming"

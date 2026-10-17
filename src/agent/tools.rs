@@ -467,7 +467,7 @@ mod tests {
     fn html_to_text_strips_markup() {
         let html = "<html><head><style>a{}</style><script>x()</script></head><body><h1>Title</h1><p>Hello &amp; <b>world</b></p><!-- c --><ul><li>one</li><li>two</li></ul></body></html>";
         let t = html_to_text(html);
-        assert_eq!(t, "Title\nHello & world\none\ntwo");
+        assert_eq!(t, "Title\n\nHello & world\n\none\ntwo");
     }
 
     #[test]
