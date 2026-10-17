@@ -8,7 +8,6 @@ pub mod prompt;
 pub mod tools;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -568,29 +567,39 @@ async fn reflect(state: Shared, agent: Agent, session: Session, model: String) -
 }
 
 /// A manager hands work to a report: new child session, one turn, summary back.
-pub async fn run_delegation(state: Shared, from: Agent, to: Agent, parent: Session, task: String, context: String, depth: usize) -> Result<String> {
-    let task_row = state.db.create_task(&parent.id, &from.id, &to.id, &task).await?;
-    let title = format!("@{} → @{}: {}", from.handle, to.handle, auto_title(&task));
-    let child = state.db.create_session(&to.id, "delegation", None, Some(&parent.id), &title).await?;
-    let mut text = format!("Task from @{} ({}):\n{}", from.handle, from.role, task);
-    if !context.trim().is_empty() {
-        text.push_str(&format!("\n\nContext:\n{}", context.trim()));
-    }
-    let child_id = child.id.clone();
-    let res = Box::pin(run_turn(state.clone(), child, text, TurnOptions { depth, no_reflect: true, agent_override: Some(to.clone()) })).await;
-    match res {
-        Ok(r) => {
-            let status = if r.error.is_some() { "failed" } else { "done" };
-            let summary = if r.text.trim().is_empty() { r.error.clone().unwrap_or_else(|| "(no answer)".into()) } else { r.text.clone() };
-            state.db.finish_task(&task_row.id, Some(&child_id), status, &summary).await?;
-            Ok(format!("Result from @{} (session {}):\n{}", to.handle, child_id, summary))
+pub fn run_delegation(
+    state: Shared,
+    from: Agent,
+    to: Agent,
+    parent: Session,
+    task: String,
+    context: String,
+    depth: usize,
+) -> futures_util::future::BoxFuture<'static, Result<String>> {
+    Box::pin(async move {
+        let task_row = state.db.create_task(&parent.id, &from.id, &to.id, &task).await?;
+        let title = format!("@{} → @{}: {}", from.handle, to.handle, auto_title(&task));
+        let child = state.db.create_session(&to.id, "delegation", None, Some(&parent.id), &title).await?;
+        let mut text = format!("Task from @{} ({}):\n{}", from.handle, from.role, task);
+        if !context.trim().is_empty() {
+            text.push_str(&format!("\n\nContext:\n{}", context.trim()));
         }
-        Err(e) => {
-            let msg = format!("{e:#}");
-            state.db.finish_task(&task_row.id, Some(&child_id), "failed", &msg).await?;
-            Err(anyhow!("delegation to @{} failed: {msg}", to.handle))
+        let child_id = child.id.clone();
+        let res = run_turn(state.clone(), child, text, TurnOptions { depth, no_reflect: true, agent_override: Some(to.clone()) }).await;
+        match res {
+            Ok(r) => {
+                let status = if r.error.is_some() { "failed" } else { "done" };
+                let summary = if r.text.trim().is_empty() { r.error.clone().unwrap_or_else(|| "(no answer)".into()) } else { r.text.clone() };
+                state.db.finish_task(&task_row.id, Some(&child_id), status, &summary).await?;
+                Ok(format!("Result from @{} (session {}):\n{}", to.handle, child_id, summary))
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                state.db.finish_task(&task_row.id, Some(&child_id), "failed", &msg).await?;
+                Err(anyhow!("delegation to @{} failed: {msg}", to.handle))
+            }
         }
-    }
+    })
 }
 
 /// First line of the message, trimmed, as a session title.

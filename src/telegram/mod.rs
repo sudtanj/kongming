@@ -251,7 +251,7 @@ pub async fn run(state: Shared) {
         if !announced {
             match tg.call("getMe", json!({})).await {
                 Ok(me) => {
-                    tracing::info!(bot = %me.get("username").and_then(Value::as_str).unwrap_or("?"), "telegram connected");
+                    tracing::info!(bot = %me.get("username").and_then(serde_json::Value::as_str).unwrap_or("?"), "telegram connected");
                     announced = true;
                     let _ = tg
                         .call(
