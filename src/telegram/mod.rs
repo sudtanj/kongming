@@ -29,20 +29,42 @@ impl Telegram {
     }
 
     pub async fn call(&self, method: &str, body: Value) -> Result<Value> {
-        let r = self.http.post(self.url(method)).json(&body).timeout(Duration::from_secs(70)).send().await.context("telegram request failed")?;
+        let r = self
+            .http
+            .post(self.url(method))
+            .json(&body)
+            .timeout(Duration::from_secs(70))
+            .send()
+            .await
+            .context("telegram request failed")?;
         let v: Value = r.json().await.context("telegram reply was not JSON")?;
         if v.get("ok").and_then(Value::as_bool) != Some(true) {
-            return Err(anyhow!("telegram {method}: {}", v.get("description").and_then(Value::as_str).unwrap_or("unknown error")));
+            return Err(anyhow!(
+                "telegram {method}: {}",
+                v.get("description").and_then(Value::as_str).unwrap_or("unknown error")
+            ));
         }
         Ok(v.get("result").cloned().unwrap_or(Value::Null))
     }
 
     pub async fn send_message(&self, chat_id: i64, text: &str) -> Result<i64> {
         let text = clamp(text);
-        let r = match self.call("sendMessage", json!({"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": true})).await {
+        let r = match self
+            .call(
+                "sendMessage",
+                json!({"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": true}),
+            )
+            .await
+        {
             Ok(r) => r,
             // HTML parse failures: resend as plain text.
-            Err(_) => self.call("sendMessage", json!({"chat_id": chat_id, "text": strip_html(&text), "disable_web_page_preview": true})).await?,
+            Err(_) => {
+                self.call(
+                    "sendMessage",
+                    json!({"chat_id": chat_id, "text": strip_html(&text), "disable_web_page_preview": true}),
+                )
+                .await?
+            }
         };
         Ok(r.get("message_id").and_then(Value::as_i64).unwrap_or(0))
     }
@@ -241,7 +263,14 @@ pub async fn run(state: Shared) {
             tokio::time::sleep(Duration::from_secs(30)).await;
             continue;
         };
-        let enabled = state.db.setting("telegram").await.ok().flatten().and_then(|v| v.get("enabled").and_then(Value::as_bool)).unwrap_or(true);
+        let enabled = state
+            .db
+            .setting("telegram")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.get("enabled").and_then(Value::as_bool))
+            .unwrap_or(true);
         if !enabled {
             tokio::time::sleep(Duration::from_secs(30)).await;
             continue;
@@ -273,13 +302,15 @@ pub async fn run(state: Shared) {
                 }
             }
         }
-        let mut offset: i64 = state.db.setting("telegram.offset").await.ok().flatten().and_then(|v| v.as_i64()).unwrap_or(0);
+        let mut offset: i64 =
+            state.db.setting("telegram.offset").await.ok().flatten().and_then(|v| v.as_i64()).unwrap_or(0);
         loop {
             // Token changed in settings: restart the outer loop.
             if state.telegram_token().await.as_deref() != Some(token.as_str()) {
                 break;
             }
-            let updates = tg.call("getUpdates", json!({"offset": offset, "timeout": 50, "allowed_updates": ["message"]})).await;
+            let updates =
+                tg.call("getUpdates", json!({"offset": offset, "timeout": 50, "allowed_updates": ["message"]})).await;
             let updates = match updates {
                 Ok(u) => u,
                 Err(e) => {
@@ -333,10 +364,22 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
     let allowed = state.telegram_allowed().await;
     if !allowed.contains(&user_id) {
         tracing::info!(user_id, "telegram message from a user not in the allowlist");
-        tg.send_message(chat_id, &format!("This bot is private. Your Telegram user id is <code>{user_id}</code>; ask the owner to allow it.")).await?;
+        tg.send_message(
+            chat_id,
+            &format!(
+                "This bot is private. Your Telegram user id is <code>{user_id}</code>; ask the owner to allow it."
+            ),
+        )
+        .await?;
         return Ok(());
     }
-    let text = msg.get("text").and_then(Value::as_str).or_else(|| msg.get("caption").and_then(Value::as_str)).unwrap_or("").trim().to_string();
+    let text = msg
+        .get("text")
+        .and_then(Value::as_str)
+        .or_else(|| msg.get("caption").and_then(Value::as_str))
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if text.is_empty() {
         tg.send_message(chat_id, "I can only read text for now.").await?;
         return Ok(());
@@ -352,14 +395,30 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
             "new" => {
                 let s = session_for_chat(&state, chat_id, true).await?;
                 let a = state.db.agent(&s.agent_id).await?;
-                tg.send_message(chat_id, &format!("New conversation with <b>@{}</b>.", a.map(|a| a.handle).unwrap_or_default())).await?;
+                tg.send_message(
+                    chat_id,
+                    &format!("New conversation with <b>@{}</b>.", a.map(|a| a.handle).unwrap_or_default()),
+                )
+                .await?;
             }
             "agents" => {
                 let agents = state.db.agents().await?;
                 let cur = session_for_chat(&state, chat_id, false).await?.agent_id;
                 let lines: Vec<String> = agents
                     .iter()
-                    .map(|a| format!("{}<b>@{}</b> – {}{}", if a.id == cur { "▶ " } else { "" }, a.handle, esc(&a.role), a.manager_id.as_ref().and_then(|m| agents.iter().find(|x| &x.id == m)).map(|m| format!(" (reports to @{})", m.handle)).unwrap_or_default()))
+                    .map(|a| {
+                        format!(
+                            "{}<b>@{}</b> – {}{}",
+                            if a.id == cur { "▶ " } else { "" },
+                            a.handle,
+                            esc(&a.role),
+                            a.manager_id
+                                .as_ref()
+                                .and_then(|m| agents.iter().find(|x| &x.id == m))
+                                .map(|m| format!(" (reports to @{})", m.handle))
+                                .unwrap_or_default()
+                        )
+                    })
                     .collect();
                 tg.send_message(chat_id, &lines.join("\n")).await?;
             }
@@ -378,7 +437,12 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
                 if skills.is_empty() {
                     tg.send_message(chat_id, "No skills yet.").await?;
                 } else {
-                    let lines: Vec<String> = skills.iter().map(|k| format!("{} <b>{}</b> – {}", if k.enabled { "•" } else { "○" }, k.name, esc(&k.description))).collect();
+                    let lines: Vec<String> = skills
+                        .iter()
+                        .map(|k| {
+                            format!("{} <b>{}</b> – {}", if k.enabled { "•" } else { "○" }, k.name, esc(&k.description))
+                        })
+                        .collect();
                     tg.send_long(chat_id, &lines.join("\n")).await?;
                 }
             }
@@ -387,11 +451,23 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
                 let a = state.db.agent(&s.agent_id).await?;
                 let n = state.db.message_count(&s.id).await.unwrap_or(0);
                 let cfg = state.provider_config().await?;
-                tg.send_message(chat_id, &format!("Agent: <b>@{}</b>\nSession: <code>{}</code> ({n} messages)\nModel: {} via {}\nBusy: {}", a.map(|a| a.handle).unwrap_or_default(), s.id, esc(&cfg.model), cfg.kind, state.is_running(&s.id))).await?;
+                tg.send_message(
+                    chat_id,
+                    &format!(
+                        "Agent: <b>@{}</b>\nSession: <code>{}</code> ({n} messages)\nModel: {} via {}\nBusy: {}",
+                        a.map(|a| a.handle).unwrap_or_default(),
+                        s.id,
+                        esc(&cfg.model),
+                        cfg.kind,
+                        state.is_running(&s.id)
+                    ),
+                )
+                .await?;
             }
             "stop" => {
                 let s = session_for_chat(&state, chat_id, false).await?;
-                tg.send_message(chat_id, if state.cancel_turn(&s.id) { "Stopping." } else { "Nothing is running." }).await?;
+                tg.send_message(chat_id, if state.cancel_turn(&s.id) { "Stopping." } else { "Nothing is running." })
+                    .await?;
             }
             _ => {
                 tg.send_message(chat_id, "Unknown command. /help").await?;
@@ -451,12 +527,17 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
                 }
                 if !buf.is_empty() && last_edit.elapsed() >= EDIT_INTERVAL && buf != last_sent {
                     let html = markdown_to_html(&buf);
-                    let shown = if buf.chars().count() > MAX_MESSAGE - 50 { clamp(&html) } else { format!("{html} ▍") };
+                    let shown =
+                        if buf.chars().count() > MAX_MESSAGE - 50 { clamp(&html) } else { format!("{html} ▍") };
                     match message_id {
                         None => {
-                            if let Ok(id) = tg.send_message(chat_id, &shown).await { message_id = Some(id); }
+                            if let Ok(id) = tg.send_message(chat_id, &shown).await {
+                                message_id = Some(id);
+                            }
                         }
-                        Some(id) => { let _ = tg.edit_message(chat_id, id, &shown).await; }
+                        Some(id) => {
+                            let _ = tg.edit_message(chat_id, id, &shown).await;
+                        }
                     }
                     last_sent = buf.clone();
                     last_edit = tokio::time::Instant::now();
@@ -469,10 +550,18 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
     let (streamed, message_id) = streamer.await.unwrap_or_default();
     match result {
         Ok(r) => {
-            let final_text = if r.text.trim().is_empty() { r.error.clone().unwrap_or_else(|| "(no answer)".into()) } else { r.text.clone() };
+            let final_text = if r.text.trim().is_empty() {
+                r.error.clone().unwrap_or_else(|| "(no answer)".into())
+            } else {
+                r.text.clone()
+            };
             let html = markdown_to_html(&final_text);
             match message_id {
-                Some(id) if streamed == final_text || final_text.starts_with(&streamed) || streamed.starts_with(&final_text) => {
+                Some(id)
+                    if streamed == final_text
+                        || final_text.starts_with(&streamed)
+                        || streamed.starts_with(&final_text) =>
+                {
                     if html.chars().count() <= MAX_MESSAGE {
                         let _ = tg.edit_message(chat_id, id, &html).await;
                     } else {
@@ -505,7 +594,9 @@ mod tests {
 
     #[test]
     fn markdown_renders_telegram_html() {
-        let html = markdown_to_html("# Title\nHello **bold** and `code` <tag>\n```\nlet x = 1 < 2;\n```\n- item [link](https://x.y)");
+        let html = markdown_to_html(
+            "# Title\nHello **bold** and `code` <tag>\n```\nlet x = 1 < 2;\n```\n- item [link](https://x.y)",
+        );
         assert!(html.contains("<b>Title</b>"));
         assert!(html.contains("<b>bold</b>"));
         assert!(html.contains("<code>code</code>"));

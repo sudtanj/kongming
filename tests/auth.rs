@@ -23,7 +23,8 @@ async fn protected_routes_require_a_valid_session() {
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
 
     // Wrong password.
-    let r = within(app.plain.post(app.url("/api/auth/login")).json(&json!({"password": "wrong"})).send()).await.unwrap();
+    let r =
+        within(app.plain.post(app.url("/api/auth/login")).json(&json!({"password": "wrong"})).send()).await.unwrap();
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
 
     // Correct password: token in the body and a Set-Cookie header.
@@ -93,9 +94,10 @@ async fn public_routes_work_without_a_cookie() {
 
     // With an error from the authorization server it redirects back to the UI.
     let no_redirect = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
-    let r = within(no_redirect.get(app.url("/api/mcp/oauth/callback?error=access_denied&error_description=nope")).send())
-        .await
-        .unwrap();
+    let r =
+        within(no_redirect.get(app.url("/api/mcp/oauth/callback?error=access_denied&error_description=nope")).send())
+            .await
+            .unwrap();
     assert!(r.status().is_redirection(), "status {}", r.status());
     let loc = r.headers().get("location").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     assert!(loc.contains("oauth=error"), "location: {loc}");

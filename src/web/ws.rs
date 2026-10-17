@@ -79,11 +79,15 @@ pub async fn handle_frame(state: &Shared, text: &str) -> Option<Value> {
             }
             let sess = match state.db.session(&session_id).await {
                 Ok(Some(s)) => s,
-                Ok(None) => return Some(json!({"type": "error", "requestId": request_id, "message": "session not found"})),
+                Ok(None) => {
+                    return Some(json!({"type": "error", "requestId": request_id, "message": "session not found"}))
+                }
                 Err(e) => return Some(json!({"type": "error", "requestId": request_id, "message": format!("{e:#}")})),
             };
             if state.is_running(&session_id) {
-                return Some(json!({"type": "error", "requestId": request_id, "sessionId": session_id, "message": "a reply is already in progress"}));
+                return Some(
+                    json!({"type": "error", "requestId": request_id, "sessionId": session_id, "message": "a reply is already in progress"}),
+                );
             }
             let st = state.clone();
             tokio::spawn(async move {
@@ -95,7 +99,9 @@ pub async fn handle_frame(state: &Shared, text: &str) -> Option<Value> {
         }
         "stop" => {
             let session_id = v.get("sessionId").and_then(Value::as_str).unwrap_or("");
-            Some(json!({"type": "stopped", "requestId": request_id, "sessionId": session_id, "stopped": state.cancel_turn(session_id)}))
+            Some(
+                json!({"type": "stopped", "requestId": request_id, "sessionId": session_id, "stopped": state.cancel_turn(session_id)}),
+            )
         }
         "ping" => Some(json!({"type": "pong", "requestId": request_id})),
         _ => Some(json!({"type": "error", "requestId": request_id, "message": format!("unknown frame type '{kind}'")})),

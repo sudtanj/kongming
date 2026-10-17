@@ -122,13 +122,15 @@ async fn management_cycles_are_rejected() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(str_of(&body, "error").contains("cycle"), "{body}");
 
-    let (status, body) = app.put_raw(&format!("/api/agents/{researcher_id}"), json!({"managerId": researcher_id})).await;
+    let (status, body) =
+        app.put_raw(&format!("/api/agents/{researcher_id}"), json!({"managerId": researcher_id})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(str_of(&body, "error").contains("itself"), "{body}");
 
     // Three levels: default -> researcher -> intern; default may not report to intern.
     let intern = app.post("/api/agents", json!({"handle": "intern", "managerId": researcher_id})).await;
-    let (status, _) = app.put_raw(&format!("/api/agents/{}", default.id), json!({"managerId": str_of(&intern, "id")})).await;
+    let (status, _) =
+        app.put_raw(&format!("/api/agents/{}", default.id), json!({"managerId": str_of(&intern, "id")})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     // Removing the manager works, and the structure is unchanged otherwise.
@@ -209,7 +211,8 @@ async fn manager_delegates_to_a_report() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn delegation_is_refused_outside_the_structure() {
-    let app = spawn_app(vec![tool_call("delegate_task", json!({"agent": "stranger", "task": "x"})), text("fine")]).await;
+    let app =
+        spawn_app(vec![tool_call("delegate_task", json!({"agent": "stranger", "task": "x"})), text("fine")]).await;
     app.disable_reflection().await;
     let default = app.default_agent().await;
     create_researcher(&app, &default.id).await;

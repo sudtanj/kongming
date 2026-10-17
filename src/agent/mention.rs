@@ -90,7 +90,9 @@ mod tests {
 
     #[test]
     fn parses_all_kinds() {
-        let m = parse("@Researcher please use @skill:deploy-notes and @session:abc12 context, cc @mcp:github and email a@b.com");
+        let m = parse(
+            "@Researcher please use @skill:deploy-notes and @session:abc12 context, cc @mcp:github and email a@b.com",
+        );
         assert_eq!(m.handles, vec!["researcher"]);
         assert_eq!(m.skills, vec!["deploy-notes"]);
         assert_eq!(m.sessions, vec!["abc12"]);

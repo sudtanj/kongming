@@ -115,7 +115,9 @@ fn s<'a>(args: &'a Value, k: &str) -> &'a str {
 }
 
 fn strings(v: Option<&Value>) -> Vec<String> {
-    v.and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).collect()).unwrap_or_default()
+    v.and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).collect())
+        .unwrap_or_default()
 }
 
 /// Run a built-in tool. `None` means the name is not a built-in.
@@ -176,17 +178,34 @@ async fn skill_manage(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
                     }
                 };
                 let was_new = existing.is_none();
-                let saved = ctx.state.db.save_skill(name, &description, &body, &tags, "agent", Some(&ctx.agent.id)).await?;
+                let saved =
+                    ctx.state.db.save_skill(name, &description, &body, &tags, "agent", Some(&ctx.agent.id)).await?;
                 let ikind = if was_new { "skill_created" } else { "skill_updated" };
-                let note = format!("{} skill `{}` (v{}): {}", if was_new { "Created" } else { "Updated" }, saved.name, saved.version, description);
-                ctx.state.db.log_improvement(Some(&ctx.agent.id), Some(&ctx.session.id), ikind, Some(&saved.id), &note).await?;
-                ctx.state.emit(Event::Improvement { kind: ikind.into(), note: note.clone(), agent_id: Some(ctx.agent.id.clone()) });
+                let note = format!(
+                    "{} skill `{}` (v{}): {}",
+                    if was_new { "Created" } else { "Updated" },
+                    saved.name,
+                    saved.version,
+                    description
+                );
+                ctx.state
+                    .db
+                    .log_improvement(Some(&ctx.agent.id), Some(&ctx.session.id), ikind, Some(&saved.id), &note)
+                    .await?;
+                ctx.state.emit(Event::Improvement {
+                    kind: ikind.into(),
+                    note: note.clone(),
+                    agent_id: Some(ctx.agent.id.clone()),
+                });
                 report.push(note);
             }
             "delete" => {
                 ctx.state.db.delete_skill(name).await?;
                 let note = format!("Deleted skill `{name}`");
-                ctx.state.db.log_improvement(Some(&ctx.agent.id), Some(&ctx.session.id), "skill_deleted", None, &note).await?;
+                ctx.state
+                    .db
+                    .log_improvement(Some(&ctx.agent.id), Some(&ctx.session.id), "skill_deleted", None, &note)
+                    .await?;
                 report.push(note);
             }
             other => bail!("unknown op '{other}' (create|update|delete)"),
@@ -216,11 +235,24 @@ async fn memory(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
             let m = ctx
                 .state
                 .db
-                .save_memory(if shared { None } else { Some(&ctx.agent.id) }, kind, content, &strings(args.get("keywords")), args.get("importance").and_then(Value::as_i64).unwrap_or(2))
+                .save_memory(
+                    if shared { None } else { Some(&ctx.agent.id) },
+                    kind,
+                    content,
+                    &strings(args.get("keywords")),
+                    args.get("importance").and_then(Value::as_i64).unwrap_or(2),
+                )
                 .await?;
             let note = format!("Remembered [{}]: {}", m.kind, m.content);
-            ctx.state.db.log_improvement(Some(&ctx.agent.id), Some(&ctx.session.id), "memory_saved", Some(&m.id), &note).await?;
-            ctx.state.emit(Event::Improvement { kind: "memory_saved".into(), note, agent_id: Some(ctx.agent.id.clone()) });
+            ctx.state
+                .db
+                .log_improvement(Some(&ctx.agent.id), Some(&ctx.session.id), "memory_saved", Some(&m.id), &note)
+                .await?;
+            ctx.state.emit(Event::Improvement {
+                kind: "memory_saved".into(),
+                note,
+                agent_id: Some(ctx.agent.id.clone()),
+            });
             Ok(format!("saved memory {}", m.id))
         }
         "search" => {
@@ -296,7 +328,10 @@ async fn web_fetch(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
         bail!("only http(s) urls are allowed");
     }
     if let Some(host) = parsed.host_str() {
-        if host == "localhost" || host.ends_with(".local") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| !is_public_ip(&ip)) {
+        if host == "localhost"
+            || host.ends_with(".local")
+            || host.parse::<std::net::IpAddr>().is_ok_and(|ip| !is_public_ip(&ip))
+        {
             bail!("refusing to fetch a private address");
         }
     }
@@ -319,8 +354,19 @@ async fn web_fetch(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
 
 fn is_public_ip(ip: &std::net::IpAddr) -> bool {
     match ip {
-        std::net::IpAddr::V4(v4) => !(v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified() || v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1])),
-        std::net::IpAddr::V6(v6) => !(v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80),
+        std::net::IpAddr::V4(v4) => {
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1]))
+        }
+        std::net::IpAddr::V6(v6) => {
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                || (v6.segments()[0] & 0xffc0) == 0xfe80)
+        }
     }
 }
 
@@ -349,7 +395,16 @@ pub fn html_to_text(html: &str) -> String {
             }
             let end = html[i..].find('>').map(|p| i + p + 1).unwrap_or(bytes.len());
             let tag = &lower[i..end];
-            if tag.starts_with("<br") || tag.starts_with("<p") || tag.starts_with("</p") || tag.starts_with("<div") || tag.starts_with("</div") || tag.starts_with("<li") || tag.starts_with("<h") || tag.starts_with("</h") || tag.starts_with("<tr") {
+            if tag.starts_with("<br")
+                || tag.starts_with("<p")
+                || tag.starts_with("</p")
+                || tag.starts_with("<div")
+                || tag.starts_with("</div")
+                || tag.starts_with("<li")
+                || tag.starts_with("<h")
+                || tag.starts_with("</h")
+                || tag.starts_with("<tr")
+            {
                 out.push('\n');
             } else if tag.starts_with("<td") || tag.starts_with("<th") {
                 out.push(' ');
@@ -421,8 +476,21 @@ async fn delegate(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
         bail!("@{handle} does not report to you; you can only delegate to your direct reports");
     }
     let context = s(args, "context").trim().to_string();
-    ctx.state.emit(Event::Status { session_id: ctx.session.id.clone(), turn_id: ctx.turn_id.to_string(), text: format!("Delegating to @{}", target.handle) });
-    crate::agent::run_delegation(ctx.state.clone(), ctx.agent.clone(), target, ctx.session.clone(), task, context, ctx.depth + 1).await
+    ctx.state.emit(Event::Status {
+        session_id: ctx.session.id.clone(),
+        turn_id: ctx.turn_id.to_string(),
+        text: format!("Delegating to @{}", target.handle),
+    });
+    crate::agent::run_delegation(
+        ctx.state.clone(),
+        ctx.agent.clone(),
+        target,
+        ctx.session.clone(),
+        task,
+        context,
+        ctx.depth + 1,
+    )
+    .await
 }
 
 #[cfg(test)]

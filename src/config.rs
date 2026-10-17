@@ -92,7 +92,16 @@ mod tests {
 
     #[test]
     fn parses_minimal_args() {
-        let c = Config::from_args(["kongming", "--turso-url", "libsql://x.turso.io", "--turso-token", "t", "--telegram-allowed-users", "1, 22,x"]).unwrap();
+        let c = Config::from_args([
+            "kongming",
+            "--turso-url",
+            "libsql://x.turso.io",
+            "--turso-token",
+            "t",
+            "--telegram-allowed-users",
+            "1, 22,x",
+        ])
+        .unwrap();
         assert_eq!(c.port, 18800);
         assert_eq!(c.telegram_allowed(), vec![1, 22]);
         assert_eq!(c.workers, 1);

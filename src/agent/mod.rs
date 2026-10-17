@@ -82,7 +82,13 @@ fn history_to_chat(session: &Session, msgs: &[Message]) -> Vec<ChatMessage> {
 
 /// Compact older history into the session summary when the estimate exceeds
 /// the budget. Keeps the most recent messages verbatim.
-async fn maybe_compact(state: &Shared, session: &mut Session, msgs: &[Message], provider_cfg: &llm::ProviderConfig, model: &str) -> Result<()> {
+async fn maybe_compact(
+    state: &Shared,
+    session: &mut Session,
+    msgs: &[Message],
+    provider_cfg: &llm::ProviderConfig,
+    model: &str,
+) -> Result<()> {
     let chat = history_to_chat(session, msgs);
     let total: usize = chat.iter().map(llm::estimate_message_tokens).sum();
     if total < state.cfg.context_tokens {
@@ -111,8 +117,11 @@ async fn maybe_compact(state: &Shared, session: &mut Session, msgs: &[Message], 
         for p in &m.parts {
             match p {
                 Part::Text { text } => transcript.push_str(&format!("[{}] {}\n", m.role, text)),
-                Part::ToolCall { name, args, .. } => transcript.push_str(&format!("[tool call] {name} {}\n", crate::mcp::truncate(&args.to_string(), 300))),
-                Part::ToolResult { name, content, .. } => transcript.push_str(&format!("[tool result {name}] {}\n", crate::mcp::truncate(content, 600))),
+                Part::ToolCall { name, args, .. } => transcript
+                    .push_str(&format!("[tool call] {name} {}\n", crate::mcp::truncate(&args.to_string(), 300))),
+                Part::ToolResult { name, content, .. } => {
+                    transcript.push_str(&format!("[tool result {name}] {}\n", crate::mcp::truncate(content, 600)))
+                }
                 Part::Thinking { .. } => {}
             }
         }
@@ -228,7 +237,11 @@ async fn model_round(
     for attempt in 0..LLM_RETRIES {
         if attempt > 0 {
             let wait = Duration::from_millis(800 * (1 << attempt));
-            state.emit(Event::Status { session_id: session_id.into(), turn_id: turn_id.into(), text: format!("Model request failed, retrying ({}/{})", attempt + 1, LLM_RETRIES) });
+            state.emit(Event::Status {
+                session_id: session_id.into(),
+                turn_id: turn_id.into(),
+                text: format!("Model request failed, retrying ({}/{})", attempt + 1, LLM_RETRIES),
+            });
             tokio::time::sleep(wait).await;
         }
         let stream = match provider.stream(req.clone()).await {
@@ -256,7 +269,13 @@ async fn model_round(
     Err(last_err.unwrap_or_else(|| anyhow!("model unavailable")))
 }
 
-async fn consume(state: &Shared, session_id: &str, turn_id: &str, mut stream: llm::EventStream, cancel: &AtomicBool) -> Result<(Vec<Part>, String, (i64, i64))> {
+async fn consume(
+    state: &Shared,
+    session_id: &str,
+    turn_id: &str,
+    mut stream: llm::EventStream,
+    cancel: &AtomicBool,
+) -> Result<(Vec<Part>, String, (i64, i64))> {
     let mut text = String::new();
     let mut thinking = String::new();
     let mut parts: Vec<Part> = Vec::new();
@@ -264,7 +283,9 @@ async fn consume(state: &Shared, session_id: &str, turn_id: &str, mut stream: ll
     let mut usage = (0i64, 0i64);
     let mut streamed_any = false;
     loop {
-        let item = tokio::time::timeout(Duration::from_secs(180), stream.next()).await.map_err(|_| anyhow!("model stream stalled"))?;
+        let item = tokio::time::timeout(Duration::from_secs(180), stream.next())
+            .await
+            .map_err(|_| anyhow!("model stream stalled"))?;
         let Some(item) = item else { break };
         if cancel.load(Ordering::Relaxed) {
             return Err(anyhow!("cancelled"));
@@ -329,7 +350,13 @@ pub async fn run_turn(state: Shared, mut session: Session, user_text: String, op
     result
 }
 
-async fn run_turn_inner(state: &Shared, session: &mut Session, user_text: String, opts: &TurnOptions, cancel: &AtomicBool) -> Result<TurnResult> {
+async fn run_turn_inner(
+    state: &Shared,
+    session: &mut Session,
+    user_text: String,
+    opts: &TurnOptions,
+    cancel: &AtomicBool,
+) -> Result<TurnResult> {
     let turn_id = new_id();
     let mentions = mention::parse(&user_text);
     let (agent, switched) = match &opts.agent_override {
@@ -343,7 +370,8 @@ async fn run_turn_inner(state: &Shared, session: &mut Session, user_text: String
 
     // Persist the user message (cleaned of structured mentions).
     let stored_text = if mentions.text.is_empty() { user_text.clone() } else { mentions.text.clone() };
-    let user_msg = state.db.append_message(&session.id, "user", &[Part::Text { text: stored_text.clone() }], None).await?;
+    let user_msg =
+        state.db.append_message(&session.id, "user", &[Part::Text { text: stored_text.clone() }], None).await?;
     state.emit(Event::UserMessage { session_id: session.id.clone(), message: user_msg.clone() });
     if session.title.trim().is_empty() {
         let title = auto_title(&stored_text);
@@ -359,7 +387,12 @@ async fn run_turn_inner(state: &Shared, session: &mut Session, user_text: String
         Ok(p) => p,
         Err(e) => {
             let msg = format!("{e:#}");
-            state.emit(Event::TurnEnd { session_id: session.id.clone(), turn_id, stop_reason: "error".into(), error: Some(msg.clone()) });
+            state.emit(Event::TurnEnd {
+                session_id: session.id.clone(),
+                turn_id,
+                stop_reason: "error".into(),
+                error: Some(msg.clone()),
+            });
             return Err(e);
         }
     };
@@ -435,24 +468,52 @@ async fn run_turn_inner(state: &Shared, session: &mut Session, user_text: String
                 final_text = text.clone();
             }
         }
-        chat.push(ChatMessage { role: "assistant".into(), parts: parts.iter().filter(|p| !matches!(p, Part::Thinking { .. })).cloned().collect() });
+        chat.push(ChatMessage {
+            role: "assistant".into(),
+            parts: parts.iter().filter(|p| !matches!(p, Part::Thinking { .. })).cloned().collect(),
+        });
 
         if calls.is_empty() {
             stop_reason = stop;
             break;
         }
         used_tools = true;
-        let ctx = ToolCtx { state, agent: &plan.agent, session, turn_id: &turn_id, depth: opts.depth, can_delegate: plan.can_delegate };
+        let ctx = ToolCtx {
+            state,
+            agent: &plan.agent,
+            session,
+            turn_id: &turn_id,
+            depth: opts.depth,
+            can_delegate: plan.can_delegate,
+        };
         let mut results = Vec::with_capacity(calls.len());
         for (id, name, args) in &calls {
-            state.emit(Event::ToolCall { session_id: session.id.clone(), turn_id: turn_id.clone(), id: id.clone(), name: name.clone(), args: args.clone() });
+            state.emit(Event::ToolCall {
+                session_id: session.id.clone(),
+                turn_id: turn_id.clone(),
+                id: id.clone(),
+                name: name.clone(),
+                args: args.clone(),
+            });
             let part = if cancel.load(Ordering::Relaxed) {
-                Part::ToolResult { id: id.clone(), name: name.clone(), content: "cancelled by user".into(), is_error: true }
+                Part::ToolResult {
+                    id: id.clone(),
+                    name: name.clone(),
+                    content: "cancelled by user".into(),
+                    is_error: true,
+                }
             } else {
                 execute_tool(&ctx, id, name, args).await
             };
             if let Part::ToolResult { content, is_error, .. } = &part {
-                state.emit(Event::ToolResult { session_id: session.id.clone(), turn_id: turn_id.clone(), id: id.clone(), name: name.clone(), content: content.clone(), is_error: *is_error });
+                state.emit(Event::ToolResult {
+                    session_id: session.id.clone(),
+                    turn_id: turn_id.clone(),
+                    id: id.clone(),
+                    name: name.clone(),
+                    content: content.clone(),
+                    is_error: *is_error,
+                });
             }
             results.push(part);
         }
@@ -462,17 +523,30 @@ async fn run_turn_inner(state: &Shared, session: &mut Session, user_text: String
         if iteration + 1 == state.cfg.max_iterations {
             stop_reason = "max_iterations".into();
             let note = "I reached the step limit for one turn. Tell me to continue and I will pick up where I stopped.";
-            let m = state.db.append_message(&session.id, "assistant", &[Part::Text { text: note.into() }], Some(&plan.agent.id)).await?;
+            let m = state
+                .db
+                .append_message(&session.id, "assistant", &[Part::Text { text: note.into() }], Some(&plan.agent.id))
+                .await?;
             state.emit(Event::Message { session_id: session.id.clone(), message: m });
             final_text = note.into();
         }
     }
 
-    state.emit(Event::TurnEnd { session_id: session.id.clone(), turn_id: turn_id.clone(), stop_reason: stop_reason.clone(), error: error.clone() });
+    state.emit(Event::TurnEnd {
+        session_id: session.id.clone(),
+        turn_id: turn_id.clone(),
+        stop_reason: stop_reason.clone(),
+        error: error.clone(),
+    });
     let _ = state.db.touch_session(&session.id).await;
 
     // Reflection: learn from turns that did real work.
-    if !opts.no_reflect && plan.agent.self_improve && error.is_none() && stop_reason != "cancelled" && should_reflect(state, &session.id, used_tools, &stored_text).await {
+    if !opts.no_reflect
+        && plan.agent.self_improve
+        && error.is_none()
+        && stop_reason != "cancelled"
+        && should_reflect(state, &session.id, used_tools, &stored_text).await
+    {
         let st = state.clone();
         let agent = plan.agent.clone();
         let sess = session.clone();
@@ -491,12 +565,22 @@ async fn run_turn_inner(state: &Shared, session: &mut Session, user_text: String
 /// Reflect after tool-using turns, after user corrections, and every few
 /// plain turns, without burning tokens on every message.
 async fn should_reflect(state: &Shared, session_id: &str, used_tools: bool, user_text: &str) -> bool {
-    let enabled = state.db.setting("reflection").await.ok().flatten().and_then(|v| v.get("enabled").and_then(Value::as_bool)).unwrap_or(true);
+    let enabled = state
+        .db
+        .setting("reflection")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.get("enabled").and_then(Value::as_bool))
+        .unwrap_or(true);
     if !enabled {
         return false;
     }
     let lower = user_text.to_ascii_lowercase();
-    let correction = ["wrong", "not that", "actually", "instead", "no,", "remember", "always", "never", "from now on", "prefer"].iter().any(|k| lower.contains(k));
+    let correction =
+        ["wrong", "not that", "actually", "instead", "no,", "remember", "always", "never", "from now on", "prefer"]
+            .iter()
+            .any(|k| lower.contains(k));
     if used_tools || correction {
         return true;
     }
@@ -512,20 +596,38 @@ async fn reflect(state: Shared, agent: Agent, session: Session, model: String) -
     for m in &msgs {
         for p in &m.parts {
             match p {
-                Part::Text { text } => transcript.push_str(&format!("[{}] {}\n", m.role, crate::mcp::truncate(text, 2000))),
-                Part::ToolCall { name, args, .. } => transcript.push_str(&format!("[tool call] {name} {}\n", crate::mcp::truncate(&args.to_string(), 400))),
-                Part::ToolResult { name, content, is_error, .. } => {
-                    transcript.push_str(&format!("[tool result {name}{}] {}\n", if *is_error { " ERROR" } else { "" }, crate::mcp::truncate(content, 500)))
+                Part::Text { text } => {
+                    transcript.push_str(&format!("[{}] {}\n", m.role, crate::mcp::truncate(text, 2000)))
                 }
+                Part::ToolCall { name, args, .. } => transcript
+                    .push_str(&format!("[tool call] {name} {}\n", crate::mcp::truncate(&args.to_string(), 400))),
+                Part::ToolResult { name, content, is_error, .. } => transcript.push_str(&format!(
+                    "[tool result {name}{}] {}\n",
+                    if *is_error { " ERROR" } else { "" },
+                    crate::mcp::truncate(content, 500)
+                )),
                 Part::Thinking { .. } => {}
             }
         }
     }
     let system = prompt::reflection_prompt(&agent, &skills);
-    let specs: Vec<ToolSpec> = tools::builtin_specs(&agent, false).into_iter().filter(|t| t.name == "skill_manage" || t.name == "memory" || t.name == "skill_view").collect();
+    let specs: Vec<ToolSpec> = tools::builtin_specs(&agent, false)
+        .into_iter()
+        .filter(|t| t.name == "skill_manage" || t.name == "memory" || t.name == "skill_view")
+        .collect();
     let (pcfg, provider) = state.provider().await?;
-    let mut chat = vec![ChatMessage::text("user", format!("Conversation to review:\n\n{}", crate::mcp::truncate(&transcript, 30_000)))];
-    let ctx = ToolCtx { state: &state, agent: &agent, session: &session, turn_id: "reflection", depth: 1, can_delegate: false };
+    let mut chat = vec![ChatMessage::text(
+        "user",
+        format!("Conversation to review:\n\n{}", crate::mcp::truncate(&transcript, 30_000)),
+    )];
+    let ctx = ToolCtx {
+        state: &state,
+        agent: &agent,
+        session: &session,
+        turn_id: "reflection",
+        depth: 1,
+        can_delegate: false,
+    };
     for _ in 0..4 {
         let req = ChatRequest {
             model: model.clone(),
@@ -585,11 +687,21 @@ pub fn run_delegation(
             text.push_str(&format!("\n\nContext:\n{}", context.trim()));
         }
         let child_id = child.id.clone();
-        let res = run_turn(state.clone(), child, text, TurnOptions { depth, no_reflect: true, agent_override: Some(to.clone()) }).await;
+        let res = run_turn(
+            state.clone(),
+            child,
+            text,
+            TurnOptions { depth, no_reflect: true, agent_override: Some(to.clone()) },
+        )
+        .await;
         match res {
             Ok(r) => {
                 let status = if r.error.is_some() { "failed" } else { "done" };
-                let summary = if r.text.trim().is_empty() { r.error.clone().unwrap_or_else(|| "(no answer)".into()) } else { r.text.clone() };
+                let summary = if r.text.trim().is_empty() {
+                    r.error.clone().unwrap_or_else(|| "(no answer)".into())
+                } else {
+                    r.text.clone()
+                };
                 state.db.finish_task(&task_row.id, Some(&child_id), status, &summary).await?;
                 Ok(format!("Result from @{} (session {}):\n{}", to.handle, child_id, summary))
             }
@@ -644,7 +756,6 @@ pub async fn ensure_default_agent(state: &Shared) -> Result<Agent> {
 pub fn can_delegate(agent: &Agent, team: &[Agent]) -> bool {
     team.iter().any(|t| t.manager_id.as_deref() == Some(agent.id.as_str()))
 }
-
 
 /// Starter skills, inserted once when the skills table is empty. They teach
 /// the agents how to write good skills and how to work as a team.
@@ -707,7 +818,15 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         };
-        let m = |seq: i64, role: &str| Message { id: seq.to_string(), session_id: "s".into(), seq, role: role.into(), parts: vec![Part::Text { text: "t".into() }], agent_id: None, created_at: 0 };
+        let m = |seq: i64, role: &str| Message {
+            id: seq.to_string(),
+            session_id: "s".into(),
+            seq,
+            role: role.into(),
+            parts: vec![Part::Text { text: "t".into() }],
+            agent_id: None,
+            created_at: 0,
+        };
         let chat = history_to_chat(&s, &[m(1, "user"), m(2, "assistant"), m(3, "system"), m(4, "user")]);
         assert_eq!(chat.len(), 3);
         assert!(chat[0].parts.iter().any(|p| matches!(p, Part::Text { text } if text.contains("earlier"))));

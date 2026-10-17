@@ -47,9 +47,17 @@ pub async fn discover(http: &reqwest::Client, server_url: &str, scope_hint: Opti
     let mut auth_server = server_origin.clone();
     let mut resource = Some(server_url.trim_end_matches('/').to_string());
     let mut scope = scope_hint.map(str::to_string);
-    for candidate in [format!("{server_origin}/.well-known/oauth-protected-resource{path}"), format!("{server_origin}/.well-known/oauth-protected-resource")] {
+    for candidate in [
+        format!("{server_origin}/.well-known/oauth-protected-resource{path}"),
+        format!("{server_origin}/.well-known/oauth-protected-resource"),
+    ] {
         if let Some(meta) = get_json(http, &candidate).await {
-            if let Some(a) = meta.get("authorization_servers").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_str) {
+            if let Some(a) = meta
+                .get("authorization_servers")
+                .and_then(Value::as_array)
+                .and_then(|a| a.first())
+                .and_then(Value::as_str)
+            {
                 auth_server = a.trim_end_matches('/').to_string();
             }
             if let Some(r) = meta.get("resource").and_then(Value::as_str) {
@@ -113,7 +121,9 @@ pub async fn register(http: &reqwest::Client, st: &mut OAuthState, redirect_uri:
     if st.client_id.as_deref().is_some_and(|c| !c.is_empty()) {
         return Ok(());
     }
-    let Some(reg) = st.registration_endpoint.clone() else { bail!("no registration endpoint and no client id configured") };
+    let Some(reg) = st.registration_endpoint.clone() else {
+        bail!("no registration endpoint and no client id configured")
+    };
     let body = serde_json::json!({
         "client_name": "kongming",
         "redirect_uris": [redirect_uri],
@@ -125,7 +135,10 @@ pub async fn register(http: &reqwest::Client, st: &mut OAuthState, redirect_uri:
     let status = r.status();
     let v: Value = r.json().await.unwrap_or(Value::Null);
     if !status.is_success() {
-        bail!("client registration failed (HTTP {status}): {}", v.get("error_description").or(v.get("error")).map(|e| e.to_string()).unwrap_or_default());
+        bail!(
+            "client registration failed (HTTP {status}): {}",
+            v.get("error_description").or(v.get("error")).map(|e| e.to_string()).unwrap_or_default()
+        );
     }
     st.client_id = v.get("client_id").and_then(Value::as_str).map(str::to_string);
     st.client_secret = v.get("client_secret").and_then(Value::as_str).map(str::to_string);
@@ -174,7 +187,8 @@ async fn token_request(http: &reqwest::Client, st: &mut OAuthState, form: &HashM
             v.get("error_description").or(v.get("error")).and_then(Value::as_str).unwrap_or("no detail")
         );
     }
-    let access = v.get("access_token").and_then(Value::as_str).ok_or_else(|| anyhow!("token reply had no access_token"))?;
+    let access =
+        v.get("access_token").and_then(Value::as_str).ok_or_else(|| anyhow!("token reply had no access_token"))?;
     st.access_token = Some(access.to_string());
     if let Some(rt) = v.get("refresh_token").and_then(Value::as_str) {
         st.refresh_token = Some(rt.to_string());
@@ -186,7 +200,13 @@ async fn token_request(http: &reqwest::Client, st: &mut OAuthState, form: &HashM
     Ok(())
 }
 
-pub async fn exchange_code(http: &reqwest::Client, st: &mut OAuthState, code: &str, redirect_uri: &str, verifier: &str) -> Result<()> {
+pub async fn exchange_code(
+    http: &reqwest::Client,
+    st: &mut OAuthState,
+    code: &str,
+    redirect_uri: &str,
+    verifier: &str,
+) -> Result<()> {
     let mut form: HashMap<&str, String> = HashMap::new();
     form.insert("grant_type", "authorization_code".into());
     form.insert("code", code.into());
@@ -255,9 +275,11 @@ mod tests {
     #[test]
     fn refresh_logic() {
         assert!(needs_refresh(&OAuthState::default()));
-        let fresh = OAuthState { access_token: Some("t".into()), expires_at: Some(now_ms() + 3_600_000), ..Default::default() };
+        let fresh =
+            OAuthState { access_token: Some("t".into()), expires_at: Some(now_ms() + 3_600_000), ..Default::default() };
         assert!(!needs_refresh(&fresh));
-        let stale = OAuthState { access_token: Some("t".into()), expires_at: Some(now_ms() + 10_000), ..Default::default() };
+        let stale =
+            OAuthState { access_token: Some("t".into()), expires_at: Some(now_ms() + 10_000), ..Default::default() };
         assert!(needs_refresh(&stale));
     }
 

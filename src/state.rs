@@ -19,19 +19,65 @@ use crate::mcp::McpManager;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum Event {
-    UserMessage { session_id: String, message: Message },
-    TurnStart { session_id: String, turn_id: String, agent: Agent },
-    Delta { session_id: String, turn_id: String, text: String },
-    ReasoningDelta { session_id: String, turn_id: String, text: String },
-    ToolCall { session_id: String, turn_id: String, id: String, name: String, args: Value },
-    ToolResult { session_id: String, turn_id: String, id: String, name: String, content: String, is_error: bool },
+    UserMessage {
+        session_id: String,
+        message: Message,
+    },
+    TurnStart {
+        session_id: String,
+        turn_id: String,
+        agent: Agent,
+    },
+    Delta {
+        session_id: String,
+        turn_id: String,
+        text: String,
+    },
+    ReasoningDelta {
+        session_id: String,
+        turn_id: String,
+        text: String,
+    },
+    ToolCall {
+        session_id: String,
+        turn_id: String,
+        id: String,
+        name: String,
+        args: Value,
+    },
+    ToolResult {
+        session_id: String,
+        turn_id: String,
+        id: String,
+        name: String,
+        content: String,
+        is_error: bool,
+    },
     /// A persisted assistant message (one per LLM round, so tool-call rounds
     /// also appear in history).
-    Message { session_id: String, message: Message },
-    Status { session_id: String, turn_id: String, text: String },
-    TurnEnd { session_id: String, turn_id: String, stop_reason: String, error: Option<String> },
-    SessionUpdated { session: Session },
-    Improvement { kind: String, note: String, agent_id: Option<String> },
+    Message {
+        session_id: String,
+        message: Message,
+    },
+    Status {
+        session_id: String,
+        turn_id: String,
+        text: String,
+    },
+    TurnEnd {
+        session_id: String,
+        turn_id: String,
+        stop_reason: String,
+        error: Option<String>,
+    },
+    SessionUpdated {
+        session: Session,
+    },
+    Improvement {
+        kind: String,
+        note: String,
+        agent_id: Option<String>,
+    },
 }
 
 impl Event {
@@ -190,7 +236,9 @@ impl AppState {
         let mut ids = self.cfg.telegram_allowed();
         if let Ok(Some(v)) = self.db.setting("telegram").await {
             if let Some(list) = v.get("allowedUsers").and_then(Value::as_array) {
-                ids.extend(list.iter().filter_map(|x| x.as_i64().or_else(|| x.as_str().and_then(|s| s.trim().parse().ok()))));
+                ids.extend(
+                    list.iter().filter_map(|x| x.as_i64().or_else(|| x.as_str().and_then(|s| s.trim().parse().ok()))),
+                );
             }
         }
         ids.sort_unstable();

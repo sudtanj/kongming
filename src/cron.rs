@@ -54,7 +54,13 @@ pub fn next_run(schedule: &str, after_ms: i64) -> Option<i64> {
     for (f, (lo, hi)) in fields.iter().zip([(0, 59), (0, 23), (1, 31), (1, 12), (0, 6)]) {
         field_matches(f, lo, lo, hi)?;
     }
-    let start = time::OffsetDateTime::from_unix_timestamp(after_ms / 1000).ok()?.replace_second(0).ok()?.replace_nanosecond(0).ok()? + time::Duration::minutes(1);
+    let start = time::OffsetDateTime::from_unix_timestamp(after_ms / 1000)
+        .ok()?
+        .replace_second(0)
+        .ok()?
+        .replace_nanosecond(0)
+        .ok()?
+        + time::Duration::minutes(1);
     let mut t = start;
     for _ in 0..(366 * 24 * 60) {
         let dow = t.weekday().number_days_from_sunday() as u32;
@@ -91,7 +97,13 @@ pub async fn run_job(state: Shared, job: CronJob) {
             return;
         }
     };
-    let res = agent::run_turn(state.clone(), session, job.prompt.clone(), TurnOptions { depth: 1, no_reflect: false, agent_override: Some(agent) }).await;
+    let res = agent::run_turn(
+        state.clone(),
+        session,
+        job.prompt.clone(),
+        TurnOptions { depth: 1, no_reflect: false, agent_override: Some(agent) },
+    )
+    .await;
     let status = match &res {
         Ok(r) if r.error.is_none() => "ok".to_string(),
         Ok(r) => format!("error: {}", r.error.clone().unwrap_or_default()),
@@ -129,7 +141,14 @@ pub async fn run(state: Shared) {
                 Some(n) => n <= now,
                 None => {
                     // Never scheduled: compute and store, don't run now.
-                    let _ = state.db.mark_cron_run(&job.id, next_run(&job.schedule, now), job.last_status.as_deref().unwrap_or("scheduled")).await;
+                    let _ = state
+                        .db
+                        .mark_cron_run(
+                            &job.id,
+                            next_run(&job.schedule, now),
+                            job.last_status.as_deref().unwrap_or("scheduled"),
+                        )
+                        .await;
                     false
                 }
             };

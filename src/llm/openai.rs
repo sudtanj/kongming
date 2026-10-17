@@ -127,97 +127,105 @@ impl Provider for OpenAi {
         }
         let events = sse::events(resp.bytes_stream());
         let state = (BTreeMap::<u64, PendingCall>::new(), String::new(), false);
-        let out = futures_util::stream::unfold((events.boxed(), state, false), |(mut src, mut state, mut finished)| async move {
-            loop {
-                if finished {
-                    return None;
-                }
-                let Some(item) = src.next().await else {
-                    finished = true;
-                    // Stream ended without a finish marker: still flush tool calls and a Done.
-                    let mut batch = flush_calls(&mut state.0);
-                    batch.push(LlmEvent::Done { stop_reason: if state.1.is_empty() { "stop".into() } else { state.1.clone() } });
-                    return Some((batch.into_iter().map(Ok).collect::<Vec<_>>(), (src, state, finished)));
-                };
-                let ev = match item {
-                    Ok(ev) => ev,
-                    Err(e) => {
-                        finished = true;
-                        return Some((vec![Err(e)], (src, state, finished)));
+        let out = futures_util::stream::unfold(
+            (events.boxed(), state, false),
+            |(mut src, mut state, mut finished)| async move {
+                loop {
+                    if finished {
+                        return None;
                     }
-                };
-                if ev.data.trim() == "[DONE]" {
-                    finished = true;
-                    let mut batch = flush_calls(&mut state.0);
-                    let reason = if state.1.is_empty() { "stop".to_string() } else { state.1.clone() };
-                    batch.push(LlmEvent::Done { stop_reason: reason });
+                    let Some(item) = src.next().await else {
+                        finished = true;
+                        // Stream ended without a finish marker: still flush tool calls and a Done.
+                        let mut batch = flush_calls(&mut state.0);
+                        batch.push(LlmEvent::Done {
+                            stop_reason: if state.1.is_empty() { "stop".into() } else { state.1.clone() },
+                        });
+                        return Some((batch.into_iter().map(Ok).collect::<Vec<_>>(), (src, state, finished)));
+                    };
+                    let ev = match item {
+                        Ok(ev) => ev,
+                        Err(e) => {
+                            finished = true;
+                            return Some((vec![Err(e)], (src, state, finished)));
+                        }
+                    };
+                    if ev.data.trim() == "[DONE]" {
+                        finished = true;
+                        let mut batch = flush_calls(&mut state.0);
+                        let reason = if state.1.is_empty() { "stop".to_string() } else { state.1.clone() };
+                        batch.push(LlmEvent::Done { stop_reason: reason });
+                        return Some((batch.into_iter().map(Ok).collect(), (src, state, finished)));
+                    }
+                    let v: Value = match serde_json::from_str(&ev.data) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    if let Some(err) = v.get("error") {
+                        finished = true;
+                        return Some((
+                            vec![Err(anyhow!("llm error: {}", short_error(&err.to_string())))],
+                            (src, state, finished),
+                        ));
+                    }
+                    let mut batch = Vec::new();
+                    if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
+                        batch.push(LlmEvent::Usage {
+                            prompt_tokens: u.get("prompt_tokens").and_then(Value::as_i64).unwrap_or(0),
+                            completion_tokens: u.get("completion_tokens").and_then(Value::as_i64).unwrap_or(0),
+                        });
+                    }
+                    if let Some(choice) = v.get("choices").and_then(Value::as_array).and_then(|c| c.first()) {
+                        if let Some(delta) = choice.get("delta") {
+                            if let Some(t) = delta.get("content").and_then(Value::as_str) {
+                                if !t.is_empty() {
+                                    batch.push(LlmEvent::TextDelta(t.to_string()));
+                                }
+                            }
+                            for key in ["reasoning_content", "reasoning"] {
+                                if let Some(t) = delta.get(key).and_then(Value::as_str) {
+                                    if !t.is_empty() {
+                                        batch.push(LlmEvent::ThinkingDelta(t.to_string()));
+                                    }
+                                }
+                            }
+                            if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
+                                for c in calls {
+                                    let idx = c.get("index").and_then(Value::as_u64).unwrap_or(0);
+                                    let slot = state.0.entry(idx).or_default();
+                                    if let Some(id) = c.get("id").and_then(Value::as_str) {
+                                        slot.id = id.to_string();
+                                    }
+                                    if let Some(f) = c.get("function") {
+                                        if let Some(n) = f.get("name").and_then(Value::as_str) {
+                                            slot.name.push_str(n);
+                                        }
+                                        if let Some(a) = f.get("arguments").and_then(Value::as_str) {
+                                            slot.args.push_str(a);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+                            state.1 = match reason {
+                                "tool_calls" | "function_call" => "tool_use".into(),
+                                "length" => "length".into(),
+                                "content_filter" => "refusal".into(),
+                                _ => "stop".into(),
+                            };
+                            if state.1 == "tool_use" || !state.0.is_empty() {
+                                batch.extend(flush_calls(&mut state.0));
+                            }
+                        }
+                    }
+                    if batch.is_empty() {
+                        continue;
+                    }
                     return Some((batch.into_iter().map(Ok).collect(), (src, state, finished)));
                 }
-                let v: Value = match serde_json::from_str(&ev.data) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                if let Some(err) = v.get("error") {
-                    finished = true;
-                    return Some((vec![Err(anyhow!("llm error: {}", short_error(&err.to_string())))], (src, state, finished)));
-                }
-                let mut batch = Vec::new();
-                if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
-                    batch.push(LlmEvent::Usage {
-                        prompt_tokens: u.get("prompt_tokens").and_then(Value::as_i64).unwrap_or(0),
-                        completion_tokens: u.get("completion_tokens").and_then(Value::as_i64).unwrap_or(0),
-                    });
-                }
-                if let Some(choice) = v.get("choices").and_then(Value::as_array).and_then(|c| c.first()) {
-                    if let Some(delta) = choice.get("delta") {
-                        if let Some(t) = delta.get("content").and_then(Value::as_str) {
-                            if !t.is_empty() {
-                                batch.push(LlmEvent::TextDelta(t.to_string()));
-                            }
-                        }
-                        for key in ["reasoning_content", "reasoning"] {
-                            if let Some(t) = delta.get(key).and_then(Value::as_str) {
-                                if !t.is_empty() {
-                                    batch.push(LlmEvent::ThinkingDelta(t.to_string()));
-                                }
-                            }
-                        }
-                        if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
-                            for c in calls {
-                                let idx = c.get("index").and_then(Value::as_u64).unwrap_or(0);
-                                let slot = state.0.entry(idx).or_default();
-                                if let Some(id) = c.get("id").and_then(Value::as_str) {
-                                    slot.id = id.to_string();
-                                }
-                                if let Some(f) = c.get("function") {
-                                    if let Some(n) = f.get("name").and_then(Value::as_str) {
-                                        slot.name.push_str(n);
-                                    }
-                                    if let Some(a) = f.get("arguments").and_then(Value::as_str) {
-                                        slot.args.push_str(a);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
-                        state.1 = match reason {
-                            "tool_calls" | "function_call" => "tool_use".into(),
-                            "length" => "length".into(),
-                            "content_filter" => "refusal".into(),
-                            _ => "stop".into(),
-                        };
-                        if state.1 == "tool_use" || !state.0.is_empty() {
-                            batch.extend(flush_calls(&mut state.0));
-                        }
-                    }
-                }
-                if batch.is_empty() {
-                    continue;
-                }
-                return Some((batch.into_iter().map(Ok).collect(), (src, state, finished)));
-            }
-        })
+            },
+        )
         .flat_map(futures_util::stream::iter);
         Ok(Box::pin(out))
     }
@@ -243,7 +251,9 @@ fn flush_calls(calls: &mut BTreeMap<u64, PendingCall>) -> Vec<LlmEvent> {
 pub fn short_error(text: &str) -> String {
     let t = text.trim();
     if let Ok(v) = serde_json::from_str::<Value>(t) {
-        if let Some(m) = v.pointer("/error/message").and_then(Value::as_str).or_else(|| v.get("message").and_then(Value::as_str)) {
+        if let Some(m) =
+            v.pointer("/error/message").and_then(Value::as_str).or_else(|| v.get("message").and_then(Value::as_str))
+        {
             return m.chars().take(400).collect();
         }
     }
@@ -268,7 +278,12 @@ mod tests {
                 },
                 ChatMessage {
                     role: "tool".into(),
-                    parts: vec![Part::ToolResult { id: "c1".into(), name: "f".into(), content: "ok".into(), is_error: false }],
+                    parts: vec![Part::ToolResult {
+                        id: "c1".into(),
+                        name: "f".into(),
+                        content: "ok".into(),
+                        is_error: false,
+                    }],
                 },
             ],
             tools: vec![ToolSpec { name: "f".into(), description: "d".into(), parameters: json!({"type": "object"}) }],

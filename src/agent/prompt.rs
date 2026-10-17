@@ -73,7 +73,13 @@ Give each delegate everything it needs in `task` and `context`; it cannot see th
 and sanity-check them before presenting them as fact. Do simple things yourself.\n",
             );
         }
-        let others: Vec<&Agent> = p.team.iter().filter(|t| t.id != a.id && !reports.iter().any(|r| r.id == t.id) && Some(t.id.as_str()) != a.manager_id.as_deref()).collect();
+        let others: Vec<&Agent> = p
+            .team
+            .iter()
+            .filter(|t| {
+                t.id != a.id && !reports.iter().any(|r| r.id == t.id) && Some(t.id.as_str()) != a.manager_id.as_deref()
+            })
+            .collect();
         if !others.is_empty() {
             s.push_str("Other agents (for the user's reference; you cannot delegate to them):\n");
             for o in others {
@@ -123,7 +129,10 @@ preferences with `memory`. Fix a skill that misled you instead of working around
     // 6. Tools / MCP
     if !p.mcp_servers.is_empty() {
         s.push_str("# Connected services\n");
-        s.push_str(&format!("MCP tools are available from: {}. Their tool names start with `mcp__`.\n\n", p.mcp_servers.join(", ")));
+        s.push_str(&format!(
+            "MCP tools are available from: {}. Their tool names start with `mcp__`.\n\n",
+            p.mcp_servers.join(", ")
+        ));
     }
 
     // 7. Channel conventions

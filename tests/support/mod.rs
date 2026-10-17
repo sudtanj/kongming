@@ -272,7 +272,10 @@ async fn llm_handler(State(st): State<Arc<LlmInner>>, Json(body): Json<Value>) -
 
 impl LlmMock {
     pub async fn start(replies: Vec<ScriptedReply>) -> LlmMock {
-        let inner = Arc::new(LlmInner { script: Arc::new(Mutex::new(replies.into_iter().collect())), requests: Mutex::new(Vec::new()) });
+        let inner = Arc::new(LlmInner {
+            script: Arc::new(Mutex::new(replies.into_iter().collect())),
+            requests: Mutex::new(Vec::new()),
+        });
         let router = Router::new().route("/v1/chat/completions", post(llm_handler)).with_state(inner.clone());
         let url = serve(router).await;
         LlmMock { url, inner }
@@ -320,7 +323,9 @@ pub fn system_prompt(req: &Value) -> String {
 pub fn tool_names(req: &Value) -> Vec<String> {
     req.get("tools")
         .and_then(Value::as_array)
-        .map(|t| t.iter().filter_map(|x| x.pointer("/function/name").and_then(Value::as_str).map(str::to_string)).collect())
+        .map(|t| {
+            t.iter().filter_map(|x| x.pointer("/function/name").and_then(Value::as_str).map(str::to_string)).collect()
+        })
         .unwrap_or_default()
 }
 
@@ -338,7 +343,8 @@ pub struct McpMock {
 }
 
 fn mcp_json(v: Value) -> Response {
-    (StatusCode::OK, [("mcp-session-id", "test-session"), ("content-type", "application/json")], v.to_string()).into_response()
+    (StatusCode::OK, [("mcp-session-id", "test-session"), ("content-type", "application/json")], v.to_string())
+        .into_response()
 }
 
 async fn mcp_handler(State(st): State<Arc<McpInner>>, headers: HeaderMap, body: String) -> Response {
@@ -368,7 +374,9 @@ async fn mcp_handler(State(st): State<Arc<McpInner>>, headers: HeaderMap, body: 
         "tools/call" => {
             let name = v.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
             if name != "echo" {
-                return mcp_json(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32602, "message": format!("unknown tool {name}")}}));
+                return mcp_json(
+                    json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32602, "message": format!("unknown tool {name}")}}),
+                );
             }
             let text = v.pointer("/params/arguments/text").and_then(Value::as_str).unwrap_or("");
             mcp_json(json!({"jsonrpc": "2.0", "id": id, "result": {
@@ -376,7 +384,9 @@ async fn mcp_handler(State(st): State<Arc<McpInner>>, headers: HeaderMap, body: 
                 "isError": false
             }}))
         }
-        other => mcp_json(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": format!("method not found: {other}")}})),
+        other => mcp_json(
+            json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": format!("method not found: {other}")}}),
+        ),
     }
 }
 

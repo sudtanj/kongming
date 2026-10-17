@@ -52,7 +52,8 @@ pub struct McpTool {
 }
 
 pub fn slug(name: &str) -> String {
-    let s: String = name.trim().to_ascii_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    let s: String =
+        name.trim().to_ascii_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
     s.trim_matches('_').to_string()
 }
 
@@ -92,13 +93,24 @@ impl McpManager {
             if let Some(list) = s.tools.as_array() {
                 for t in list {
                     let Some(name) = t.get("name").and_then(Value::as_str) else { continue };
-                    let desc = t.get("description").and_then(Value::as_str).unwrap_or("").chars().take(1024).collect::<String>();
-                    let mut schema = t.get("inputSchema").cloned().unwrap_or_else(|| json!({"type": "object", "properties": {}}));
+                    let desc = t
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .chars()
+                        .take(1024)
+                        .collect::<String>();
+                    let mut schema =
+                        t.get("inputSchema").cloned().unwrap_or_else(|| json!({"type": "object", "properties": {}}));
                     if !schema.is_object() {
                         schema = json!({"type": "object", "properties": {}});
                     }
                     out.push(McpTool {
-                        spec: ToolSpec { name: tool_name(&s.name, name), description: format!("[{}] {}", s.name, desc), parameters: schema },
+                        spec: ToolSpec {
+                            name: tool_name(&s.name, name),
+                            description: format!("[{}] {}", s.name, desc),
+                            parameters: schema,
+                        },
                         server_id: s.id.clone(),
                         server_name: s.name.clone(),
                         tool: name.to_string(),
@@ -138,7 +150,12 @@ impl McpManager {
         }
     }
 
-    fn apply_headers(&self, mut req: reqwest::RequestBuilder, s: &McpServer, auth: &Option<String>) -> reqwest::RequestBuilder {
+    fn apply_headers(
+        &self,
+        mut req: reqwest::RequestBuilder,
+        s: &McpServer,
+        auth: &Option<String>,
+    ) -> reqwest::RequestBuilder {
         if let Some(a) = auth {
             req = req.header("authorization", a);
         }
@@ -157,12 +174,19 @@ impl McpManager {
     async fn http_rpc(&self, s: &McpServer, auth: &Option<String>, body: Value, expect_reply: bool) -> Result<Value> {
         let id = body.get("id").cloned();
         let session = self.sessions.lock().get(&s.id).cloned();
-        let mut req = self.http.post(&s.url).header("accept", "application/json, text/event-stream").header("content-type", "application/json");
+        let mut req = self
+            .http
+            .post(&s.url)
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json");
         if let Some(sid) = &session {
             req = req.header("mcp-session-id", sid);
         }
         let req = self.apply_headers(req, s, auth).json(&body);
-        let resp = tokio::time::timeout(CALL_TIMEOUT, req.send()).await.map_err(|_| anyhow!("mcp request timed out"))?.context("mcp request failed")?;
+        let resp = tokio::time::timeout(CALL_TIMEOUT, req.send())
+            .await
+            .map_err(|_| anyhow!("mcp request timed out"))?
+            .context("mcp request failed")?;
         let status = resp.status();
         if let Some(sid) = resp.headers().get("mcp-session-id").and_then(|v| v.to_str().ok()) {
             self.sessions.lock().insert(s.id.clone(), sid.to_string());
@@ -187,12 +211,17 @@ impl McpManager {
             let mut stream = resp.bytes_stream();
             let deadline = tokio::time::Instant::now() + CALL_TIMEOUT;
             loop {
-                let chunk = tokio::time::timeout_at(deadline, stream.next()).await.map_err(|_| anyhow!("mcp stream timed out"))?;
+                let chunk = tokio::time::timeout_at(deadline, stream.next())
+                    .await
+                    .map_err(|_| anyhow!("mcp stream timed out"))?;
                 let Some(chunk) = chunk else { bail!("mcp stream ended without a reply") };
                 let chunk = chunk.context("mcp stream read failed")?;
                 for ev in parser.feed(&chunk) {
                     if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
-                        if v.get("id").is_some() && v.get("id") == id.as_ref() && (v.get("result").is_some() || v.get("error").is_some()) {
+                        if v.get("id").is_some()
+                            && v.get("id") == id.as_ref()
+                            && (v.get("result").is_some() || v.get("error").is_some())
+                        {
                             return Ok(v);
                         }
                     }
@@ -214,7 +243,10 @@ impl McpManager {
             }
         }
         let req = self.apply_headers(self.http.get(&s.url).header("accept", "text/event-stream"), s, auth);
-        let resp = tokio::time::timeout(Duration::from_secs(20), req.send()).await.map_err(|_| anyhow!("sse connect timed out"))?.context("sse connect failed")?;
+        let resp = tokio::time::timeout(Duration::from_secs(20), req.send())
+            .await
+            .map_err(|_| anyhow!("sse connect timed out"))?
+            .context("sse connect failed")?;
         let status = resp.status();
         if status.as_u16() == 401 || status.as_u16() == 403 {
             bail!("unauthorized (HTTP {status})");
@@ -224,7 +256,11 @@ impl McpManager {
         }
         let base = url::Url::parse(&s.url).context("invalid server url")?;
         let (tx, rx) = oneshot::channel::<String>();
-        let conn = Arc::new(SseConn { post_url: Mutex::new(String::new()), pending: Mutex::new(HashMap::new()), alive: std::sync::atomic::AtomicBool::new(true) });
+        let conn = Arc::new(SseConn {
+            post_url: Mutex::new(String::new()),
+            pending: Mutex::new(HashMap::new()),
+            alive: std::sync::atomic::AtomicBool::new(true),
+        });
         // The POST endpoint arrives as the first event; the reader task owns the
         // stream and resolves replies by JSON-RPC id.
         let reader = conn.clone();
@@ -235,7 +271,10 @@ impl McpManager {
             while let Some(Ok(chunk)) = stream.next().await {
                 for ev in parser.feed(&chunk) {
                     if ev.event == "endpoint" {
-                        let url = base.join(ev.data.trim()).map(|u| u.to_string()).unwrap_or_else(|_| ev.data.trim().to_string());
+                        let url = base
+                            .join(ev.data.trim())
+                            .map(|u| u.to_string())
+                            .unwrap_or_else(|_| ev.data.trim().to_string());
                         *reader.post_url.lock() = url.clone();
                         if let Some(t) = tx.take() {
                             let _ = t.send(url);
@@ -252,7 +291,10 @@ impl McpManager {
             reader.alive.store(false, Ordering::Relaxed);
             reader.pending.lock().clear();
         });
-        tokio::time::timeout(Duration::from_secs(20), rx).await.map_err(|_| anyhow!("sse: no endpoint event"))?.map_err(|_| anyhow!("sse: stream closed"))?;
+        tokio::time::timeout(Duration::from_secs(20), rx)
+            .await
+            .map_err(|_| anyhow!("sse: no endpoint event"))?
+            .map_err(|_| anyhow!("sse: stream closed"))?;
         self.sse.lock().insert(s.id.clone(), conn.clone());
         Ok(conn)
     }
@@ -268,7 +310,13 @@ impl McpManager {
             }
             _ => None,
         };
-        let req = self.apply_headers(self.http.post(conn.post_url.lock().clone()).header("content-type", "application/json"), s, auth).json(&body);
+        let req = self
+            .apply_headers(
+                self.http.post(conn.post_url.lock().clone()).header("content-type", "application/json"),
+                s,
+                auth,
+            )
+            .json(&body);
         let resp = req.send().await.context("sse post failed")?;
         if !resp.status().is_success() {
             if let Some(id) = id {
@@ -277,7 +325,10 @@ impl McpManager {
             bail!("sse post HTTP {}", resp.status());
         }
         match rx {
-            Some(rx) => tokio::time::timeout(CALL_TIMEOUT, rx).await.map_err(|_| anyhow!("mcp call timed out"))?.map_err(|_| anyhow!("sse connection closed")),
+            Some(rx) => tokio::time::timeout(CALL_TIMEOUT, rx)
+                .await
+                .map_err(|_| anyhow!("mcp call timed out"))?
+                .map_err(|_| anyhow!("sse connection closed")),
             None => Ok(Value::Null),
         }
     }
@@ -286,7 +337,11 @@ impl McpManager {
         let auth = self.auth_header(s).await?;
         let id = self.rpc_id();
         let body = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        let reply = if s.transport == "sse" { self.sse_rpc(s, &auth, body, true).await? } else { self.http_rpc(s, &auth, body, true).await? };
+        let reply = if s.transport == "sse" {
+            self.sse_rpc(s, &auth, body, true).await?
+        } else {
+            self.http_rpc(s, &auth, body, true).await?
+        };
         if let Some(err) = reply.get("error") {
             bail!("{} failed: {}", method, err.get("message").and_then(Value::as_str).unwrap_or("unknown error"));
         }
@@ -351,7 +406,11 @@ impl McpManager {
             }
             Err(e) => {
                 let msg = format!("{e:#}");
-                let status = if msg.contains("unauthorized") || msg.contains("not authorized") { "unauthorized" } else { "error" };
+                let status = if msg.contains("unauthorized") || msg.contains("not authorized") {
+                    "unauthorized"
+                } else {
+                    "error"
+                };
                 self.db.set_mcp_status(server_id, status, Some(&msg), None).await?;
                 Err(e)
             }
@@ -370,7 +429,9 @@ impl McpManager {
         let mut result = self.rpc(&s, "tools/call", params.clone()).await;
         if let Err(e) = &result {
             let msg = format!("{e:#}");
-            if msg.contains("session expired") || (s.transport != "sse" && !self.sessions.lock().contains_key(server_id)) {
+            if msg.contains("session expired")
+                || (s.transport != "sse" && !self.sessions.lock().contains_key(server_id))
+            {
                 self.initialize(&s).await?;
                 result = self.rpc(&s, "tools/call", params).await;
             }
@@ -396,7 +457,8 @@ impl McpManager {
     }
 
     pub async fn finish_oauth(&self, state: &str, code: &str) -> Result<String> {
-        let (server_id, verifier, redirect_uri) = self.pending_oauth.lock().remove(state).ok_or_else(|| anyhow!("unknown or expired OAuth state"))?;
+        let (server_id, verifier, redirect_uri) =
+            self.pending_oauth.lock().remove(state).ok_or_else(|| anyhow!("unknown or expired OAuth state"))?;
         let s = self.db.mcp_server(&server_id).await?.ok_or_else(|| anyhow!("unknown MCP server"))?;
         let mut st: OAuthState = s.oauth.clone();
         oauth::exchange_code(&self.http, &mut st, code, &redirect_uri, &verifier).await?;
@@ -407,7 +469,12 @@ impl McpManager {
 
     pub async fn clear_oauth(&self, server_id: &str) -> Result<()> {
         let s = self.db.mcp_server(server_id).await?.ok_or_else(|| anyhow!("unknown MCP server"))?;
-        let st = OAuthState { client_id: s.oauth.client_id.clone(), client_secret: s.oauth.client_secret.clone(), scope: s.oauth.scope.clone(), ..Default::default() };
+        let st = OAuthState {
+            client_id: s.oauth.client_id.clone(),
+            client_secret: s.oauth.client_secret.clone(),
+            scope: s.oauth.scope.clone(),
+            ..Default::default()
+        };
         self.db.set_mcp_oauth(server_id, &st).await?;
         self.db.set_mcp_status(server_id, "unauthorized", None, None).await?;
         Ok(())
@@ -430,7 +497,6 @@ impl McpManager {
     }
 }
 
-
 /// Flatten an MCP `tools/call` result into text for the model.
 pub fn render_result(r: &Value) -> (String, bool) {
     let is_error = r.get("isError").and_then(Value::as_bool).unwrap_or(false);
@@ -439,13 +505,17 @@ pub fn render_result(r: &Value) -> (String, bool) {
         for item in items {
             match item.get("type").and_then(Value::as_str) {
                 Some("text") => out.push_str(item.get("text").and_then(Value::as_str).unwrap_or("")),
-                Some("image") => out.push_str(&format!("[image {}]", item.get("mimeType").and_then(Value::as_str).unwrap_or(""))),
+                Some("image") => {
+                    out.push_str(&format!("[image {}]", item.get("mimeType").and_then(Value::as_str).unwrap_or("")))
+                }
                 Some("audio") => out.push_str("[audio]"),
                 Some("resource") => {
                     let res = item.get("resource").cloned().unwrap_or(Value::Null);
                     out.push_str(res.get("text").and_then(Value::as_str).unwrap_or("[resource]"));
                 }
-                Some("resource_link") => out.push_str(&format!("[link {}]", item.get("uri").and_then(Value::as_str).unwrap_or(""))),
+                Some("resource_link") => {
+                    out.push_str(&format!("[link {}]", item.get("uri").and_then(Value::as_str).unwrap_or("")))
+                }
                 _ => out.push_str(&item.to_string()),
             }
             out.push('\n');
@@ -491,7 +561,9 @@ mod tests {
 
     #[test]
     fn renders_text_and_error_results() {
-        let (t, e) = render_result(&json!({"content": [{"type": "text", "text": "a"}, {"type": "image", "mimeType": "image/png"}], "isError": true}));
+        let (t, e) = render_result(
+            &json!({"content": [{"type": "text", "text": "a"}, {"type": "image", "mimeType": "image/png"}], "isError": true}),
+        );
         assert_eq!(t, "a\n[image image/png]");
         assert!(e);
         let (t, e) = render_result(&json!({"structuredContent": {"x": 1}}));

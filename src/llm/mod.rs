@@ -56,10 +56,19 @@ pub enum LlmEvent {
     TextDelta(String),
     ThinkingDelta(String),
     /// A complete tool call (arguments fully assembled).
-    ToolCall { id: String, name: String, args: Value },
-    Usage { prompt_tokens: i64, completion_tokens: i64 },
+    ToolCall {
+        id: String,
+        name: String,
+        args: Value,
+    },
+    Usage {
+        prompt_tokens: i64,
+        completion_tokens: i64,
+    },
     /// "stop" | "tool_use" | "length" | "refusal" | other
-    Done { stop_reason: String },
+    Done {
+        stop_reason: String,
+    },
 }
 
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<LlmEvent>> + Send>>;

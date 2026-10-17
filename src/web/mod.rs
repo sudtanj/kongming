@@ -20,7 +20,10 @@ const LOGO_SVG: &str = include_str!("../../web/logo.svg");
 fn asset(body: &'static str, content_type: &'static str, cache: bool) -> Response {
     let mut r = (StatusCode::OK, body).into_response();
     r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-    r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(if cache { "public, max-age=3600" } else { "no-cache" }));
+    r.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(if cache { "public, max-age=3600" } else { "no-cache" }),
+    );
     r
 }
 
@@ -46,7 +49,10 @@ async fn manifest() -> Response {
 async fn health(axum::extract::State(state): axum::extract::State<Shared>) -> Response {
     match state.db.turso.ping().await {
         Ok(ms) => axum::Json(serde_json::json!({"ok": true, "tursoMs": ms})).into_response(),
-        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({"ok": false, "error": format!("{e:#}")}))).into_response(),
+        Err(e) => {
+            (StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({"ok": false, "error": format!("{e:#}")})))
+                .into_response()
+        }
     }
 }
 

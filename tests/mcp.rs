@@ -14,7 +14,10 @@ async fn register_refresh_and_call_an_mcp_server() {
     app.disable_reflection().await;
 
     let created = app
-        .post("/api/mcp", json!({"name": "Echo", "url": mcp.endpoint(), "transport": "http", "authType": "token", "token": "good"}))
+        .post(
+            "/api/mcp",
+            json!({"name": "Echo", "url": mcp.endpoint(), "transport": "http", "authType": "token", "token": "good"}),
+        )
         .await;
     let id = str_of(&created, "id").to_string();
     assert_eq!(created["hasToken"], json!(true));
@@ -70,7 +73,7 @@ async fn register_refresh_and_call_an_mcp_server() {
     let sys = system_prompt(&reqs[0]);
     assert!(sys.contains("# Connected services"), "{sys}");
     assert!(sys.contains("Echo"), "{sys}");
-    let last_call = mcp.calls().into_iter().filter(|c| c["method"] == json!("tools/call")).next_back().unwrap();
+    let last_call = mcp.calls().into_iter().rfind(|c| c["method"] == json!("tools/call")).unwrap();
     assert_eq!(last_call["params"]["arguments"]["text"], json!("via agent"));
 
     // Disabling the server hides its tools and refresh reports it.
@@ -87,7 +90,10 @@ async fn wrong_token_is_reported_as_unauthorized() {
     let mcp = McpMock::start(true).await;
     let app = spawn_app(vec![]).await;
     let created = app
-        .post("/api/mcp", json!({"name": "Bad", "url": mcp.endpoint(), "transport": "http", "authType": "token", "token": "nope"}))
+        .post(
+            "/api/mcp",
+            json!({"name": "Bad", "url": mcp.endpoint(), "transport": "http", "authType": "token", "token": "nope"}),
+        )
         .await;
     let id = str_of(&created, "id").to_string();
     let refreshed = app.post(&format!("/api/mcp/{id}/refresh"), json!({})).await;
@@ -116,7 +122,8 @@ async fn server_without_auth_and_input_validation() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     let (status, body) = app.post_raw("/api/mcp", json!({"name": "Stdio", "url": "stdio://local"})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    let (status, body) = app.post_raw("/api/mcp", json!({"name": "X", "url": mcp.endpoint(), "transport": "grpc"})).await;
+    let (status, body) =
+        app.post_raw("/api/mcp", json!({"name": "X", "url": mcp.endpoint(), "transport": "grpc"})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
     let created = app.post("/api/mcp", json!({"name": "Open", "url": mcp.endpoint()})).await;

@@ -51,7 +51,9 @@ fn s<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
     v.get(k).and_then(Value::as_str).map(str::trim).filter(|x| !x.is_empty())
 }
 fn strings(v: &Value, k: &str) -> Option<Vec<String>> {
-    v.get(k).and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).collect())
+    v.get(k)
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).collect())
 }
 
 // ------------------------------------------------------------------------ auth
@@ -61,12 +63,20 @@ pub async fn auth_status(State(state): State<Shared>, headers: HeaderMap) -> Jso
         || headers
             .get(header::COOKIE)
             .and_then(|v| v.to_str().ok())
-            .and_then(|c| c.split(';').map(str::trim).find_map(|p| p.strip_prefix(&format!("{}=", super::auth::COOKIE)).map(str::to_string)))
+            .and_then(|c| {
+                c.split(';')
+                    .map(str::trim)
+                    .find_map(|p| p.strip_prefix(&format!("{}=", super::auth::COOKIE)).map(str::to_string))
+            })
             .is_some_and(|t| super::auth::verify(&state.secret, &t));
     Json(json!({"authRequired": !state.cfg.password.is_empty(), "authenticated": authed}))
 }
 
-pub async fn login(State(state): State<Shared>, headers: HeaderMap, Json(body): Json<Value>) -> Result<Response, ApiError> {
+pub async fn login(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Response, ApiError> {
     let pw = body.get("password").and_then(Value::as_str).unwrap_or("");
     if !super::auth::password_ok(&state, pw) {
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
@@ -74,7 +84,8 @@ pub async fn login(State(state): State<Shared>, headers: HeaderMap, Json(body): 
     }
     let token = super::auth::issue(&state.secret);
     let secure = headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok()) == Some("https");
-    Ok(([(header::SET_COOKIE, super::auth::cookie_header(&token, secure))], Json(json!({"ok": true, "token": token}))).into_response())
+    Ok(([(header::SET_COOKIE, super::auth::cookie_header(&token, secure))], Json(json!({"ok": true, "token": token})))
+        .into_response())
 }
 
 pub async fn logout() -> Response {
@@ -129,7 +140,12 @@ pub async fn list_sessions(State(state): State<Shared>, Query(q): Query<Limit>) 
 pub async fn create_session(State(state): State<Shared>, body: Option<Json<Value>>) -> R {
     let body = body.map(|b| b.0).unwrap_or(json!({}));
     let agent = match s(&body, "agentId") {
-        Some(id) => state.db.agent(id).await?.or(state.db.agent_by_handle(id).await?).ok_or_else(|| not_found("no such agent"))?,
+        Some(id) => state
+            .db
+            .agent(id)
+            .await?
+            .or(state.db.agent_by_handle(id).await?)
+            .ok_or_else(|| not_found("no such agent"))?,
         None => agent::ensure_default_agent(&state).await?,
     };
     let sess = state.db.create_session(&agent.id, "web", None, None, s(&body, "title").unwrap_or("")).await?;
@@ -150,7 +166,12 @@ pub async fn patch_session(State(state): State<Shared>, Path(id): Path<String>, 
         sess.title = t.to_string();
     }
     if let Some(a) = s(&body, "agentId") {
-        let agent = state.db.agent(a).await?.or(state.db.agent_by_handle(a).await?).ok_or_else(|| not_found("no such agent"))?;
+        let agent = state
+            .db
+            .agent(a)
+            .await?
+            .or(state.db.agent_by_handle(a).await?)
+            .ok_or_else(|| not_found("no such agent"))?;
         state.db.set_session_agent(&id, &agent.id).await?;
         sess.agent_id = agent.id;
     }
@@ -180,7 +201,12 @@ pub struct SendQuery {
     pub wait: Option<bool>,
 }
 
-pub async fn send_message(State(state): State<Shared>, Path(id): Path<String>, Query(q): Query<SendQuery>, Json(body): Json<Value>) -> R {
+pub async fn send_message(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    Query(q): Query<SendQuery>,
+    Json(body): Json<Value>,
+) -> R {
     let text = s(&body, "text").ok_or_else(|| bad("text is required"))?.to_string();
     let sess = state.db.session(&id).await?.ok_or_else(|| not_found("session not found"))?;
     if state.is_running(&id) {
@@ -207,7 +233,13 @@ pub async fn list_agents(State(state): State<Shared>) -> R {
 }
 
 fn normalize_handle(h: &str) -> Result<String, ApiError> {
-    let h: String = h.trim().trim_start_matches('@').to_ascii_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '-' }).collect();
+    let h: String = h
+        .trim()
+        .trim_start_matches('@')
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '-' })
+        .collect();
     if h.is_empty() || h.len() > 32 {
         return Err(bad("handle must be 1-32 letters, digits, '-' or '_'"));
     }
@@ -264,7 +296,12 @@ async fn agent_from_body(state: &Shared, existing: Option<Agent>, body: &Value) 
     if body.get("managerId").is_some() {
         a.manager_id = match s(body, "managerId") {
             Some(m) => {
-                let mgr = state.db.agent(m).await?.or(state.db.agent_by_handle(m).await?).ok_or_else(|| bad("manager not found"))?;
+                let mgr = state
+                    .db
+                    .agent(m)
+                    .await?
+                    .or(state.db.agent_by_handle(m).await?)
+                    .ok_or_else(|| bad("manager not found"))?;
                 if mgr.id == a.id {
                     return Err(bad("an agent cannot manage itself"));
                 }
@@ -316,7 +353,12 @@ pub async fn create_agent(State(state): State<Shared>, Json(body): Json<Value>) 
 }
 
 pub async fn get_agent(State(state): State<Shared>, Path(id): Path<String>) -> R {
-    let a = state.db.agent(&id).await?.or(state.db.agent_by_handle(&id).await?).ok_or_else(|| not_found("agent not found"))?;
+    let a = state
+        .db
+        .agent(&id)
+        .await?
+        .or(state.db.agent_by_handle(&id).await?)
+        .ok_or_else(|| not_found("agent not found"))?;
     Ok(Json(json!(a)))
 }
 
@@ -381,8 +423,16 @@ pub async fn put_skill(State(state): State<Shared>, Path(name): Path<String>, Js
             return Ok(Json(json!(state.db.skill_by_name(&k.name).await?)));
         }
     }
-    let description = s(&body, "description").map(str::to_string).or_else(|| existing.as_ref().map(|e| e.description.clone())).ok_or_else(|| bad("description is required"))?;
-    let skill_body = body.get("body").and_then(Value::as_str).map(str::to_string).or_else(|| existing.as_ref().map(|e| e.body.clone())).ok_or_else(|| bad("body is required"))?;
+    let description = s(&body, "description")
+        .map(str::to_string)
+        .or_else(|| existing.as_ref().map(|e| e.description.clone()))
+        .ok_or_else(|| bad("description is required"))?;
+    let skill_body = body
+        .get("body")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| existing.as_ref().map(|e| e.body.clone()))
+        .ok_or_else(|| bad("body is required"))?;
     let tags = strings(&body, "tags").or_else(|| existing.as_ref().map(|e| e.tags.clone())).unwrap_or_default();
     let saved = state.db.save_skill(&name, &description, &skill_body, &tags, "user", None).await?;
     if let Some(enabled) = body.get("enabled").and_then(Value::as_bool) {
@@ -399,7 +449,8 @@ pub async fn delete_skill(State(state): State<Shared>, Path(name): Path<String>)
 /// Import a SKILL.md document (frontmatter `name`, `description`, `tags`).
 pub async fn import_skill(State(state): State<Shared>, Json(body): Json<Value>) -> R {
     let md = s(&body, "markdown").ok_or_else(|| bad("markdown is required"))?;
-    let (name, description, tags, skill_body) = parse_skill_markdown(md).ok_or_else(|| bad("expected YAML frontmatter with name and description"))?;
+    let (name, description, tags, skill_body) =
+        parse_skill_markdown(md).ok_or_else(|| bad("expected YAML frontmatter with name and description"))?;
     let saved = state.db.save_skill(&name, &description, &skill_body, &tags, "user", None).await?;
     Ok(Json(json!(saved)))
 }
@@ -419,7 +470,14 @@ pub fn parse_skill_markdown(md: &str) -> Option<(String, String, Vec<String>, St
         match k.trim() {
             "name" => name = Some(v.to_string()),
             "description" => description = Some(v.to_string()),
-            "tags" => tags = v.trim_matches(['[', ']']).split(',').map(|t| t.trim().trim_matches('"').to_string()).filter(|t| !t.is_empty()).collect(),
+            "tags" => {
+                tags = v
+                    .trim_matches(['[', ']'])
+                    .split(',')
+                    .map(|t| t.trim().trim_matches('"').to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect()
+            }
             _ => {}
         }
     }
@@ -436,7 +494,13 @@ pub async fn create_memory(State(state): State<Shared>, Json(body): Json<Value>)
     let content = s(&body, "content").ok_or_else(|| bad("content is required"))?;
     let m = state
         .db
-        .save_memory(s(&body, "agentId"), s(&body, "kind").unwrap_or("fact"), content, &strings(&body, "keywords").unwrap_or_default(), body.get("importance").and_then(Value::as_i64).unwrap_or(2))
+        .save_memory(
+            s(&body, "agentId"),
+            s(&body, "kind").unwrap_or("fact"),
+            content,
+            &strings(&body, "keywords").unwrap_or_default(),
+            body.get("importance").and_then(Value::as_i64).unwrap_or(2),
+        )
         .await?;
     Ok(Json(json!(m)))
 }
@@ -578,7 +642,11 @@ async fn redirect_uri(state: &Shared, headers: &HeaderMap) -> String {
         Some(u) => u,
         None => {
             let proto = headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok()).unwrap_or("http");
-            let host = headers.get("x-forwarded-host").or(headers.get(header::HOST)).and_then(|v| v.to_str().ok()).unwrap_or("localhost");
+            let host = headers
+                .get("x-forwarded-host")
+                .or(headers.get(header::HOST))
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("localhost");
             format!("{proto}://{host}")
         }
     };
@@ -609,7 +677,8 @@ pub async fn mcp_oauth_callback(State(state): State<Shared>, Query(q): Query<OAu
     match (q.code, q.state) {
         (Some(code), Some(st)) => match state.mcp.finish_oauth(&st, &code).await {
             Ok(id) => Redirect::to(&format!("/#/settings/mcp?oauth=ok&server={id}")).into_response(),
-            Err(e) => Redirect::to(&format!("/#/settings/mcp?oauth=error&message={}", urlenc(&format!("{e:#}")))).into_response(),
+            Err(e) => Redirect::to(&format!("/#/settings/mcp?oauth=error&message={}", urlenc(&format!("{e:#}"))))
+                .into_response(),
         },
         _ => (StatusCode::BAD_REQUEST, "missing code or state").into_response(),
     }
@@ -695,7 +764,10 @@ pub async fn put_settings(State(state): State<Shared>, Json(body): Json<Value>) 
         }
         if let Some(a) = tg.get("allowedUsers") {
             let ids: Vec<i64> = match a {
-                Value::Array(arr) => arr.iter().filter_map(|x| x.as_i64().or_else(|| x.as_str().and_then(|s| s.trim().parse().ok()))).collect(),
+                Value::Array(arr) => arr
+                    .iter()
+                    .filter_map(|x| x.as_i64().or_else(|| x.as_str().and_then(|s| s.trim().parse().ok())))
+                    .collect(),
                 Value::String(st) => st.split([',', ' ', '\n']).filter_map(|x| x.trim().parse().ok()).collect(),
                 _ => vec![],
             };
@@ -758,13 +830,15 @@ async fn cron_from_body(state: &Shared, existing: Option<CronJob>, body: &Value)
         c.name = n.to_string();
     }
     if let Some(a) = s(body, "agentId") {
-        c.agent_id = state.db.agent(a).await?.or(state.db.agent_by_handle(a).await?).ok_or_else(|| bad("agent not found"))?.id;
+        c.agent_id =
+            state.db.agent(a).await?.or(state.db.agent_by_handle(a).await?).ok_or_else(|| bad("agent not found"))?.id;
     }
     if c.agent_id.is_empty() {
         c.agent_id = agent::ensure_default_agent(state).await?.id;
     }
     if let Some(sch) = s(body, "schedule") {
-        crate::cron::next_run(sch, now_ms()).ok_or_else(|| bad("schedule must be 'every:<minutes>' or a 5-field cron expression"))?;
+        crate::cron::next_run(sch, now_ms())
+            .ok_or_else(|| bad("schedule must be 'every:<minutes>' or a 5-field cron expression"))?;
         c.schedule = sch.to_string();
     }
     if let Some(p) = s(body, "prompt") {
@@ -790,7 +864,8 @@ pub async fn create_cron(State(state): State<Shared>, Json(body): Json<Value>) -
 }
 
 pub async fn update_cron(State(state): State<Shared>, Path(id): Path<String>, Json(body): Json<Value>) -> R {
-    let existing = state.db.cron_jobs().await?.into_iter().find(|c| c.id == id).ok_or_else(|| not_found("job not found"))?;
+    let existing =
+        state.db.cron_jobs().await?.into_iter().find(|c| c.id == id).ok_or_else(|| not_found("job not found"))?;
     let c = cron_from_body(&state, Some(existing), &body).await?;
     state.db.upsert_cron_job(&c).await?;
     Ok(Json(json!(c)))

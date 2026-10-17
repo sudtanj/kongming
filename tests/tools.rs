@@ -76,7 +76,11 @@ async fn skill_manage_creates_a_skill_that_shows_up_in_later_prompts() {
     let msgs = app.messages(&sid).await;
     let tool_msg = find_tool_message(&msgs).expect("tool message");
     assert_eq!(tool_msg["parts"][0]["isError"], json!(false));
-    assert!(str_of(&tool_msg["parts"][0], "content").contains("Created skill `deploy-notes` (v1)"), "{}", tool_msg["parts"][0]);
+    assert!(
+        str_of(&tool_msg["parts"][0], "content").contains("Created skill `deploy-notes` (v1)"),
+        "{}",
+        tool_msg["parts"][0]
+    );
 
     let skills = app.get("/api/skills").await;
     let list = skills.as_array().unwrap();
@@ -124,14 +128,8 @@ async fn skill_manage_creates_a_skill_that_shows_up_in_later_prompts() {
     let versions = detail["versions"].as_array().unwrap();
     assert_eq!(versions.len(), 1);
     assert_eq!(versions[0]["body"], json!("# steps"));
-    let kinds: Vec<String> = app
-        .get("/api/improvements")
-        .await
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|i| str_of(i, "kind").to_string())
-        .collect();
+    let kinds: Vec<String> =
+        app.get("/api/improvements").await.as_array().unwrap().iter().map(|i| str_of(i, "kind").to_string()).collect();
     assert!(kinds.contains(&"skill_updated".to_string()), "{kinds:?}");
 }
 
@@ -175,7 +173,8 @@ async fn memory_tool_saves_and_prompts_include_it() {
 async fn skill_mention_inlines_the_skill_body() {
     let app = spawn_app(vec![text("ship it")]).await;
     app.disable_reflection().await;
-    let saved = app.put("/api/skills/deploy-notes", json!({"description": "when deploying", "body": "# steps\n1. ship"})).await;
+    let saved =
+        app.put("/api/skills/deploy-notes", json!({"description": "when deploying", "body": "# steps\n1. ship"})).await;
     assert_eq!(saved["name"], json!("deploy-notes"));
     assert_eq!(saved["source"], json!("user"));
 
@@ -236,7 +235,11 @@ async fn reflection_runs_after_a_tool_using_turn() {
     let app_ref = &app;
     poll_until("reflection improvement", || async move {
         let list = app_ref.get("/api/improvements").await;
-        let hit = list.as_array().unwrap().iter().any(|i| i["kind"] == json!("reflection") && i["note"] == json!("(no script)"));
+        let hit = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["kind"] == json!("reflection") && i["note"] == json!("(no script)"));
         if hit {
             Some(())
         } else {

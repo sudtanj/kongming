@@ -329,7 +329,9 @@ fn err_text(body: &Value) -> String {
 fn parse_exec(v: &Value) -> Exec {
     Exec {
         affected: v.get("affected_row_count").and_then(Value::as_u64).unwrap_or(0),
-        last_insert_rowid: v.get("last_insert_rowid").and_then(|x| x.as_str().and_then(|s| s.parse().ok()).or_else(|| x.as_i64())),
+        last_insert_rowid: v
+            .get("last_insert_rowid")
+            .and_then(|x| x.as_str().and_then(|s| s.parse().ok()).or_else(|| x.as_i64())),
     }
 }
 
@@ -342,7 +344,11 @@ fn parse_rows(v: &Value) -> Rows {
     let rows = v
         .get("rows")
         .and_then(Value::as_array)
-        .map(|rs| rs.iter().map(|r| r.as_array().map(|cells| cells.iter().map(decode).collect()).unwrap_or_default()).collect())
+        .map(|rs| {
+            rs.iter()
+                .map(|r| r.as_array().map(|cells| cells.iter().map(decode).collect()).unwrap_or_default())
+                .collect()
+        })
         .unwrap_or_default();
     Rows { cols, rows }
 }

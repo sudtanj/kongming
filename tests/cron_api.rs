@@ -26,7 +26,9 @@ async fn create_validate_update_and_delete_jobs() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     let (status, body) = app.post_raw("/api/cron", json!({"name": "NoPrompt", "schedule": "every:5"})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    let (status, body) = app.post_raw("/api/cron", json!({"name": "Ghost", "schedule": "every:5", "prompt": "x", "agentId": "ghost"})).await;
+    let (status, body) = app
+        .post_raw("/api/cron", json!({"name": "Ghost", "schedule": "every:5", "prompt": "x", "agentId": "ghost"}))
+        .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
     // A cron expression is accepted and schedules on a minute boundary.
@@ -42,7 +44,8 @@ async fn create_validate_update_and_delete_jobs() {
     let updated = app.put(&format!("/api/cron/{id}"), json!({"enabled": false})).await;
     assert!(updated["nextRunAt"].is_null());
     assert_eq!(updated["enabled"], json!(false));
-    let updated = app.put(&format!("/api/cron/{id}"), json!({"enabled": true, "schedule": "every:5", "deliverTo": "42"})).await;
+    let updated =
+        app.put(&format!("/api/cron/{id}"), json!({"enabled": true, "schedule": "every:5", "deliverTo": "42"})).await;
     assert!(updated["nextRunAt"].is_number());
     assert_eq!(updated["schedule"], json!("every:5"));
     assert_eq!(updated["deliverTo"], json!("42"));

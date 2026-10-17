@@ -92,29 +92,35 @@ where
     S: Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
 {
     let parser = SseParser::new();
-    futures_util::stream::unfold((bytes.boxed(), parser, std::collections::VecDeque::<SseEvent>::new(), false), |(mut src, mut parser, mut pending, mut done)| async move {
-        loop {
-            if let Some(ev) = pending.pop_front() {
-                return Some((Ok(ev), (src, parser, pending, done)));
-            }
-            if done {
-                return None;
-            }
-            match src.next().await {
-                Some(Ok(chunk)) => pending.extend(parser.feed(&chunk)),
-                Some(Err(e)) => {
-                    done = true;
-                    return Some((Err(anyhow::anyhow!(e).context("stream read failed")), (src, parser, pending, done)));
+    futures_util::stream::unfold(
+        (bytes.boxed(), parser, std::collections::VecDeque::<SseEvent>::new(), false),
+        |(mut src, mut parser, mut pending, mut done)| async move {
+            loop {
+                if let Some(ev) = pending.pop_front() {
+                    return Some((Ok(ev), (src, parser, pending, done)));
                 }
-                None => {
-                    done = true;
-                    if let Some(ev) = parser.finish() {
-                        pending.push_back(ev);
+                if done {
+                    return None;
+                }
+                match src.next().await {
+                    Some(Ok(chunk)) => pending.extend(parser.feed(&chunk)),
+                    Some(Err(e)) => {
+                        done = true;
+                        return Some((
+                            Err(anyhow::anyhow!(e).context("stream read failed")),
+                            (src, parser, pending, done),
+                        ));
+                    }
+                    None => {
+                        done = true;
+                        if let Some(ev) = parser.finish() {
+                            pending.push_back(ev);
+                        }
                     }
                 }
             }
-        }
-    })
+        },
+    )
 }
 
 #[cfg(test)]

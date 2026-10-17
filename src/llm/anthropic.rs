@@ -18,7 +18,11 @@ pub struct Anthropic {
 impl Anthropic {
     pub fn new(http: reqwest::Client, base: Option<String>, key: Option<String>) -> Anthropic {
         let base = base.filter(|b| !b.trim().is_empty()).unwrap_or_else(|| "https://api.anthropic.com".into());
-        Anthropic { http, base: base.trim_end_matches('/').trim_end_matches("/v1").to_string(), key: key.filter(|k| !k.trim().is_empty()) }
+        Anthropic {
+            http,
+            base: base.trim_end_matches('/').trim_end_matches("/v1").to_string(),
+            key: key.filter(|k| !k.trim().is_empty()),
+        }
     }
 
     /// Neutral history to Anthropic blocks. Tool results must come back in a
@@ -103,7 +107,10 @@ impl Anthropic {
         }
         if !req.tools.is_empty() {
             body["tools"] = Value::Array(
-                req.tools.iter().map(|t| json!({"name": t.name, "description": t.description, "input_schema": t.parameters})).collect(),
+                req.tools
+                    .iter()
+                    .map(|t| json!({"name": t.name, "description": t.description, "input_schema": t.parameters}))
+                    .collect(),
             );
         }
         body
@@ -141,115 +148,127 @@ impl Provider for Anthropic {
             bail!("llm HTTP {status}: {}", super::openai::short_error(&text));
         }
         let events = sse::events(resp.bytes_stream());
-        let out = futures_util::stream::unfold((events.boxed(), State::default(), false), |(mut src, mut st, mut finished)| async move {
-            loop {
-                if finished {
-                    return None;
-                }
-                let Some(item) = src.next().await else {
-                    finished = true;
-                    let reason = if st.stop.is_empty() { "stop".to_string() } else { st.stop.clone() };
-                    return Some((vec![Ok(LlmEvent::Done { stop_reason: reason })], (src, st, finished)));
-                };
-                let ev = match item {
-                    Ok(ev) => ev,
-                    Err(e) => {
-                        finished = true;
-                        return Some((vec![Err(e)], (src, st, finished)));
+        let out = futures_util::stream::unfold(
+            (events.boxed(), State::default(), false),
+            |(mut src, mut st, mut finished)| async move {
+                loop {
+                    if finished {
+                        return None;
                     }
-                };
-                let v: Value = match serde_json::from_str(&ev.data) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
-                let mut batch = Vec::new();
-                match kind {
-                    "message_start" => {
-                        st.prompt_tokens = v.pointer("/message/usage/input_tokens").and_then(Value::as_i64).unwrap_or(0)
-                            + v.pointer("/message/usage/cache_read_input_tokens").and_then(Value::as_i64).unwrap_or(0)
-                            + v.pointer("/message/usage/cache_creation_input_tokens").and_then(Value::as_i64).unwrap_or(0);
-                    }
-                    "content_block_start" => {
-                        let idx = v.get("index").and_then(Value::as_u64).unwrap_or(0);
-                        if let Some(b) = v.get("content_block") {
-                            if b.get("type").and_then(Value::as_str) == Some("tool_use") {
-                                st.calls.insert(
-                                    idx,
-                                    (
-                                        b.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
-                                        b.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
-                                        String::new(),
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                    "content_block_delta" => {
-                        let idx = v.get("index").and_then(Value::as_u64).unwrap_or(0);
-                        if let Some(d) = v.get("delta") {
-                            match d.get("type").and_then(Value::as_str) {
-                                Some("text_delta") => {
-                                    if let Some(t) = d.get("text").and_then(Value::as_str) {
-                                        batch.push(LlmEvent::TextDelta(t.to_string()));
-                                    }
-                                }
-                                Some("thinking_delta") => {
-                                    if let Some(t) = d.get("thinking").and_then(Value::as_str) {
-                                        if !t.is_empty() {
-                                            batch.push(LlmEvent::ThinkingDelta(t.to_string()));
-                                        }
-                                    }
-                                }
-                                Some("input_json_delta") => {
-                                    if let Some(p) = d.get("partial_json").and_then(Value::as_str) {
-                                        if let Some(c) = st.calls.get_mut(&idx) {
-                                            c.2.push_str(p);
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    "content_block_stop" => {
-                        let idx = v.get("index").and_then(Value::as_u64).unwrap_or(0);
-                        if let Some((id, name, raw)) = st.calls.remove(&idx) {
-                            let args = if raw.trim().is_empty() { json!({}) } else { serde_json::from_str(&raw).unwrap_or_else(|_| json!({"_raw": raw})) };
-                            batch.push(LlmEvent::ToolCall { id, name, args });
-                        }
-                    }
-                    "message_delta" => {
-                        if let Some(r) = v.pointer("/delta/stop_reason").and_then(Value::as_str) {
-                            st.stop = match r {
-                                "tool_use" => "tool_use".into(),
-                                "max_tokens" => "length".into(),
-                                "refusal" => "refusal".into(),
-                                _ => "stop".into(),
-                            };
-                        }
-                        if let Some(o) = v.pointer("/usage/output_tokens").and_then(Value::as_i64) {
-                            batch.push(LlmEvent::Usage { prompt_tokens: st.prompt_tokens, completion_tokens: o });
-                        }
-                    }
-                    "message_stop" => {
+                    let Some(item) = src.next().await else {
                         finished = true;
                         let reason = if st.stop.is_empty() { "stop".to_string() } else { st.stop.clone() };
-                        batch.push(LlmEvent::Done { stop_reason: reason });
+                        return Some((vec![Ok(LlmEvent::Done { stop_reason: reason })], (src, st, finished)));
+                    };
+                    let ev = match item {
+                        Ok(ev) => ev,
+                        Err(e) => {
+                            finished = true;
+                            return Some((vec![Err(e)], (src, st, finished)));
+                        }
+                    };
+                    let v: Value = match serde_json::from_str(&ev.data) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
+                    let mut batch = Vec::new();
+                    match kind {
+                        "message_start" => {
+                            st.prompt_tokens =
+                                v.pointer("/message/usage/input_tokens").and_then(Value::as_i64).unwrap_or(0)
+                                    + v.pointer("/message/usage/cache_read_input_tokens")
+                                        .and_then(Value::as_i64)
+                                        .unwrap_or(0)
+                                    + v.pointer("/message/usage/cache_creation_input_tokens")
+                                        .and_then(Value::as_i64)
+                                        .unwrap_or(0);
+                        }
+                        "content_block_start" => {
+                            let idx = v.get("index").and_then(Value::as_u64).unwrap_or(0);
+                            if let Some(b) = v.get("content_block") {
+                                if b.get("type").and_then(Value::as_str) == Some("tool_use") {
+                                    st.calls.insert(
+                                        idx,
+                                        (
+                                            b.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
+                                            b.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+                                            String::new(),
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        "content_block_delta" => {
+                            let idx = v.get("index").and_then(Value::as_u64).unwrap_or(0);
+                            if let Some(d) = v.get("delta") {
+                                match d.get("type").and_then(Value::as_str) {
+                                    Some("text_delta") => {
+                                        if let Some(t) = d.get("text").and_then(Value::as_str) {
+                                            batch.push(LlmEvent::TextDelta(t.to_string()));
+                                        }
+                                    }
+                                    Some("thinking_delta") => {
+                                        if let Some(t) = d.get("thinking").and_then(Value::as_str) {
+                                            if !t.is_empty() {
+                                                batch.push(LlmEvent::ThinkingDelta(t.to_string()));
+                                            }
+                                        }
+                                    }
+                                    Some("input_json_delta") => {
+                                        if let Some(p) = d.get("partial_json").and_then(Value::as_str) {
+                                            if let Some(c) = st.calls.get_mut(&idx) {
+                                                c.2.push_str(p);
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        "content_block_stop" => {
+                            let idx = v.get("index").and_then(Value::as_u64).unwrap_or(0);
+                            if let Some((id, name, raw)) = st.calls.remove(&idx) {
+                                let args = if raw.trim().is_empty() {
+                                    json!({})
+                                } else {
+                                    serde_json::from_str(&raw).unwrap_or_else(|_| json!({"_raw": raw}))
+                                };
+                                batch.push(LlmEvent::ToolCall { id, name, args });
+                            }
+                        }
+                        "message_delta" => {
+                            if let Some(r) = v.pointer("/delta/stop_reason").and_then(Value::as_str) {
+                                st.stop = match r {
+                                    "tool_use" => "tool_use".into(),
+                                    "max_tokens" => "length".into(),
+                                    "refusal" => "refusal".into(),
+                                    _ => "stop".into(),
+                                };
+                            }
+                            if let Some(o) = v.pointer("/usage/output_tokens").and_then(Value::as_i64) {
+                                batch.push(LlmEvent::Usage { prompt_tokens: st.prompt_tokens, completion_tokens: o });
+                            }
+                        }
+                        "message_stop" => {
+                            finished = true;
+                            let reason = if st.stop.is_empty() { "stop".to_string() } else { st.stop.clone() };
+                            batch.push(LlmEvent::Done { stop_reason: reason });
+                        }
+                        "error" => {
+                            finished = true;
+                            let m = v.pointer("/error/message").and_then(Value::as_str).unwrap_or("unknown error");
+                            return Some((vec![Err(anyhow!("llm error: {m}"))], (src, st, finished)));
+                        }
+                        _ => {}
                     }
-                    "error" => {
-                        finished = true;
-                        let m = v.pointer("/error/message").and_then(Value::as_str).unwrap_or("unknown error");
-                        return Some((vec![Err(anyhow!("llm error: {m}"))], (src, st, finished)));
+                    if batch.is_empty() {
+                        continue;
                     }
-                    _ => {}
+                    return Some((batch.into_iter().map(Ok).collect::<Vec<_>>(), (src, st, finished)));
                 }
-                if batch.is_empty() {
-                    continue;
-                }
-                return Some((batch.into_iter().map(Ok).collect::<Vec<_>>(), (src, st, finished)));
-            }
-        })
+            },
+        )
         .flat_map(futures_util::stream::iter);
         Ok(Box::pin(out))
     }
@@ -267,8 +286,19 @@ mod tests {
             system: "s".into(),
             messages: vec![
                 ChatMessage::text("user", "hi"),
-                ChatMessage { role: "assistant".into(), parts: vec![Part::ToolCall { id: "t1".into(), name: "f".into(), args: json!({}) }] },
-                ChatMessage { role: "tool".into(), parts: vec![Part::ToolResult { id: "t1".into(), name: "f".into(), content: "r".into(), is_error: false }] },
+                ChatMessage {
+                    role: "assistant".into(),
+                    parts: vec![Part::ToolCall { id: "t1".into(), name: "f".into(), args: json!({}) }],
+                },
+                ChatMessage {
+                    role: "tool".into(),
+                    parts: vec![Part::ToolResult {
+                        id: "t1".into(),
+                        name: "f".into(),
+                        content: "r".into(),
+                        is_error: false,
+                    }],
+                },
                 ChatMessage::text("user", "next"),
             ],
             tools: vec![],

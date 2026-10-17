@@ -35,7 +35,9 @@ pub fn verify(secret: &[u8], token: &str) -> bool {
         return false;
     }
     let Ok(bytes) = B64.decode(payload) else { return false };
-    let Ok(exp) = String::from_utf8(bytes).map_err(|_| ()).and_then(|s| s.parse::<i64>().map_err(|_| ())) else { return false };
+    let Ok(exp) = String::from_utf8(bytes).map_err(|_| ()).and_then(|s| s.parse::<i64>().map_err(|_| ())) else {
+        return false;
+    };
     exp > crate::db::now_ms()
 }
 

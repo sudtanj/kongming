@@ -111,10 +111,25 @@ impl Session {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum Part {
-    Text { text: String },
-    Thinking { text: String },
-    ToolCall { id: String, name: String, #[serde(default)] args: Value },
-    ToolResult { id: String, name: String, content: String, #[serde(default, alias = "is_error")] is_error: bool },
+    Text {
+        text: String,
+    },
+    Thinking {
+        text: String,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        #[serde(default)]
+        args: Value,
+    },
+    ToolResult {
+        id: String,
+        name: String,
+        content: String,
+        #[serde(default, alias = "is_error")]
+        is_error: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
