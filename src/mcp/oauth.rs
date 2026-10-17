@@ -245,6 +245,33 @@ pub fn needs_refresh(st: &OAuthState) -> bool {
     }
 }
 
+/// What the user pasted after signing in: the full redirect URL from the
+/// address bar (the usual case, since the loopback page does not load), just
+/// its query string, or the bare authorization code. Returns `(code, state)`.
+pub fn parse_redirect(pasted: &str) -> Result<(String, Option<String>)> {
+    let input = pasted.trim();
+    if input.is_empty() {
+        bail!("paste the URL your browser was sent to after signing in");
+    }
+    let query = if input.contains("://") {
+        let u = url::Url::parse(input).context("that is not a valid URL")?;
+        // A few servers put the parameters in the fragment.
+        let q = u.query().unwrap_or("");
+        if q.contains("code=") || q.contains("error=") { q.to_string() } else { u.fragment().unwrap_or("").to_string() }
+    } else if input.contains('=') {
+        input.trim_start_matches(['?', '#']).to_string()
+    } else {
+        return Ok((input.to_string(), None));
+    };
+    let params: HashMap<String, String> = url::form_urlencoded::parse(query.as_bytes()).into_owned().collect();
+    if let Some(err) = params.get("error") {
+        let desc = params.get("error_description").map(String::as_str).unwrap_or("");
+        bail!("authorization failed: {err} {desc}");
+    }
+    let code = params.get("code").filter(|c| !c.is_empty()).ok_or_else(|| anyhow!("no `code` in the pasted URL"))?;
+    Ok((code.clone(), params.get("state").cloned()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,5 +313,20 @@ mod tests {
     #[test]
     fn random_tokens_differ() {
         assert_ne!(random_token(32), random_token(32));
+    }
+
+    #[test]
+    fn parses_pasted_redirects() {
+        let (c, s) = parse_redirect("http://localhost:18800/api/mcp/oauth/callback?code=abc%2F1&state=xyz").unwrap();
+        assert_eq!((c.as_str(), s.as_deref()), ("abc/1", Some("xyz")));
+        let (c, s) = parse_redirect("  ?state=s1&code=c1 ").unwrap();
+        assert_eq!((c.as_str(), s.as_deref()), ("c1", Some("s1")));
+        let (c, s) = parse_redirect("bare-code").unwrap();
+        assert_eq!((c.as_str(), s), ("bare-code", None));
+        let (c, _) = parse_redirect("http://localhost/cb#code=frag&state=q").unwrap();
+        assert_eq!(c, "frag");
+        assert!(parse_redirect("http://localhost/cb?error=access_denied&error_description=nope").is_err());
+        assert!(parse_redirect("http://localhost/cb?state=only").is_err());
+        assert!(parse_redirect("   ").is_err());
     }
 }

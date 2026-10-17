@@ -1,6 +1,6 @@
 # kongming
 
-A small, self-improving agentic AI daemon that fits on an Orange Pi Zero 3 (1 GB RAM). One static Rust binary, a nanobot-style web UI, Telegram, remote MCP tools, a team of agents with roles, and skills + memory that the agents refine while they run. **No local storage**: everything lives in a remote [Turso](https://turso.tech) SQLite database, so the container runs read-only and a wiped SD card loses nothing.
+A small, self-improving agentic AI daemon that fits on an Orange Pi Zero 3 (1 GB RAM). One small Rust binary, a nanobot-style web UI, Telegram, remote MCP tools, a team of agents with roles, and skills + memory that the agents refine while they run. **No local storage**: everything lives in a remote [Turso](https://turso.tech) SQLite database, so the container runs read-only and a wiped SD card loses nothing.
 
 Inspired by [nanobot](https://github.com/HKUDS/nanobot) (UI, `@` mentions), [hermes-agent](https://github.com/NousResearch/hermes-agent) (skills, reflection, compaction, delegation) and the role-based agent teams of Grok Bot and OpenAI Dots.
 
@@ -11,11 +11,36 @@ Inspired by [nanobot](https://github.com/HKUDS/nanobot) (UI, `@` mentions), [her
 - **Self-improvement loop.** After turns that used tools or contained a correction, a cheap reflection pass reviews the conversation with only `skill_manage`/`memory` available and saves procedures and durable facts. Everything it does is logged under Activity and shown as toasts.
 - **Memory.** Shared or per-agent facts, preferences, lessons; searchable; injected into prompts.
 - **Context compaction.** Older turns are summarized into a rolling session summary when the estimated context exceeds the budget.
-- **MCP.** Remote servers only (Streamable HTTP or legacy SSE) with no auth, bearer token, or OAuth 2.1 (metadata discovery, dynamic client registration, PKCE, refresh). Tools are exposed as `mcp__<server>__<tool>`. `@mcp:name` in a message makes sure a server's tools are offered.
+- **MCP.** Remote servers only (Streamable HTTP or legacy SSE) with no auth, bearer token, or OAuth 2.1 (metadata discovery, dynamic client registration, PKCE, refresh; works behind a firewall by pasting the redirect URL). Tools are exposed as `mcp__<server>__<tool>`. `@mcp:name` in a message makes sure a server's tools are offered.
 - **Telegram.** Long polling, user-id allow-list, streamed replies via message edits, `/new`, `/agents`, `/agent <handle>`, `/skills`, `/status`, `/stop`, `@handle` switching. Cron jobs can deliver to a chat.
 - **Automations.** `every:<minutes>` or 5-field cron (UTC) prompts run by an agent of your choice.
 - **Web UI.** Vanilla HTML/CSS/JS port of the nanobot UI (sidebar sessions, streaming thread, reasoning and tool activity cards, `@`/`/` palettes, settings pages for agents, skills, MCP, channels, models, automations, memory, activity). Password login, cookie session, WebSocket streaming.
 - **Providers.** Any OpenAI-compatible chat-completions endpoint (OpenAI, OpenRouter, zilong-router, Ollama, vLLM) or the Anthropic Messages API (adaptive thinking, prompt caching).
+
+## System requirements
+
+kongming runs no model locally; it is a small HTTP client and server, so the device mostly waits on the network.
+
+| | Minimum | Recommended |
+|---|---|---|
+| CPU | 64-bit ARM (aarch64, e.g. Cortex-A53) or x86_64 | Orange Pi Zero 3 (4× Cortex-A53) or better |
+| RAM free for kongming | 64 MB | 128 MB (the deploy script caps the container at 96 MB) |
+| Disk | about 12 MB for the image, or 5 MB for the bare binary | same; no data directory, the root filesystem can be read-only |
+| OS | Linux with Docker 20.10+, or any Linux for the static release binary | Armbian / Debian 12 |
+| Clock | NTP-synced (TLS, OAuth token expiry and cron need correct time) | |
+
+32-bit ARM (armv7, e.g. the original Orange Pi Zero) is not built. Memory figures are estimates for one worker thread with a few concurrent chats; measure on your device with `docker stats kongming`.
+
+External services:
+
+- **Turso database** (required). The free tier is enough; every read and write goes over HTTPS, so pick a Turso region close to the device.
+- **An LLM endpoint** (required): OpenAI-compatible or Anthropic.
+- **Telegram bot token** (optional).
+- **Remote MCP servers** (optional). Local/stdio MCP servers are not supported by design.
+
+Network: outbound HTTPS only (Turso, the LLM, `api.telegram.org`, MCP servers). Telegram uses long polling and MCP OAuth can finish by pasting the redirect URL, so nothing has to be reachable from the internet. The web UI port only needs to be reachable from your LAN or tailnet.
+
+Browser: a current Chrome, Firefox or Safari for the web UI.
 
 ## Run
 
@@ -39,7 +64,7 @@ Open `http://127.0.0.1:18800`. Everything except the Turso credentials, port and
 | `PORT`, `KONGMING_HOST` | listen address | `18800`, `0.0.0.0` |
 | `KONGMING_PASSWORD` | UI password (empty = no auth; only on a private network) | empty |
 | `KONGMING_SECRET` | cookie signing secret (random per boot if unset) | |
-| `KONGMING_PUBLIC_URL` | public base URL for MCP OAuth redirects | |
+| `KONGMING_PUBLIC_URL` | public HTTPS base URL; only set it if OAuth providers can reach kongming (otherwise the paste flow below is used) | empty |
 | `LLM_PROVIDER` | `openai` or `anthropic` | `openai` |
 | `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` | provider settings | |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USERS` | Telegram bot and comma-separated user ids | |
@@ -49,6 +74,17 @@ Open `http://127.0.0.1:18800`. Everything except the Turso credentials, port and
 | `LOG_LEVEL` | tracing filter | `info` |
 
 The Orange Pi deployment script lives in [`sudtanj/infrastructure-tools`](https://github.com/sudtanj/infrastructure-tools) (`bash-scripts/init-kongming.sh`, image from `builder-tools/kongming`).
+
+### MCP OAuth behind a firewall
+
+When `KONGMING_PUBLIC_URL` is empty (the default), OAuth uses the loopback redirect for native apps (RFC 8252): `http://localhost:<PORT>/api/mcp/oauth/callback`.
+
+1. In Settings → MCP, add the server with auth type OAuth 2.1 and press **Connect with OAuth**.
+2. Press **Open sign-in page** (or copy the link to any browser) and approve access.
+3. The provider sends the browser to the localhost address. That page usually fails to load, which is expected. Copy the full URL from the address bar.
+4. Paste it into the dialog and press **Complete sign-in**. kongming exchanges the code (with PKCE) and stores the tokens in Turso; refreshes happen on their own.
+
+If the browser runs on the same machine as kongming, the localhost page loads and the sign-in completes by itself. If kongming is reachable at a public HTTPS address, set `KONGMING_PUBLIC_URL` (or Settings → Models → Public URL) and the provider redirects straight back. Providers without dynamic client registration need a client ID (and secret) registered with the redirect URI shown in the dialog.
 
 ## API
 
@@ -62,7 +98,7 @@ cargo clippy --all-targets -- -D warnings
 cross build --release --target aarch64-unknown-linux-musl
 ```
 
-CI builds static musl binaries for `aarch64` and `x86_64` and attaches them to GitHub releases on `v*` tags.
+CI builds static musl binaries for `aarch64` and `x86_64` and attaches them to GitHub releases on `v*` tags. The Docker image is a glibc build on `distroless/cc`; see `builder-tools/kongming` in infrastructure-tools.
 
 ## License
 

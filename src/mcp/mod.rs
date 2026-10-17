@@ -452,7 +452,11 @@ impl McpManager {
         let verifier = oauth::random_token(48);
         let url = oauth::authorize_url(&st, redirect_uri, &state, &verifier)?;
         self.db.set_mcp_oauth(server_id, &st).await?;
-        self.pending_oauth.lock().insert(state, (server_id.to_string(), verifier, redirect_uri.to_string()));
+        let mut pending = self.pending_oauth.lock();
+        // One sign-in per server at a time: a new Connect replaces the old one.
+        pending.retain(|_, (sid, _, _)| sid != server_id);
+        pending.insert(state, (server_id.to_string(), verifier, redirect_uri.to_string()));
+        drop(pending);
         Ok(url)
     }
 
@@ -465,6 +469,29 @@ impl McpManager {
         self.db.set_mcp_oauth(&server_id, &st).await?;
         let _ = self.refresh(&server_id).await;
         Ok(server_id)
+    }
+
+    /// Finish a sign-in from what the user pasted (the loopback redirect URL,
+    /// its query, or the bare code). Used when the browser cannot reach
+    /// kongming, e.g. behind a firewall.
+    pub async fn finish_oauth_pasted(&self, server_id: &str, pasted: &str) -> Result<String> {
+        let (code, state) = oauth::parse_redirect(pasted)?;
+        let state = {
+            let pending = self.pending_oauth.lock();
+            match state {
+                Some(st) => match pending.get(&st) {
+                    Some((sid, _, _)) if sid == server_id => st,
+                    Some(_) => bail!("that sign-in belongs to a different MCP server"),
+                    None => bail!("unknown or expired sign-in; press Connect again"),
+                },
+                None => pending
+                    .iter()
+                    .find(|(_, (sid, _, _))| sid == server_id)
+                    .map(|(st, _)| st.clone())
+                    .ok_or_else(|| anyhow!("no sign-in in progress for this server; press Connect first"))?,
+            }
+        };
+        self.finish_oauth(&state, &code).await
     }
 
     pub async fn clear_oauth(&self, server_id: &str) -> Result<()> {

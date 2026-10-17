@@ -637,26 +637,30 @@ pub async fn call_mcp_tool(State(state): State<Shared>, Path(id): Path<String>, 
     Ok(Json(json!({"content": text, "isError": is_error})))
 }
 
-async fn redirect_uri(state: &Shared, headers: &HeaderMap) -> String {
-    let base = match state.public_url().await {
-        Some(u) => u,
-        None => {
-            let proto = headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok()).unwrap_or("http");
-            let host = headers
-                .get("x-forwarded-host")
-                .or(headers.get(header::HOST))
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("localhost");
-            format!("{proto}://{host}")
-        }
-    };
-    format!("{base}/api/mcp/oauth/callback")
+/// Where the authorization server sends the browser after sign-in. With a
+/// public URL configured that is kongming itself and the flow completes on
+/// its own. Otherwise (behind a firewall) it is the loopback address, as
+/// for native apps (RFC 8252): the page usually fails to load and the user
+/// pastes the address-bar URL back into kongming. Returns (uri, manual).
+async fn redirect_uri(state: &Shared) -> (String, bool) {
+    match state.public_url().await {
+        Some(base) => (format!("{base}/api/mcp/oauth/callback"), false),
+        None => (format!("http://localhost:{}/api/mcp/oauth/callback", state.cfg.port), true),
+    }
 }
 
-pub async fn mcp_oauth_start(State(state): State<Shared>, Path(id): Path<String>, headers: HeaderMap) -> R {
-    let redirect = redirect_uri(&state, &headers).await;
+pub async fn mcp_oauth_start(State(state): State<Shared>, Path(id): Path<String>) -> R {
+    let (redirect, manual) = redirect_uri(&state).await;
     let url = state.mcp.start_oauth(&id, &redirect).await?;
-    Ok(Json(json!({"url": url, "redirectUri": redirect})))
+    Ok(Json(json!({"url": url, "redirectUri": redirect, "manual": manual})))
+}
+
+/// Finish a sign-in with the redirect URL (or code) the user pasted.
+pub async fn mcp_oauth_complete(State(state): State<Shared>, Path(id): Path<String>, Json(body): Json<Value>) -> R {
+    let pasted = body.get("url").or(body.get("code")).and_then(Value::as_str).unwrap_or("");
+    state.mcp.finish_oauth_pasted(&id, pasted).await.map_err(|e| bad(format!("{e:#}")))?;
+    let server = state.db.mcp_server(&id).await?.map(|s| crate::mcp::server_public(&s));
+    Ok(Json(json!({"ok": true, "server": server})))
 }
 
 #[derive(Deserialize)]

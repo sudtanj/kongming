@@ -76,6 +76,7 @@ pub fn router(state: Shared) -> Router {
         .route("/mcp/:id/refresh", post(api::refresh_mcp))
         .route("/mcp/:id/call", post(api::call_mcp_tool))
         .route("/mcp/:id/oauth/start", post(api::mcp_oauth_start).get(api::mcp_oauth_start))
+        .route("/mcp/:id/oauth/complete", post(api::mcp_oauth_complete))
         .route("/mcp/:id/oauth/disconnect", post(api::mcp_oauth_disconnect))
         .route("/settings", get(api::get_settings).put(api::put_settings))
         .route("/settings/test-llm", post(api::test_llm))

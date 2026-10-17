@@ -184,7 +184,7 @@ const STRINGS = {
     'models.reflection': 'Self-improvement',
     'models.reflectionDesc': 'Reflect after turns and save lessons as skills and memories.',
     'models.publicUrl': 'Public URL',
-    'models.publicUrlDesc': 'Needed for MCP OAuth redirects, e.g. https://kongming.example.com',
+    'models.publicUrlDesc': 'Optional. When kongming is reachable at this address, MCP OAuth returns here automatically; leave empty behind a firewall to paste the redirect URL instead.',
     'agents.title': 'Agents',
     'agents.desc': 'Your team. Managers can delegate to the agents that report to them.',
     'agents.new': 'New agent',
@@ -265,6 +265,14 @@ const STRINGS = {
     'mcp.empty': 'No MCP servers configured.',
     'mcp.oauthOk': 'OAuth connected',
     'mcp.oauthErr': 'OAuth failed: {{message}}',
+    'mcp.oauthTitle': 'Connect {{name}}',
+    'mcp.oauthManualDesc': 'kongming is not reachable from the internet, so the sign-in page cannot send you back automatically. Sign in in a new tab, then paste the address you end up on.',
+    'mcp.oauthStep1': '1. Sign in with the provider',
+    'mcp.oauthOpen': 'Open sign-in page',
+    'mcp.oauthCopyLink': 'Copy link',
+    'mcp.oauthStep2': '2. Paste the redirect URL',
+    'mcp.oauthStep2Desc': 'After approving, the browser goes to {{uri}}. That page usually fails to load; that is expected. Copy the full address from the address bar and paste it here.',
+    'mcp.oauthComplete': 'Complete sign-in',
     'mcp.status.connected': 'connected',
     'mcp.status.error': 'error',
     'mcp.status.unauthorized': 'unauthorized',
@@ -1598,6 +1606,25 @@ const settings = (() => {
   }
 
   /* ---- mcp ---- */
+  /** Sign-in for servers the auth provider cannot redirect back to (kongming
+   *  behind a firewall): open the provider in a new tab, then paste the URL
+   *  the browser lands on (a localhost page that usually fails to load). */
+  function oauthPasteModal(m, r) {
+    const pasted = textarea({ rows: 3, class: 'field code', placeholder: r.redirectUri + '?code=…&state=…', spellcheck: 'false' });
+    const body = h('div', { class: 'form-grid' },
+      h('div', {}, h('b', {}, t('mcp.oauthStep1')), h('div', { class: 'row mt' },
+        h('a', { class: 'btn primary sm', href: r.url, target: '_blank', rel: 'noopener noreferrer' }, icon('link'), t('mcp.oauthOpen')),
+        h('button', { class: 'btn outline sm', type: 'button', onClick: () => copyText(r.url).then(() => toast(t('common.copied'))) }, icon('copy'), t('mcp.oauthCopyLink')))),
+      field(t('mcp.oauthStep2'), pasted, t('mcp.oauthStep2Desc', { uri: r.redirectUri })));
+    modal.open({ title: t('mcp.oauthTitle', { name: m.name }), desc: t('mcp.oauthManualDesc'), body, wide: true, sticky: true, focus: 'a',
+      actions: [h('button', { class: 'btn secondary', type: 'button', onClick: modal.close }, t('common.cancel')),
+        saveBtn(t('mcp.oauthComplete'), async () => {
+          const v = pasted.value.trim(); if (!v) throw new Error(t('mcp.oauthStep2'));
+          await api.post('/api/mcp/' + m.id + '/oauth/complete', { url: v });
+          modal.close(); toast(t('mcp.oauthOk')); reload();
+        })] });
+  }
+
   pages.mcp = async (query) => {
     await loadMcp();
     if (query.oauth === 'ok') { toast(t('mcp.oauthOk')); history.replaceState(null, '', '#/settings/mcp'); }
@@ -1624,7 +1651,7 @@ const settings = (() => {
     const act = (label, fn, cls) => { const b = h('button', { class: 'btn ' + (cls || 'outline') + ' sm', type: 'button' }, label); b.addEventListener('click', async () => { b.disabled = true; try { await fn(); } catch (e) { toast(e.message, 'err'); } b.disabled = false; }); return b; };
     const actions = [
       act([icon('refresh'), t('mcp.refresh')], async () => { const r = await api.post('/api/mcp/' + m.id + '/refresh'); if (r.error) toast(r.error, 'err'); reload(); }),
-      m.authType === 'oauth' ? act([icon('link'), m.oauthConnected ? t('mcp.disconnect') : t('mcp.connect')], async () => { if (m.oauthConnected) { await api.post('/api/mcp/' + m.id + '/oauth/disconnect'); reload(); } else { const r = await api.post('/api/mcp/' + m.id + '/oauth/start'); location.href = r.url; } }) : null,
+      m.authType === 'oauth' ? act([icon('link'), m.oauthConnected ? t('mcp.disconnect') : t('mcp.connect')], async () => { if (m.oauthConnected) { await api.post('/api/mcp/' + m.id + '/oauth/disconnect'); reload(); } else { const r = await api.post('/api/mcp/' + m.id + '/oauth/start'); if (r.manual) oauthPasteModal(m, r); else location.href = r.url; } }) : null,
       h('button', { class: 'icon-btn quiet', type: 'button', title: t('common.edit'), 'aria-label': t('common.edit'), onClick: () => navigate('#/settings/mcp?edit=' + m.id) }, icon('pencil')),
       h('button', { class: 'icon-btn quiet', type: 'button', title: t('common.delete'), 'aria-label': t('common.delete'), onClick: () => modal.confirm({ title: t('mcp.deleteTitle', { name: m.name }), desc: t('mcp.deleteDesc'), confirm: t('common.delete'), danger: true, onConfirm: async () => { await api.del('/api/mcp/' + m.id); reload(); } }) }, icon('trash')),
     ];
