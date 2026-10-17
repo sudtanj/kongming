@@ -38,7 +38,7 @@ async fn logo_svg() -> Response {
 }
 async fn manifest() -> Response {
     asset(
-        r#"{"name":"kongming","short_name":"kongming","start_url":"/","display":"standalone","background_color":"#0b0d10","theme_color":"#0b0d10","icons":[{"src":"/logo.svg","sizes":"any","type":"image/svg+xml"}]}"#,
+        r##"{"name":"kongming","short_name":"kongming","start_url":"/","display":"standalone","background_color":"#0b0d10","theme_color":"#0b0d10","icons":[{"src":"/logo.svg","sizes":"any","type":"image/svg+xml"}]}"##,
         "application/manifest+json",
         true,
     )
