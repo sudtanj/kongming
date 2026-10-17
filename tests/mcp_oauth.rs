@@ -13,7 +13,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use parking_lot::Mutex;
 use reqwest::StatusCode;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 use support::{serve, spawn_app, str_of};
 
@@ -51,8 +51,12 @@ fn query_param(url: &str, key: &str) -> String {
 async fn pasted_loopback_redirect_completes_sign_in() {
     let (auth, mock) = start_auth_server().await;
     let app = spawn_app(vec![]).await;
-    let created =
-        app.post("/api/mcp", json!({"name": "Remote", "url": format!("{auth}/mcp"), "transport": "http", "authType": "oauth"})).await;
+    let created = app
+        .post(
+            "/api/mcp",
+            json!({"name": "Remote", "url": format!("{auth}/mcp"), "transport": "http", "authType": "oauth"}),
+        )
+        .await;
     let id = str_of(&created, "id").to_string();
 
     let started = app.post(&format!("/api/mcp/{id}/oauth/start"), json!({})).await;
@@ -68,7 +72,9 @@ async fn pasted_loopback_redirect_completes_sign_in() {
     assert!(!state.is_empty());
 
     // A paste with only an error is rejected and keeps the sign-in pending.
-    let (status, body) = app.post_raw(&format!("/api/mcp/{id}/oauth/complete"), json!({"url": format!("{redirect}?state={state}")})).await;
+    let (status, body) = app
+        .post_raw(&format!("/api/mcp/{id}/oauth/complete"), json!({"url": format!("{redirect}?state={state}")}))
+        .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
     let pasted = format!("{redirect}?code=the-code&state={state}");
@@ -92,8 +98,12 @@ async fn pasted_loopback_redirect_completes_sign_in() {
 async fn bare_code_uses_the_pending_sign_in_of_that_server() {
     let (auth, _mock) = start_auth_server().await;
     let app = spawn_app(vec![]).await;
-    let created =
-        app.post("/api/mcp", json!({"name": "Remote", "url": format!("{auth}/mcp"), "transport": "http", "authType": "oauth"})).await;
+    let created = app
+        .post(
+            "/api/mcp",
+            json!({"name": "Remote", "url": format!("{auth}/mcp"), "transport": "http", "authType": "oauth"}),
+        )
+        .await;
     let id = str_of(&created, "id").to_string();
 
     let (status, body) = app.post_raw(&format!("/api/mcp/{id}/oauth/complete"), json!({"code": "the-code"})).await;
@@ -109,8 +119,12 @@ async fn public_url_uses_the_automatic_callback() {
     let (auth, _mock) = start_auth_server().await;
     let app = spawn_app(vec![]).await;
     app.put("/api/settings", json!({"publicUrl": app.base_url})).await;
-    let created =
-        app.post("/api/mcp", json!({"name": "Remote", "url": format!("{auth}/mcp"), "transport": "http", "authType": "oauth"})).await;
+    let created = app
+        .post(
+            "/api/mcp",
+            json!({"name": "Remote", "url": format!("{auth}/mcp"), "transport": "http", "authType": "oauth"}),
+        )
+        .await;
     let id = str_of(&created, "id").to_string();
 
     let started = app.post(&format!("/api/mcp/{id}/oauth/start"), json!({})).await;

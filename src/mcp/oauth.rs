@@ -257,7 +257,11 @@ pub fn parse_redirect(pasted: &str) -> Result<(String, Option<String>)> {
         let u = url::Url::parse(input).context("that is not a valid URL")?;
         // A few servers put the parameters in the fragment.
         let q = u.query().unwrap_or("");
-        if q.contains("code=") || q.contains("error=") { q.to_string() } else { u.fragment().unwrap_or("").to_string() }
+        if q.contains("code=") || q.contains("error=") {
+            q.to_string()
+        } else {
+            u.fragment().unwrap_or("").to_string()
+        }
     } else if input.contains('=') {
         input.trim_start_matches(['?', '#']).to_string()
     } else {
