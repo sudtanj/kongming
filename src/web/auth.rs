@@ -75,7 +75,7 @@ pub fn is_authenticated(state: &Shared, req: &Request) -> bool {
     if state.cfg.password.is_empty() {
         return true;
     }
-    token_from_request(req).map_or(false, |t| verify(&state.secret, &t))
+    token_from_request(req).is_some_and(|t| verify(&state.secret, &t))
 }
 
 pub async fn require_auth(State(state): State<Shared>, req: Request, next: Next) -> Response {

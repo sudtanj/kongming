@@ -575,7 +575,7 @@ impl Db {
             })
             .filter(|(s, _)| terms.is_empty() || *s > 1)
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|a| std::cmp::Reverse(a.0));
         Ok(scored.into_iter().take(limit as usize).map(|(_, m)| m).collect())
     }
 

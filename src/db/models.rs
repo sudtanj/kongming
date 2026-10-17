@@ -314,10 +314,10 @@ impl McpServer {
     }
 
     pub fn has_token(&self) -> bool {
-        self.token.as_deref().map_or(false, |t| !t.is_empty())
+        self.token.as_deref().is_some_and(|t| !t.is_empty())
     }
     pub fn has_oauth_token(&self) -> bool {
-        self.oauth.access_token.as_deref().map_or(false, |t| !t.is_empty())
+        self.oauth.access_token.as_deref().is_some_and(|t| !t.is_empty())
     }
 }
 

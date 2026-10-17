@@ -296,7 +296,7 @@ async fn web_fetch(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
         bail!("only http(s) urls are allowed");
     }
     if let Some(host) = parsed.host_str() {
-        if host == "localhost" || host.ends_with(".local") || host.parse::<std::net::IpAddr>().map_or(false, |ip| !is_public_ip(&ip)) {
+        if host == "localhost" || host.ends_with(".local") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| !is_public_ip(&ip)) {
             bail!("refusing to fetch a private address");
         }
     }

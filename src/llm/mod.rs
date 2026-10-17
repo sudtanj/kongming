@@ -91,7 +91,7 @@ impl ProviderConfig {
         serde_json::json!({
             "kind": self.kind,
             "baseUrl": self.base_url,
-            "apiKeySet": self.api_key.as_deref().map_or(false, |k| !k.is_empty()),
+            "apiKeySet": self.api_key.as_deref().is_some_and(|k| !k.is_empty()),
             "model": self.model,
             "maxTokens": self.max_tokens,
             "temperature": self.temperature,

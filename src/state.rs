@@ -136,13 +136,13 @@ impl AppState {
     pub async fn provider_config(&self) -> Result<ProviderConfig> {
         if let Some(v) = self.db.setting("llm").await? {
             if let Ok(mut c) = serde_json::from_value::<ProviderConfig>(v) {
-                if c.api_key.as_deref().map_or(true, str::is_empty) {
+                if c.api_key.as_deref().is_none_or(str::is_empty) {
                     c.api_key = self.cfg.llm_api_key.clone();
                 }
                 if c.model.is_empty() {
                     c.model = self.cfg.llm_model.clone().unwrap_or_default();
                 }
-                if c.base_url.as_deref().map_or(true, str::is_empty) {
+                if c.base_url.as_deref().is_none_or(str::is_empty) {
                     c.base_url = self.cfg.llm_base_url.clone();
                 }
                 if c.kind.is_empty() {

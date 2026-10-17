@@ -236,7 +236,6 @@ fn replace_pairs(s: &str, marker: &str, open: &str, close: &str) -> String {
 
 /// Run the polling loop until the process stops. Reconnects on errors.
 pub async fn run(state: Shared) {
-    let mut announced = false;
     loop {
         let Some(token) = state.telegram_token().await else {
             tokio::time::sleep(Duration::from_secs(30)).await;
@@ -248,11 +247,10 @@ pub async fn run(state: Shared) {
             continue;
         }
         let tg = Telegram::new(state.http.clone(), token.clone());
-        if !announced {
+        {
             match tg.call("getMe", json!({})).await {
                 Ok(me) => {
                     tracing::info!(bot = %me.get("username").and_then(serde_json::Value::as_str).unwrap_or("?"), "telegram connected");
-                    announced = true;
                     let _ = tg
                         .call(
                             "setMyCommands",
@@ -279,7 +277,6 @@ pub async fn run(state: Shared) {
         loop {
             // Token changed in settings: restart the outer loop.
             if state.telegram_token().await.as_deref() != Some(token.as_str()) {
-                announced = false;
                 break;
             }
             let updates = tg.call("getUpdates", json!({"offset": offset, "timeout": 50, "allowed_updates": ["message"]})).await;

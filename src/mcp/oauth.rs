@@ -110,7 +110,7 @@ pub async fn discover(http: &reqwest::Client, server_url: &str, scope_hint: Opti
 /// Dynamic client registration. On failure the state is returned unchanged so a
 /// pre-configured client id can still be used.
 pub async fn register(http: &reqwest::Client, st: &mut OAuthState, redirect_uri: &str) -> Result<()> {
-    if st.client_id.as_deref().map_or(false, |c| !c.is_empty()) {
+    if st.client_id.as_deref().is_some_and(|c| !c.is_empty()) {
         return Ok(());
     }
     let Some(reg) = st.registration_endpoint.clone() else { bail!("no registration endpoint and no client id configured") };

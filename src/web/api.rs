@@ -13,6 +13,7 @@ use crate::db::{new_id, now_ms, Agent, CronJob, McpServer, OAuthState};
 use crate::llm::ProviderConfig;
 use crate::state::Shared;
 
+#[derive(Debug)]
 pub struct ApiError(StatusCode, String);
 
 impl IntoResponse for ApiError {
@@ -61,7 +62,7 @@ pub async fn auth_status(State(state): State<Shared>, headers: HeaderMap) -> Jso
             .get(header::COOKIE)
             .and_then(|v| v.to_str().ok())
             .and_then(|c| c.split(';').map(str::trim).find_map(|p| p.strip_prefix(&format!("{}=", super::auth::COOKIE)).map(str::to_string)))
-            .map_or(false, |t| super::auth::verify(&state.secret, &t));
+            .is_some_and(|t| super::auth::verify(&state.secret, &t));
     Json(json!({"authRequired": !state.cfg.password.is_empty(), "authenticated": authed}))
 }
 

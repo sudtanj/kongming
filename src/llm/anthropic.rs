@@ -81,7 +81,7 @@ impl Anthropic {
             out.push(json!({"role": role, "content": blocks}));
         }
         // The API requires the first message to be from the user.
-        if out.first().map_or(true, |m| m["role"] != "user") {
+        if out.first().is_none_or(|m| m["role"] != "user") {
             out.insert(0, json!({"role": "user", "content": [{"type": "text", "text": "(conversation start)"}]}));
         }
         out
