@@ -70,7 +70,7 @@ async fn register_refresh_and_call_an_mcp_server() {
     let sys = system_prompt(&reqs[0]);
     assert!(sys.contains("# Connected services"), "{sys}");
     assert!(sys.contains("Echo"), "{sys}");
-    let last_call = mcp.calls().into_iter().filter(|c| c["method"] == json!("tools/call")).last().unwrap();
+    let last_call = mcp.calls().into_iter().filter(|c| c["method"] == json!("tools/call")).next_back().unwrap();
     assert_eq!(last_call["params"]["arguments"]["text"], json!("via agent"));
 
     // Disabling the server hides its tools and refresh reports it.

@@ -645,40 +645,6 @@ pub fn can_delegate(agent: &Agent, team: &[Agent]) -> bool {
     team.iter().any(|t| t.manager_id.as_deref() == Some(agent.id.as_str()))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn auto_title_uses_first_line() {
-        assert_eq!(auto_title("\n\n  hello world \nmore"), "hello world");
-        assert_eq!(auto_title(""), "New chat");
-        let long = "x".repeat(100);
-        assert_eq!(auto_title(&long).chars().count(), 61);
-    }
-
-    #[test]
-    fn history_includes_summary_and_skips_system() {
-        let s = Session {
-            id: "s".into(),
-            title: String::new(),
-            agent_id: "a".into(),
-            channel: "web".into(),
-            channel_ref: None,
-            parent_session_id: None,
-            summary: Some("earlier".into()),
-            summary_upto: 2,
-            archived: false,
-            created_at: 0,
-            updated_at: 0,
-        };
-        let m = |seq: i64, role: &str| Message { id: seq.to_string(), session_id: "s".into(), seq, role: role.into(), parts: vec![Part::Text { text: "t".into() }], agent_id: None, created_at: 0 };
-        let chat = history_to_chat(&s, &[m(1, "user"), m(2, "assistant"), m(3, "system"), m(4, "user")]);
-        assert_eq!(chat.len(), 3);
-        assert!(chat[0].parts.iter().any(|p| matches!(p, Part::Text { text } if text.contains("earlier"))));
-        assert_eq!(chat[2].role, "user");
-    }
-}
 
 /// Starter skills, inserted once when the skills table is empty. They teach
 /// the agents how to write good skills and how to work as a team.
@@ -712,4 +678,39 @@ pub async fn seed_skills(state: &Shared) -> Result<()> {
         state.db.save_skill(name, description, body, &tags, "seed", None).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_title_uses_first_line() {
+        assert_eq!(auto_title("\n\n  hello world \nmore"), "hello world");
+        assert_eq!(auto_title(""), "New chat");
+        let long = "x".repeat(100);
+        assert_eq!(auto_title(&long).chars().count(), 61);
+    }
+
+    #[test]
+    fn history_includes_summary_and_skips_system() {
+        let s = Session {
+            id: "s".into(),
+            title: String::new(),
+            agent_id: "a".into(),
+            channel: "web".into(),
+            channel_ref: None,
+            parent_session_id: None,
+            summary: Some("earlier".into()),
+            summary_upto: 2,
+            archived: false,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let m = |seq: i64, role: &str| Message { id: seq.to_string(), session_id: "s".into(), seq, role: role.into(), parts: vec![Part::Text { text: "t".into() }], agent_id: None, created_at: 0 };
+        let chat = history_to_chat(&s, &[m(1, "user"), m(2, "assistant"), m(3, "system"), m(4, "user")]);
+        assert_eq!(chat.len(), 3);
+        assert!(chat[0].parts.iter().any(|p| matches!(p, Part::Text { text } if text.contains("earlier"))));
+        assert_eq!(chat[2].role, "user");
+    }
 }
