@@ -1,0 +1,57 @@
+[package]
+name = "kongming"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "kongming: a small agentic AI daemon (nanobot UI, hermes-style self-improving loop, grokbot-style agent roles) for 1 GB boards; all state lives in Turso"
+license = "MIT"
+repository = "https://github.com/sudtanj/kongming"
+
+[lib]
+name = "kongming"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kongming"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+axum = { version = "0.7", features = ["json", "macros", "ws"] }
+tower-http = { version = "0.5", features = ["trace"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+futures-util = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+sha2 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
+rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+anyhow = "1"
+thiserror = "1"
+parking_lot = "0.12"
+clap = { version = "4", features = ["derive", "env"] }
+url = "2"
+async-trait = "0.1"
+subtle = "2"
+
+[dev-dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio-tungstenite = "0.24"
+http-body-util = "0.1"
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 1

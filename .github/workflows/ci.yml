@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  test:
+    name: fmt, clippy, unit + integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Lockfile
+        run: test -f Cargo.lock || cargo generate-lockfile
+      - name: Clippy
+        id: clippy
+        continue-on-error: true
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tests
+        id: tests
+        continue-on-error: true
+        run: cargo test --all-targets -- --nocapture
+      - name: Format
+        id: fmt
+        continue-on-error: true
+        run: cargo fmt --all --check || { cargo fmt --all && git diff > fmt.patch; exit 1; }
+      - name: Upload rustfmt patch
+        if: steps.fmt.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fmt.patch
+          path: fmt.patch
+      - name: Upload Cargo.lock (commit it after the first green run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cargo.lock
+          path: Cargo.lock
+      - name: Gate
+        if: steps.clippy.outcome != 'success' || steps.tests.outcome != 'success' || steps.fmt.outcome != 'success'
+        run: |
+          echo "clippy=${{ steps.clippy.outcome }} tests=${{ steps.tests.outcome }} fmt=${{ steps.fmt.outcome }}"
+          exit 1
+
+  build:
+    name: release build (${{ matrix.target }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-musl   # Orange Pi Zero 3: static binary
+          - target: x86_64-unknown-linux-musl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Lockfile
+        run: test -f Cargo.lock || cargo generate-lockfile
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+      - name: Build
+        run: cross build --release --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/kongming dist/
+          cp README.md dist/
+          ls -la dist
+          tar -C dist -czf kongming-${{ matrix.target }}.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kongming-${{ matrix.target }}
+          path: kongming-${{ matrix.target }}.tar.gz
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: kongming-*
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.tar.gz
+          generate_release_notes: true

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="kongming">
+  <!-- kongming mark: a feather fan (羽扇), the strategist's emblem. -->
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="#1f1f24"/>
+  <g fill="none" stroke="#f3eee2" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <!-- handle -->
+    <path d="M32 56V38"/>
+    <circle cx="32" cy="38" r="3.2" fill="#1f1f24"/>
+    <!-- feathers radiating from the pivot -->
+    <path d="M32 35 L13 22"/>
+    <path d="M32 35 L17 14"/>
+    <path d="M32 35 L24 9"/>
+    <path d="M32 35 L32 7"/>
+    <path d="M32 35 L40 9"/>
+    <path d="M32 35 L47 14"/>
+    <path d="M32 35 L51 22"/>
+  </g>
+  <!-- feather tips -->
+  <g fill="#f3eee2">
+    <ellipse cx="13" cy="22" rx="3.4" ry="2.6" transform="rotate(34 13 22)"/>
+    <ellipse cx="17" cy="14" rx="3.4" ry="2.6" transform="rotate(54 17 14)"/>
+    <ellipse cx="24" cy="9" rx="3.4" ry="2.6" transform="rotate(73 24 9)"/>
+    <ellipse cx="32" cy="7" rx="3.4" ry="2.6" transform="rotate(90 32 7)"/>
+    <ellipse cx="40" cy="9" rx="3.4" ry="2.6" transform="rotate(107 40 9)"/>
+    <ellipse cx="47" cy="14" rx="3.4" ry="2.6" transform="rotate(126 47 14)"/>
+    <ellipse cx="51" cy="22" rx="3.4" ry="2.6" transform="rotate(146 51 22)"/>
+  </g>
+  <!-- accent: a warm pivot bead -->
+  <circle cx="32" cy="38" r="1.6" fill="#ef8e30"/>
+</svg>
