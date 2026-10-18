@@ -59,8 +59,10 @@ async fn unknown_tool_yields_an_error_result() {
     assert!(str_of(&tool_msg["parts"][0], "content").contains("unknown tool"), "{}", tool_msg["parts"][0]);
 }
 
-const STEPS: &str = "# Deploy\n\n1. Run `make release` on the build host.\n2. Copy the tarball to the board and restart.";
-const STEPS_V2: &str = "# Deploy\n\n1. Run `make release` on the build host.\n2. Copy the tarball over.\n3. Restart and check /health.";
+const STEPS: &str =
+    "# Deploy\n\n1. Run `make release` on the build host.\n2. Copy the tarball to the board and restart.";
+const STEPS_V2: &str =
+    "# Deploy\n\n1. Run `make release` on the build host.\n2. Copy the tarball over.\n3. Restart and check /health.";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_skill_without_a_real_body_is_sent_back() {
