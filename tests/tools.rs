@@ -341,21 +341,21 @@ async fn a_turn_that_repeats_itself_stops_at_the_step_limit() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_shell_tool_runs_commands_without_the_daemon_secrets() {
     let replies = vec![
-        tool_call("shell", json!({"command": "echo 6x7=$((6*7)); echo cdp=$CDP_URL; env | grep -c -i turso"})),
+        tool_call("shell", json!({"command": "echo 6x7=$((6*7)); env | grep -c -i turso"})),
         text("42"),
     ];
-    let app = spawn_app_with(replies, &["--shell", "/bin/sh", "--cdp-url", "http://100.64.0.9:9222"]).await;
+    let app = spawn_app_with(replies, &["--shell", "/bin/sh"]).await;
     app.disable_reflection().await;
     let sid = app.create_session().await;
     assert_eq!(app.send_wait(&sid, "what is 6x7?").await["text"], json!("42"));
     let tools = app.llm.requests()[0]["tools"].clone();
     let shell = tools.as_array().unwrap().iter().find(|t| t["function"]["name"] == json!("shell")).expect("shell tool");
-    assert!(str_of(&shell["function"], "description").contains("cdp goto URL"), "the browser is announced");
+    assert!(str_of(&shell["function"], "description").contains("read-only"), "{shell}");
     let msgs = app.messages(&sid).await;
     let part = &find_tool_message(&msgs).expect("tool message")["parts"][0];
     let content = str_of(part, "content");
-    // grep -c finds nothing (exit 1): no secrets in the environment, only the browser address.
-    assert!(content.starts_with("exit 1\n6x7=42\ncdp=http://100.64.0.9:9222\n0"), "{part}");
+    // grep -c finds nothing (exit 1): no secrets in the environment.
+    assert!(content.starts_with("exit 1\n6x7=42\n0"), "{part}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

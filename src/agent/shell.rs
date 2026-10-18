@@ -1,6 +1,6 @@
 //! The `shell` tool: one POSIX shell command at a time in a small, read-only
-//! sandbox. It is for interacting (the browser through `cdp`, hosts and URLs on
-//! the tailnet, quick text processing), not for keeping files.
+//! sandbox. It is for interacting (hosts, URLs and services on the network,
+//! commands such as `cdp`, quick text processing), not for keeping files.
 //!
 //! The Docker image ships a static BusyBox (`/opt/busybox`), so the agent gets
 //! `sh` plus the usual applets without a distro. Isolation comes from the
@@ -37,17 +37,14 @@ const PRELUDE: &str = "exec 2>&1 </dev/null\n";
 pub struct Shell {
     pub sh: PathBuf,
     path: String,
-    /// Browser for the `cdp` command, passed on as `CDP_URL`.
-    pub cdp_url: Option<String>,
     /// Landlock ruleset denying file writes; None when the kernel lacks it.
     landlock: Option<Arc<OwnedFd>>,
 }
 
 impl Shell {
     /// `shell`: path to a POSIX sh, "off" to disable, empty for the bundled
-    /// BusyBox when it exists. `cdp_url`: the Chrome DevTools endpoint, empty
-    /// for none.
-    pub fn from_config(shell: &str, cdp_url: &str) -> Option<Shell> {
+    /// BusyBox when it exists.
+    pub fn from_config(shell: &str) -> Option<Shell> {
         let sh = match shell.trim() {
             "off" | "none" | "false" | "0" => return None,
             "" if std::path::Path::new(BUSYBOX_SH).exists() => PathBuf::from(BUSYBOX_SH),
@@ -56,9 +53,8 @@ impl Shell {
         };
         let bin = sh.parent().map(|p| p.display().to_string()).unwrap_or_default();
         let path = format!("{bin}:/usr/local/bin:/usr/bin:/bin");
-        let cdp_url = Some(cdp_url.trim().to_string()).filter(|u| !u.is_empty());
         let landlock = landlock::deny_writes().ok().map(Arc::new);
-        Some(Shell { sh, path, cdp_url, landlock })
+        Some(Shell { sh, path, landlock })
     }
 
     /// How file writes are refused, for the startup log.
@@ -87,9 +83,6 @@ impl Shell {
             .stderr(Stdio::null())
             .process_group(0)
             .kill_on_drop(true);
-        if let Some(url) = &self.cdp_url {
-            cmd.env("CDP_URL", url);
-        }
         let ruleset = self.landlock.as_ref().map(|fd| fd.as_raw_fd());
         // SAFETY: `confine` only makes async-signal-safe syscalls.
         unsafe { cmd.pre_exec(move || confine(ruleset)) };
@@ -262,16 +255,14 @@ mod tests {
     use super::*;
 
     fn sh() -> Shell {
-        Shell::from_config("/bin/sh", "").unwrap()
+        Shell::from_config("/bin/sh").unwrap()
     }
 
     #[test]
     fn config_picks_the_shell() {
-        assert!(Shell::from_config("off", "").is_none());
-        let s = Shell::from_config("/bin/sh", " http://100.64.0.9:9222 ").unwrap();
-        assert!(s.path.starts_with("/bin:"));
-        assert_eq!(s.cdp_url.as_deref(), Some("http://100.64.0.9:9222"));
-        assert!(sh().cdp_url.is_none());
+        assert!(Shell::from_config("off").is_none());
+        assert!(Shell::from_config(" none ").is_none());
+        assert!(sh().path.starts_with("/bin:"));
     }
 
     #[test]

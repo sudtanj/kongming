@@ -134,7 +134,7 @@ impl AppState {
             Some(s) if !s.is_empty() => s.as_bytes().to_vec(),
             _ => crate::mcp::oauth::random_token(32).into_bytes(),
         };
-        let shell = crate::agent::shell::Shell::from_config(&cfg.shell, &cfg.cdp_url);
+        let shell = crate::agent::shell::Shell::from_config(&cfg.shell);
         Arc::new(AppState {
             mcp: McpManager::new(db.clone(), http.clone()),
             cfg,

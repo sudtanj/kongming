@@ -943,7 +943,7 @@ The `shell` tool runs one `sh -c` script in a read-only BusyBox sandbox on the k
 - `busybox --list` shows every applet.
 
 ## Driving Chrome with cdp
-The browser address is `$CDP_URL` when kongming has one configured (the shell tool's description then says a browser is connected); otherwise take it from another skill or from the user and start the command with it: `export CDP_URL=http://<ip>:9222; cdp tabs` (or `cdp --url http://<ip>:9222 tabs`). It is not kept between calls, so set it in every command. `cdp help` lists everything; page commands act on the first open tab unless you pass `--tab ID`.
+The browser address (`http://<ip>:9222`) comes from another skill or from the user. Give it in every command, since nothing is kept between calls: `cdp --url http://<ip>:9222 tabs`, or `export CDP_URL=http://<ip>:9222; cdp tabs && cdp text`. `cdp help` lists everything; page commands act on the first open tab unless you pass `--tab ID`.
 1. `cdp tabs` lists the tabs (id, title, url).
 2. `cdp goto URL` loads a page and waits for it.
 3. Read it: `cdp text | head -c 4000`, or search it: `cdp text | grep -i -n -A2 'price'`.

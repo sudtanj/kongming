@@ -61,11 +61,6 @@ pub struct Config {
     /// BusyBox bundled in the Docker image (/opt/busybox/bin/sh) when present.
     #[arg(long, env = "KONGMING_SHELL", default_value = "")]
     pub shell: String,
-
-    /// Chrome DevTools endpoint the shell's `cdp` command drives, e.g. the
-    /// chrome-cdp session on the tailnet: http://<100.x ip>:9222. Empty: none.
-    #[arg(long, env = "KONGMING_CDP_URL", default_value = "")]
-    pub cdp_url: String,
 }
 
 impl Config {

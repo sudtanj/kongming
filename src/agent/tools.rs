@@ -58,27 +58,13 @@ pub fn builtin_specs(agent: &Agent, can_delegate: bool, sh: Option<&shell::Shell
             parameters: obj(json!({}), &[]),
         },
     ];
-    if let Some(sh) = sh {
-        let mut description =
-            "Run a command in a local, isolated, read-only POSIX shell (BusyBox: sh, grep, sed, awk, \
-sort, wc, wget, nc, nslookup, …) and get its output and exit code. It is for interacting, not for storage: nothing \
-can be written to disk (files cannot be created, changed or deleted), so pass data along with pipes instead, e.g. \
-`wget -qO- URL | grep …`. Nothing secret is reachable from it. Use it to talk to hosts, ports and URLs on this machine \
-and the tailnet, and for quick calculations or text processing."
-                .to_string();
-        if sh.cdp_url.is_some() {
-            description.push_str(
-                " A real Chrome browser on the tailnet is connected over the Chrome DevTools Protocol (CDP): drive it \
-with the `cdp` command, e.g. `cdp tabs`, `cdp goto URL`, `cdp text | head -c 4000`, `cdp click 'SELECTOR'`, \
-`cdp type 'SELECTOR' 'TEXT'`, `cdp press Enter`, `cdp eval 'JS'`, `cdp call Domain.method '{json}'`; `cdp help` \
-lists everything. Use it for pages that need JavaScript or a logged-in session.",
-            );
-        } else {
-            description.push_str(
-                " `cdp` drives a Chrome browser over the Chrome DevTools Protocol when you have its address (from a \
-skill or the user): `cdp --url http://<ip>:9222 tabs`; `cdp help` lists everything.",
-            );
-        }
+    if sh.is_some() {
+        let description = "Run a command in a local, isolated, read-only POSIX shell (BusyBox: sh, grep, sed, awk, \
+sort, wc, wget, nc, nslookup, …, plus `cdp`, a Chrome DevTools Protocol client) and get its output and exit code. It \
+is for interacting, not for storage: nothing can be written to disk (files cannot be created, changed or deleted), so \
+pass data along with pipes instead, e.g. `wget -qO- URL | grep …`. Nothing secret is reachable from it. Skills say \
+how to use it for particular jobs."
+            .to_string();
         v.push(ToolSpec {
             name: "shell".into(),
             description,
@@ -695,7 +681,7 @@ mod tests {
 
     #[test]
     fn specs_follow_agent_permissions() {
-        let sh = shell::Shell::from_config("/bin/sh", "").unwrap();
+        let sh = shell::Shell::from_config("/bin/sh").unwrap();
         let names = |a: &Agent, d: bool| builtin_specs(a, d, Some(&sh)).into_iter().map(|t| t.name).collect::<Vec<_>>();
         let full = names(&agent(true, None), true);
         assert!(full.contains(&"skill_manage".to_string()));
