@@ -1,9 +1,8 @@
 //! `cdp`: a small Chrome DevTools Protocol client for the `shell` tool.
 //!
-//! BusyBox has no WebSocket client and Node + Playwright do not fit on the
-//! board, so the kongming binary doubles as a command (`kongming cdp ...`, or
-//! the `cdp` link in the Docker image) that drives a Chrome over CDP, the
-//! endpoint Playwright's `connectOverCDP` uses, e.g. the `chrome-cdp` session
+//! BusyBox has no WebSocket client, so the kongming binary doubles as a
+//! command (`kongming cdp ...`, or the `cdp` link in the Docker image) that
+//! drives a Chrome over CDP, e.g. the `chrome-cdp` session
 //! on the tailnet. The endpoint comes from `CDP_URL` (set by the daemon from
 //! `KONGMING_CDP_URL`) or `--url`.
 //!
@@ -20,7 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 pub const USAGE: &str =
-    "cdp: drive a Chrome browser over the DevTools protocol (the endpoint Playwright's connectOverCDP uses).
+    "cdp: drive a Chrome browser over the Chrome DevTools Protocol (CDP).
 Browser: $CDP_URL, or --url http://<tailnet ip>:9222. Page commands act on the first open tab, or on --tab ID.
 
   cdp version                  browser version

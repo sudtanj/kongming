@@ -340,14 +340,13 @@ async fn a_turn_that_repeats_itself_stops_at_the_step_limit() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_shell_tool_runs_commands_without_the_daemon_secrets() {
-    let dir = std::env::temp_dir().join(format!("kongming-work-{}", uuid::Uuid::new_v4()));
     let replies = vec![
         tool_call("shell", json!({"command": "echo 6x7=$((6*7)); echo cdp=$CDP_URL; env | grep -c -i turso"})),
         text("42"),
     ];
     let app = spawn_app_with(
         replies,
-        &["--shell", "/bin/sh", "--workdir", dir.to_str().unwrap(), "--cdp-url", "http://100.64.0.9:9222"],
+        &["--shell", "/bin/sh", "--cdp-url", "http://100.64.0.9:9222"],
     )
     .await;
     app.disable_reflection().await;
@@ -361,7 +360,6 @@ async fn the_shell_tool_runs_commands_without_the_daemon_secrets() {
     let content = str_of(part, "content");
     // grep -c finds nothing (exit 1): no secrets in the environment, only the browser address.
     assert!(content.starts_with("exit 1\n6x7=42\ncdp=http://100.64.0.9:9222\n0"), "{part}");
-    assert!(dir.is_dir(), "the working directory was created");
 }
 
 #[tokio::test(flavor = "multi_thread")]

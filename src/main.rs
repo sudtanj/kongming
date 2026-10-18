@@ -54,7 +54,7 @@ async fn run(cfg: config::Config) -> Result<()> {
         if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
             tracing::warn!("could not mark the process non-dumpable");
         }
-        tracing::info!(sh = %sh.sh.display(), workdir = %sh.workdir.display(), "shell tool enabled");
+        tracing::info!(sh = %sh.sh.display(), confinement = sh.confinement(), "shell tool enabled");
     }
     agent::ensure_default_agent(&state).await?;
     if let Err(e) = agent::seed_skills(&state).await {

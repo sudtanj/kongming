@@ -62,11 +62,6 @@ pub struct Config {
     #[arg(long, env = "KONGMING_SHELL", default_value = "")]
     pub shell: String,
 
-    /// Scratch working directory of the `shell` tool (a tmpfs in the
-    /// container). Empty: <temp dir>/kongming-work.
-    #[arg(long, env = "KONGMING_WORKDIR", default_value = "")]
-    pub workdir: String,
-
     /// Chrome DevTools endpoint the shell's `cdp` command drives, e.g. the
     /// chrome-cdp session on the tailnet: http://<100.x ip>:9222. Empty: none.
     #[arg(long, env = "KONGMING_CDP_URL", default_value = "")]

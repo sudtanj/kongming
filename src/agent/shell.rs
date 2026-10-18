@@ -1,16 +1,22 @@
-//! The `shell` tool: one POSIX shell command at a time in a small sandbox.
+//! The `shell` tool: one POSIX shell command at a time in a small, read-only
+//! sandbox. It is for interacting (the browser through `cdp`, hosts and URLs on
+//! the tailnet, quick text processing), not for keeping files.
 //!
 //! The Docker image ships a static BusyBox (`/opt/busybox`), so the agent gets
 //! `sh` plus the usual applets without a distro. Isolation comes from the
 //! container (read-only root, no capabilities, pid and memory caps) plus what
-//! is set here: an empty environment (no secrets), a scratch working
-//! directory (a tmpfs in the container), a process group killed on timeout,
-//! ulimits, and an OOM score that makes the kernel kill the command before the
-//! daemon. `main` marks the daemon non-dumpable so a command cannot read its
-//! environment or memory through /proc.
+//! is set here: an empty environment (no secrets), `/` as the working
+//! directory, a process group killed on timeout, and no file writes: a
+//! Landlock ruleset (when the kernel has it) refuses creating, changing or
+//! deleting anything except writing to /dev/null, and a zero file-size limit
+//! keeps any file that can still be created empty. The kernel's OOM killer
+//! picks the command before the daemon. `main` marks the daemon non-dumpable
+//! so a command cannot read its environment or memory through /proc.
 
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -24,30 +30,24 @@ pub const MAX_TIMEOUT: u64 = 300;
 const OUTPUT_LIMIT: usize = 12_000;
 const READ_LIMIT: usize = 1 << 20;
 
-/// Runs before every command: stderr joins stdout, the kernel's OOM killer
-/// picks the command first, and limits that cannot be raised again (no
-/// capabilities): 64 MiB files, no core dumps. Memory is capped by the
-/// container; the OOM score keeps the daemon alive when a command hits it.
-const PRELUDE: &str = "exec 2>&1 </dev/null
-echo 1000 >/proc/self/oom_score_adj 2>/dev/null
-ulimit -f 131072 2>/dev/null
-ulimit -c 0 2>/dev/null
-";
+/// Runs before every command: stderr joins stdout, no input.
+const PRELUDE: &str = "exec 2>&1 </dev/null\n";
 
 #[derive(Debug, Clone)]
 pub struct Shell {
     pub sh: PathBuf,
-    pub workdir: PathBuf,
     path: String,
     /// Browser for the `cdp` command, passed on as `CDP_URL`.
     pub cdp_url: Option<String>,
+    /// Landlock ruleset denying file writes; None when the kernel lacks it.
+    landlock: Option<Arc<OwnedFd>>,
 }
 
 impl Shell {
     /// `shell`: path to a POSIX sh, "off" to disable, empty for the bundled
-    /// BusyBox when it exists. `workdir`: empty for `<tmp>/kongming-work`.
-    /// `cdp_url`: the Chrome DevTools endpoint, empty for none.
-    pub fn from_config(shell: &str, workdir: &str, cdp_url: &str) -> Option<Shell> {
+    /// BusyBox when it exists. `cdp_url`: the Chrome DevTools endpoint, empty
+    /// for none.
+    pub fn from_config(shell: &str, cdp_url: &str) -> Option<Shell> {
         let sh = match shell.trim() {
             "off" | "none" | "false" | "0" => return None,
             "" if std::path::Path::new(BUSYBOX_SH).exists() => PathBuf::from(BUSYBOX_SH),
@@ -56,26 +56,30 @@ impl Shell {
         };
         let bin = sh.parent().map(|p| p.display().to_string()).unwrap_or_default();
         let path = format!("{bin}:/usr/local/bin:/usr/bin:/bin");
-        let workdir = match workdir.trim() {
-            "" => std::env::temp_dir().join("kongming-work"),
-            w => PathBuf::from(w),
-        };
         let cdp_url = Some(cdp_url.trim().to_string()).filter(|u| !u.is_empty());
-        Some(Shell { sh, workdir, path, cdp_url })
+        let landlock = landlock::deny_writes().ok().map(Arc::new);
+        Some(Shell { sh, path, cdp_url, landlock })
+    }
+
+    /// How file writes are refused, for the startup log.
+    pub fn confinement(&self) -> &'static str {
+        if self.landlock.is_some() {
+            "landlock: no file writes"
+        } else {
+            "no landlock in this kernel: zero file-size limit only"
+        }
     }
 
     /// Run `command`; returns the output with its exit status and whether it failed.
     pub async fn run(&self, command: &str, timeout_secs: u64) -> Result<(String, bool)> {
-        tokio::fs::create_dir_all(&self.workdir).await.context("creating the shell working directory")?;
         let secs = timeout_secs.clamp(1, MAX_TIMEOUT);
         let mut cmd = Command::new(&self.sh);
         cmd.arg("-c")
             .arg(format!("{PRELUDE}{command}"))
-            .current_dir(&self.workdir)
+            .current_dir("/")
             .env_clear()
             .env("PATH", &self.path)
-            .env("HOME", &self.workdir)
-            .env("TMPDIR", &self.workdir)
+            .env("HOME", "/")
             .env("TERM", "dumb")
             .env("LANG", "C.UTF-8")
             .stdin(Stdio::null())
@@ -86,6 +90,9 @@ impl Shell {
         if let Some(url) = &self.cdp_url {
             cmd.env("CDP_URL", url);
         }
+        let ruleset = self.landlock.as_ref().map(|fd| fd.as_raw_fd());
+        // SAFETY: `confine` only makes async-signal-safe syscalls.
+        unsafe { cmd.pre_exec(move || confine(ruleset)) };
         let mut child = cmd.spawn().with_context(|| format!("starting {}", self.sh.display()))?;
         let pgid = child.id().map(|p| p as i32);
         let mut out = child.stdout.take().context("shell stdout")?;
@@ -144,6 +151,100 @@ impl Shell {
     }
 }
 
+/// In the child between fork and exec. The OOM score goes first, while
+/// /proc can still be written.
+fn confine(ruleset: Option<RawFd>) -> std::io::Result<()> {
+    // SAFETY: plain syscalls on constant or stack arguments.
+    unsafe {
+        let fd = libc::open(b"/proc/self/oom_score_adj\0".as_ptr().cast(), libc::O_WRONLY | libc::O_CLOEXEC);
+        if fd >= 0 {
+            libc::write(fd, b"1000".as_ptr().cast(), 4);
+            libc::close(fd);
+        }
+        let zero = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        libc::setrlimit(libc::RLIMIT_FSIZE, &zero);
+        libc::setrlimit(libc::RLIMIT_CORE, &zero);
+        // A write past the limit fails with "File too large" instead of killing the command.
+        libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+        if let Some(fd) = ruleset {
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 || landlock::restrict_self(fd) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Just enough Landlock (Linux 5.13+, unprivileged) to refuse every file
+/// write; reading and running programs stay allowed. Raw syscalls: their
+/// numbers are the same on aarch64 and x86_64.
+mod landlock {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+
+    const CREATE_RULESET: libc::c_long = 444;
+    const ADD_RULE: libc::c_long = 445;
+    const RESTRICT_SELF: libc::c_long = 446;
+    const CREATE_RULESET_VERSION: libc::c_uint = 1;
+    const RULE_PATH_BENEATH: libc::c_uint = 1;
+
+    const WRITE_FILE: u64 = 1 << 1;
+    /// REMOVE_DIR, REMOVE_FILE and every MAKE_* (char, dir, reg, sock, fifo, block, sym).
+    const REMOVE_AND_MAKE: u64 = 0x1ff0;
+    const REFER: u64 = 1 << 13; // ABI 2
+    const TRUNCATE: u64 = 1 << 14; // ABI 3
+
+    #[repr(C)]
+    struct RulesetAttr {
+        handled_access_fs: u64,
+    }
+
+    #[repr(C, packed)]
+    struct PathBeneath {
+        allowed_access: u64,
+        parent_fd: i32,
+    }
+
+    pub fn deny_writes() -> std::io::Result<OwnedFd> {
+        let err = std::io::Error::last_os_error;
+        // SAFETY: the Landlock syscalls with valid pointers and sizes; the
+        // returned descriptor is owned (and close-on-exec) from here on.
+        unsafe {
+            let abi = libc::syscall(CREATE_RULESET, std::ptr::null::<RulesetAttr>(), 0usize, CREATE_RULESET_VERSION);
+            if abi < 1 {
+                return Err(err());
+            }
+            let mut handled = WRITE_FILE | REMOVE_AND_MAKE;
+            let mut null_access = WRITE_FILE;
+            if abi >= 2 {
+                handled |= REFER;
+            }
+            if abi >= 3 {
+                handled |= TRUNCATE;
+                null_access |= TRUNCATE;
+            }
+            let attr = RulesetAttr { handled_access_fs: handled };
+            let fd = libc::syscall(CREATE_RULESET, &attr as *const RulesetAttr, std::mem::size_of::<RulesetAttr>(), 0u32);
+            if fd < 0 {
+                return Err(err());
+            }
+            let ruleset = OwnedFd::from_raw_fd(fd as RawFd);
+            // `2>/dev/null` keeps working.
+            let null = std::fs::File::open("/dev/null")?;
+            let rule = PathBeneath { allowed_access: null_access, parent_fd: null.as_raw_fd() };
+            if libc::syscall(ADD_RULE, ruleset.as_raw_fd(), RULE_PATH_BENEATH, &rule as *const PathBeneath, 0u32) != 0 {
+                return Err(err());
+            }
+            Ok(ruleset)
+        }
+    }
+
+    /// In the child, after PR_SET_NO_NEW_PRIVS.
+    pub fn restrict_self(ruleset: RawFd) -> libc::c_long {
+        // SAFETY: plain syscall; a bad descriptor just fails.
+        unsafe { libc::syscall(RESTRICT_SELF, ruleset, 0u32) }
+    }
+}
+
 /// Keep the start and the end of long output; the end usually holds the error.
 fn head_tail(s: &str, max: usize) -> String {
     let n = s.chars().count();
@@ -160,18 +261,16 @@ mod tests {
     use super::*;
 
     fn sh() -> Shell {
-        let dir = std::env::temp_dir().join(format!("kongming-shell-test-{}", uuid::Uuid::new_v4()));
-        Shell::from_config("/bin/sh", &dir.display().to_string(), "").unwrap()
+        Shell::from_config("/bin/sh", "").unwrap()
     }
 
     #[test]
     fn config_picks_the_shell() {
-        assert!(Shell::from_config("off", "", "").is_none());
-        let s = Shell::from_config("/bin/sh", "/work", " http://100.64.0.9:9222 ").unwrap();
-        assert_eq!(s.workdir, PathBuf::from("/work"));
+        assert!(Shell::from_config("off", "").is_none());
+        let s = Shell::from_config("/bin/sh", " http://100.64.0.9:9222 ").unwrap();
         assert!(s.path.starts_with("/bin:"));
         assert_eq!(s.cdp_url.as_deref(), Some("http://100.64.0.9:9222"));
-        assert!(Shell::from_config("/bin/sh", "", "").unwrap().cdp_url.is_none());
+        assert!(sh().cdp_url.is_none());
     }
 
     #[test]
@@ -184,17 +283,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runs_in_a_clean_scratch_directory() {
-        let s = sh();
-        let (out, failed) =
-            s.run("echo hi; echo oops >&2; pwd; echo \"[$KONGMING_TURSO_AUTH_TOKEN]\"", 10).await.unwrap();
+    async fn runs_without_secrets_in_the_root() {
+        let (out, failed) = sh()
+            .run("echo hi; echo oops >&2; pwd; echo \"[$KONGMING_TURSO_AUTH_TOKEN]\"; echo x >/dev/null && echo null-ok", 10)
+            .await
+            .unwrap();
         assert!(!failed, "{out}");
-        assert!(out.starts_with("exit 0\nhi\noops\n"), "{out}");
-        assert!(out.contains(&s.workdir.display().to_string()), "{out}");
-        assert!(out.contains("[]"), "{out}");
-        let (out, failed) = s.run("echo left > note.txt; cat note.txt; exit 3", 10).await.unwrap();
+        assert!(out.starts_with("exit 0\nhi\noops\n/\n[]\nnull-ok"), "{out}");
+        let (out, failed) = sh().run("echo out | tr a-z A-Z; exit 3", 10).await.unwrap();
         assert!(failed);
-        assert!(out.starts_with("exit 3\nleft"), "{out}");
+        assert!(out.starts_with("exit 3\nOUT"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn nothing_is_stored_on_disk() {
+        let f = std::env::temp_dir().join(format!("kongming-shell-test-{}", uuid::Uuid::new_v4()));
+        let s = sh();
+        let (out, _) = s.run(&format!("echo stored > {0}; echo rc=$?; cat {0}; echo end", f.display()), 10).await.unwrap();
+        let kept = std::fs::read_to_string(&f).unwrap_or_default();
+        let _ = std::fs::remove_file(&f);
+        assert!(!out.contains("rc=0"), "{} {out}", s.confinement());
+        assert!(!out.contains("stored\n"), "{out}");
+        assert!(kept.is_empty(), "{kept}");
     }
 
     #[tokio::test]
