@@ -2,8 +2,6 @@
 
 mod support;
 
-use std::time::Duration;
-
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use support::{spawn_app, text, TestApp};
@@ -18,7 +16,7 @@ async fn connect(app: &TestApp) -> Ws {
     let mut req = app.ws_url().into_client_request().expect("ws request");
     let cookie = format!("{}={}", kongming::web::auth::COOKIE, app.token);
     req.headers_mut().insert("cookie", HeaderValue::from_str(&cookie).expect("cookie value"));
-    let (ws, _resp) = tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async(req))
+    let (ws, _resp) = tokio::time::timeout(support::timeout(), tokio_tungstenite::connect_async(req))
         .await
         .expect("ws connect timed out")
         .expect("ws connect");
@@ -28,7 +26,7 @@ async fn connect(app: &TestApp) -> Ws {
 /// Next text frame as JSON (control frames are skipped).
 async fn next_json(ws: &mut Ws) -> Value {
     loop {
-        let frame = tokio::time::timeout(Duration::from_secs(10), ws.next())
+        let frame = tokio::time::timeout(support::timeout(), ws.next())
             .await
             .expect("timed out waiting for a frame")
             .expect("socket closed")
@@ -50,7 +48,7 @@ async fn rejects_unauthenticated_connections() {
     let app = spawn_app(vec![]).await;
     let req = app.ws_url().into_client_request().expect("ws request");
     let res =
-        tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async(req)).await.expect("timeout");
+        tokio::time::timeout(support::timeout(), tokio_tungstenite::connect_async(req)).await.expect("timeout");
     assert!(res.is_err(), "connection without a cookie must be refused");
 }
 
@@ -91,7 +89,7 @@ async fn streams_a_turn_over_the_socket() {
     // A real turn.
     send_json(&mut ws, json!({"type": "send", "sessionId": sid, "text": "hi", "requestId": "1"})).await;
     let mut frames: Vec<Value> = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + support::timeout();
     loop {
         assert!(tokio::time::Instant::now() < deadline, "no turn_end; frames so far: {frames:?}");
         let f = next_json(&mut ws).await;
@@ -152,7 +150,7 @@ async fn streams_a_turn_over_the_socket() {
     app.llm.push(vec![text("second")]);
     send_json(&mut ws, json!({"type": "send", "sessionId": sid, "text": "again", "requestId": "2"})).await;
     let mut saw_end = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + support::timeout();
     while tokio::time::Instant::now() < deadline {
         let f = next_json(&mut ws2).await;
         if f["type"] == json!("turn_end") && f["sessionId"] == json!(sid) {

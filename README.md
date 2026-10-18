@@ -100,6 +100,8 @@ cross build --release --target aarch64-unknown-linux-musl
 
 CI builds static musl binaries for `aarch64` and `x86_64` and attaches them to GitHub releases on `v*` tags. The Docker image is a glibc build on `distroless/cc`; see `builder-tools/kongming` in infrastructure-tools.
 
+Every push also runs an Orange Pi Zero 3 simulation (`ci/orangepi-sim.sh`). The aarch64 test binaries and the release binary run in an arm64 container cut to the board: 4 CPUs, 1 GB RAM with no swap, and a read-only root filesystem. One run is on an x86 runner under QEMU pinned to the board's Cortex-A53. This catches CPU features the H618 lacks, and the slowdown shakes out timing bugs. The other runs natively on an arm64 runner with the daemon held to 128 MB. Both boot the daemon against a real libSQL server, push a burst of API traffic, restart it and check that everything comes back from the database. Memory figures land in the job summary. A release is only published when the simulation passes.
+
 ## License
 
 MIT

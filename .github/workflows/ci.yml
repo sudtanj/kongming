@@ -90,7 +90,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, orangepi-sim]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -104,3 +104,73 @@ jobs:
         with:
           files: artifacts/*.tar.gz
           generate_release_notes: true
+
+  orangepi-tests:
+    name: Orange Pi build (aarch64 test binaries)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: orangepi-tests
+      - name: Lockfile
+        run: test -f Cargo.lock || cargo generate-lockfile
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+      - name: Build test binaries
+        run: |
+          cross test --target aarch64-unknown-linux-musl --no-run --message-format=json-render-diagnostics > build.jsonl
+          mkdir -p sim/tests
+          jq -rR 'fromjson? | select(.reason == "compiler-artifact" and .profile.test and .executable != null) | .executable' build.jsonl |
+            while read -r exe; do cp "target/aarch64-unknown-linux-musl/debug/deps/$(basename "$exe")" sim/tests/; done
+          ls -la sim/tests
+          tar -C sim -cf orangepi-tests.tar tests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orangepi-tests
+          path: orangepi-tests.tar
+
+  orangepi-sim:
+    name: Orange Pi Zero 3 simulation (${{ matrix.label }})
+    needs: [orangepi-tests, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86 runner + QEMU pinned to the board's Cortex-A53: catches CPU
+          # features the H618 lacks, and the slowdown shakes out timing bugs.
+          - label: emulated Cortex-A53
+            runner: ubuntu-latest
+            memory: 1g
+          # Native arm64: real memory figures, daemon held to 128 MB.
+          - label: native arm64, 128 MB
+            runner: ubuntu-24.04-arm
+            memory: 128m
+    runs-on: ${{ matrix.runner }}
+    env:
+      SIM_LABEL: ${{ matrix.label }}
+      SIM_MEMORY: ${{ matrix.memory }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64,amd64
+      - uses: actions/download-artifact@v4
+        with:
+          name: orangepi-tests
+      - uses: actions/download-artifact@v4
+        with:
+          name: kongming-aarch64-unknown-linux-musl
+      - name: Unpack
+        run: |
+          mkdir -p sim/bin
+          tar -C sim -xf orangepi-tests.tar
+          tar -C sim/bin -xzf kongming-aarch64-unknown-linux-musl.tar.gz
+          file sim/bin/kongming
+      - name: Unit and integration tests on the board
+        run: ci/orangepi-sim.sh tests sim/tests
+      - name: Daemon smoke test on the board
+        run: ci/orangepi-sim.sh smoke sim/bin/kongming

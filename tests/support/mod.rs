@@ -21,7 +21,12 @@ use rusqlite::types::ValueRef;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 
-pub const TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a test waits for anything: 10 s, or `KONGMING_TEST_TIMEOUT_SECS`
+/// (the Orange Pi simulation in CI runs under QEMU and needs longer).
+pub fn timeout() -> Duration {
+    let secs = std::env::var("KONGMING_TEST_TIMEOUT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
+    Duration::from_secs(secs)
+}
 
 /// Bind a router on an ephemeral loopback port and return its base URL.
 pub async fn serve(router: Router) -> String {
@@ -35,7 +40,7 @@ pub async fn serve(router: Router) -> String {
 
 /// Await a future with the standard test timeout.
 pub async fn within<F: std::future::Future>(fut: F) -> F::Output {
-    tokio::time::timeout(TIMEOUT, fut).await.expect("timed out waiting")
+    tokio::time::timeout(timeout(), fut).await.expect("timed out waiting")
 }
 
 // ------------------------------------------------------------------ Hrana mock
@@ -562,13 +567,13 @@ impl TestApp {
     }
 }
 
-/// Poll `check` every 50 ms until it returns `Some`, or panic after `TIMEOUT`.
+/// Poll `check` every 50 ms until it returns `Some`, or panic after `timeout()`.
 pub async fn poll_until<T, F, Fut>(what: &str, mut check: F) -> T
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Option<T>>,
 {
-    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    let deadline = tokio::time::Instant::now() + timeout();
     loop {
         if let Some(v) = check().await {
             return v;
