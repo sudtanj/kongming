@@ -178,7 +178,8 @@ mod tests {
     #[tokio::test]
     async fn runs_in_a_clean_scratch_directory() {
         let s = sh();
-        let (out, failed) = s.run("echo hi; echo oops >&2; pwd; echo \"[$KONGMING_TURSO_AUTH_TOKEN]\"", 10).await.unwrap();
+        let (out, failed) =
+            s.run("echo hi; echo oops >&2; pwd; echo \"[$KONGMING_TURSO_AUTH_TOKEN]\"", 10).await.unwrap();
         assert!(!failed, "{out}");
         assert!(out.starts_with("exit 0\nhi\noops\n"), "{out}");
         assert!(out.contains(&s.workdir.display().to_string()), "{out}");

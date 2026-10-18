@@ -626,8 +626,9 @@ async fn run_turn_inner(
             .any(|p| matches!(p, Part::ToolResult { name, is_error: false, .. } if name == "agent_manage"));
         if hired && !plan.can_delegate {
             plan.can_delegate = true;
-            plan.tools
-                .extend(tools::builtin_specs(&plan.agent, true, false).into_iter().filter(|t| t.name == "delegate_task"));
+            plan.tools.extend(
+                tools::builtin_specs(&plan.agent, true, false).into_iter().filter(|t| t.name == "delegate_task"),
+            );
         }
         let tool_msg = state.db.append_message(&session.id, "tool", &results, Some(&plan.agent.id)).await?;
         state.emit(Event::Message { session_id: session.id.clone(), message: tool_msg });
@@ -797,7 +798,12 @@ async fn reflect(state: Shared, agent: Agent, session: Session, model: String) -
             if specs.iter().any(|t| t.name == name) {
                 results.push(execute_tool(&ctx, &id, &name, &args).await);
             } else {
-                results.push(Part::ToolResult { id, name, content: "error: not available here".into(), is_error: true });
+                results.push(Part::ToolResult {
+                    id,
+                    name,
+                    content: "error: not available here".into(),
+                    is_error: true,
+                });
             }
         }
         chat.push(ChatMessage { role: "assistant".into(), parts });
