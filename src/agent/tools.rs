@@ -90,6 +90,28 @@ pub fn builtin_specs(agent: &Agent, can_delegate: bool) -> Vec<ToolSpec> {
             ),
         });
     }
+    if agent.is_default {
+        v.push(ToolSpec {
+            name: "agent_manage".into(),
+            description: "Grow your team. create: a new agent that reports to you, with a handle, a role and a description \
+of what it owns; hand it work with delegate_task (available as soon as it exists). update: change an agent that reports to \
+you. Create an agent for a recurring specialty, not for a single task."
+                .into(),
+            parameters: obj(
+                json!({
+                    "op": {"type": "string", "enum": ["create", "update"]},
+                    "handle": {"type": "string", "description": "short lowercase handle, e.g. researcher"},
+                    "name": {"type": "string", "description": "display name, e.g. Researcher"},
+                    "role": {"type": "string", "description": "job title, e.g. Research analyst"},
+                    "description": {"type": "string", "description": "what it is responsible for; you see it when delegating"},
+                    "system_prompt": {"type": "string", "description": "persona and working rules (optional)"},
+                    "tools": {"type": "array", "items": {"type": "string"}, "description": "built-in tools it may use; omit for all"},
+                    "model": {"type": "string", "description": "model override; omit to use the default model"}
+                }),
+                &["op", "handle"],
+            ),
+        });
+    }
     if can_delegate {
         v.push(ToolSpec {
             name: "delegate_task".into(),
@@ -132,6 +154,7 @@ pub async fn run_builtin(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Option<
         "web_fetch" => web_fetch(ctx, args).await,
         "current_time" => Ok(current_time()),
         "delegate_task" => delegate(ctx, args).await,
+        "agent_manage" => agent_manage(ctx, args).await,
         _ => return None,
     };
     Some(r.map(|t| (t, false)))
@@ -497,6 +520,73 @@ fn current_time() -> String {
     let now = time::OffsetDateTime::now_utc();
     let fmt = time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
     format!("{} UTC (unix {})", now.format(&fmt).unwrap_or_default(), now.unix_timestamp())
+}
+
+/// The lead agent hires (or adjusts) its own direct reports.
+async fn agent_manage(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
+    if !ctx.agent.is_default {
+        bail!("only the lead agent may add agents to the team");
+    }
+    let handle = crate::db::normalize_handle(s(args, "handle"))?;
+    let op = s(args, "op");
+    let mut a = match (op, ctx.state.db.agent_by_handle(&handle).await?) {
+        ("create", Some(_)) => bail!("@{handle} already exists; use op update, or pick another handle"),
+        ("create", None) => {
+            let now = crate::db::now_ms();
+            Agent {
+                id: crate::db::new_id(),
+                handle: handle.clone(),
+                name: handle.clone(),
+                role: String::new(),
+                description: String::new(),
+                system_prompt: String::new(),
+                model: None,
+                provider: None,
+                manager_id: Some(ctx.agent.id.clone()),
+                tools: None,
+                mcp_servers: None,
+                pinned_skills: vec![],
+                self_improve: true,
+                is_default: false,
+                created_at: now,
+                updated_at: now,
+            }
+        }
+        ("update", Some(a)) if a.manager_id.as_deref() == Some(ctx.agent.id.as_str()) => a,
+        ("update", Some(_)) => bail!("@{handle} does not report to you; you can only change your direct reports"),
+        ("update", None) => bail!("no agent @{handle}; use op create"),
+        (other, _) => bail!("unknown op '{other}' (create|update)"),
+    };
+    let text = |k: &str| args.get(k).and_then(Value::as_str).map(|v| v.trim().to_string());
+    if let Some(v) = text("name").filter(|v| !v.is_empty()) {
+        a.name = v;
+    }
+    if let Some(v) = text("role") {
+        a.role = v;
+    }
+    if let Some(v) = text("description") {
+        a.description = v;
+    }
+    if let Some(v) = args.get("system_prompt").and_then(Value::as_str) {
+        a.system_prompt = v.to_string();
+    }
+    if let Some(v) = text("model") {
+        a.model = Some(v).filter(|m| !m.is_empty());
+    }
+    if args.get("tools").is_some() {
+        let t = strings(args.get("tools"));
+        a.tools = if t.is_empty() { None } else { Some(t) };
+    }
+    if op == "create" && (a.role.is_empty() || a.description.is_empty()) {
+        bail!("create {handle}: role and description are required, so you know what to delegate to it");
+    }
+    a.updated_at = crate::db::now_ms();
+    ctx.state.db.upsert_agent(&a).await?;
+    let (kind, verb) = if op == "create" { ("agent_created", "Created") } else { ("agent_updated", "Updated") };
+    let note = format!("{verb} agent @{} ({}), reporting to @{}", a.handle, a.role, ctx.agent.handle);
+    ctx.state.db.log_improvement(Some(&ctx.agent.id), Some(&ctx.session.id), kind, Some(&a.id), &note).await?;
+    ctx.state.emit(Event::Improvement { kind: kind.into(), note: note.clone(), agent_id: Some(ctx.agent.id.clone()) });
+    Ok(format!("{note}. Hand it work with delegate_task (agent: \"{}\").", a.handle))
 }
 
 async fn delegate(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {

@@ -925,6 +925,24 @@ impl Db {
     }
 }
 
+/// Agent handles: lowercase, as typed in `@handle` mentions.
+pub fn normalize_handle(h: &str) -> Result<String> {
+    let h: String = h
+        .trim()
+        .trim_start_matches('@')
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '-' })
+        .collect();
+    if h.is_empty() || h.len() > 32 {
+        return Err(anyhow!("handle must be 1-32 letters, digits, '-' or '_'"));
+    }
+    if matches!(h.as_str(), "skill" | "session" | "mcp" | "all" | "everyone") {
+        return Err(anyhow!("that handle is reserved"));
+    }
+    Ok(h)
+}
+
 /// Skill names are lowercase slugs so they are stable as `@skill:name` mentions
 /// and as tool arguments.
 pub fn normalize_skill_name(name: &str) -> Result<String> {

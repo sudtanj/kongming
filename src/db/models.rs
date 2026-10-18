@@ -411,7 +411,7 @@ pub struct Improvement {
     pub id: String,
     pub agent_id: Option<String>,
     pub session_id: Option<String>,
-    /// "skill_created" | "skill_updated" | "memory_saved" | "reflection"
+    /// "skill_created" | "skill_updated" | "skill_deleted" | "memory_saved" | "reflection" | "agent_created" | "agent_updated"
     pub kind: String,
     pub ref_id: Option<String>,
     pub note: String,

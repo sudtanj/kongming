@@ -233,20 +233,7 @@ pub async fn list_agents(State(state): State<Shared>) -> R {
 }
 
 fn normalize_handle(h: &str) -> Result<String, ApiError> {
-    let h: String = h
-        .trim()
-        .trim_start_matches('@')
-        .to_ascii_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '-' })
-        .collect();
-    if h.is_empty() || h.len() > 32 {
-        return Err(bad("handle must be 1-32 letters, digits, '-' or '_'"));
-    }
-    if matches!(h.as_str(), "skill" | "session" | "mcp" | "all" | "everyone") {
-        return Err(bad("that handle is reserved"));
-    }
-    Ok(h)
+    crate::db::normalize_handle(h).map_err(|e| bad(e.to_string()))
 }
 
 async fn agent_from_body(state: &Shared, existing: Option<Agent>, body: &Value) -> Result<Agent, ApiError> {
@@ -344,9 +331,14 @@ async fn agent_from_body(state: &Shared, existing: Option<Agent>, body: &Value) 
 }
 
 pub async fn create_agent(State(state): State<Shared>, Json(body): Json<Value>) -> R {
-    let a = agent_from_body(&state, None, &body).await?;
+    let mut a = agent_from_body(&state, None, &body).await?;
     if state.db.agent_by_handle(&a.handle).await?.is_some() {
         return Err(bad("handle already in use"));
+    }
+    // New agents join the team under the default agent (Kongming) unless the
+    // request says otherwise (`"managerId": null` for none).
+    if body.get("managerId").is_none() && !a.is_default {
+        a.manager_id = Some(agent::ensure_default_agent(&state).await?.id);
     }
     state.db.upsert_agent(&a).await?;
     Ok(Json(json!(a)))
@@ -781,6 +773,9 @@ pub async fn put_settings(State(state): State<Shared>, Json(body): Json<Value>) 
                 _ => vec![],
             };
             cur["allowedUsers"] = json!(ids);
+        }
+        if let Some(e) = tg.get("showThinking").and_then(Value::as_bool) {
+            cur["showThinking"] = json!(e);
         }
         if let Some(e) = tg.get("enabled").and_then(Value::as_bool) {
             cur["enabled"] = json!(e);

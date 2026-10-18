@@ -1,4 +1,8 @@
-# kongming
+<p align="center"><img src="web/logo.svg" width="112" height="112" alt="kongming logo: a feather fan (羽扇)"></p>
+
+<h1 align="center">kongming 孔明</h1>
+
+<p align="center"><b>非淡泊无以明志，非宁静无以致远</b><br><i>Without calm and simplicity one cannot see one's purpose or reach far.</i> (诸葛亮《诫子书》)</p>
 
 A small, self-improving agentic AI daemon that fits on an Orange Pi Zero 3 (1 GB RAM). One small Rust binary, a nanobot-style web UI, Telegram, remote MCP tools, a team of agents with roles, and skills + memory that the agents refine while they run. **No local storage**: everything lives in a remote [Turso](https://turso.tech) SQLite database, so the container runs read-only and a wiped SD card loses nothing.
 
@@ -6,16 +10,24 @@ Inspired by [nanobot](https://github.com/HKUDS/nanobot) (UI, `@` mentions), [her
 
 ## Features
 
-- **Agents with roles.** Each agent has a handle, name, job title, description, persona prompt, optional model override, tool/MCP/skill allow-lists and a manager. A manager can `delegate_task` to its direct reports; the report works in its own session and returns a summary. Talk to any agent directly with `@handle` (sticky per session) or pick it in the UI/Telegram.
+- **Agents with roles.** Each agent has a handle, name, job title, description, persona prompt, optional model override, tool/MCP/skill allow-lists and a manager. A manager can `delegate_task` to its direct reports; the report works in its own session and returns a summary. New agents report to Kongming (the default agent) unless you pick another manager or none, and Kongming can grow its own team: `agent_manage` hires a specialist that reports to it, which it can hand work to straight away. Talk to any agent directly with `@handle` (sticky per session) or pick it in the UI/Telegram.
 - **Skills.** Hermes-style `SKILL.md` documents (name, when-to-use description, Markdown body) stored in Turso with version history. The index is in every prompt; the agent loads a skill with `skill_view` and creates/updates them with `skill_manage`. Import/export SKILL.md, pin skills to agents, attach one to a turn with `@skill:name`.
 - **Self-improvement loop.** After turns that used tools or contained a correction, a cheap reflection pass reviews the conversation with only `skill_manage`/`memory` available and saves procedures and durable facts. Everything it does is logged under Activity and shown as toasts.
 - **Memory.** Shared or per-agent facts, preferences, lessons; searchable; injected into prompts.
 - **Context compaction.** Older turns are summarized into a rolling session summary when the estimated context exceeds the budget.
 - **MCP.** Remote servers only (Streamable HTTP or legacy SSE) with no auth, bearer token, or OAuth 2.1 (metadata discovery, dynamic client registration, PKCE, refresh; works behind a firewall by pasting the redirect URL). Tools are exposed as `mcp__<server>__<tool>`. `@mcp:name` in a message makes sure a server's tools are offered.
-- **Telegram.** Long polling, user-id allow-list, streamed replies via message edits, `/new`, `/agents`, `/agent <handle>`, `/skills`, `/status`, `/stop`, `@handle` switching. Cron jobs can deliver to a chat.
+- **Telegram.** Long polling, user-id allow-list, streamed replies via message edits, a live *thinking* message above each answer with the model's reasoning (in a collapsed quote) and the tools it calls (Settings → Channels → Show thinking), `/new`, `/agents`, `/agent <handle>`, `/skills`, `/status`, `/stop`, `@handle` switching. Cron jobs can deliver to a chat.
 - **Automations.** `every:<minutes>` or 5-field cron (UTC) prompts run by an agent of your choice.
 - **Web UI.** Vanilla HTML/CSS/JS port of the nanobot UI (sidebar sessions, streaming thread, reasoning and tool activity cards, `@`/`/` palettes, settings pages for agents, skills, MCP, channels, models, automations, memory, activity). Password login, cookie session, WebSocket streaming.
 - **Providers.** Any OpenAI-compatible chat-completions endpoint (OpenAI, OpenRouter, zilong-router, Ollama, vLLM) or the Anthropic Messages API (adaptive thinking, prompt caching).
+
+## The name: 孔明
+
+**诸葛亮 Zhuge Liang** (181–234), courtesy name **孔明 Kongming**, was the chancellor (丞相) of 蜀汉 Shu Han in the Three Kingdoms period (三国). Before he took office he lived as a farmer-scholar at 隆中 Longzhong and was known as **卧龙**, the *Sleeping Dragon*. 刘备 Liu Bei called on his thatched cottage three times (三顾茅庐) before Zhuge Liang agreed to serve him, and on that visit he laid out the strategy that split the empire in three (隆中对). As chancellor he ran the state, drafted its laws and led its campaigns. His memorial to the throne (出师表) is still read in Chinese schools.
+
+The novel 《三国演义》 *Romance of the Three Kingdoms* made him the archetype of the strategist who wins by planning rather than by force: borrowing a hundred thousand arrows with straw boats (草船借箭) and holding off an army with an open gate and a zither (空城计). These episodes are fiction, but they are the Kongming most people know. On stage and in paintings he always carries a **feather fan (羽扇)** and wears a silk scarf (纶巾). The fan is the emblem of calm command, and it is kongming's logo ([`web/logo.svg`](web/logo.svg)). Sky lanterns are called 孔明灯 *Kongming lanterns* after a legend that he invented them to send signals.
+
+That is the idea behind this project. kongming does not do everything itself: it plans, keeps notes (skills and memory), and directs a team of agents, each with its own role, the way the chancellor directed his generals. Its companion router is named after one of them, **赵云 Zhao Yun**, courtesy name **子龙 Zilong** ([zilong-router](https://github.com/sudtanj/zilong-router)). He was the general who carried Liu Bei's infant son through the enemy lines at 长坂坡 Changban, and the router likewise gets every request through to a model that answers. The motto at the top comes from Zhuge Liang's letter of advice to his son (诫子书): a small, quiet daemon on a 1 GB board, reaching far.
 
 ## System requirements
 
@@ -114,4 +126,8 @@ Every push also runs an Orange Pi Zero 3 simulation (`ci/orangepi-sim.sh`). The 
 
 ## License
 
-MIT
+**Source-available: free for personal use, paid for commercial use.**
+
+- kongming is under the [PolyForm Noncommercial License 1.0.0](LICENSE-POLYFORM-NONCOMMERCIAL.md), Copyright (c) 2026-present Sudono Tanjung. You can run, read and modify it for personal and other noncommercial use at no cost.
+- **Commercial use** (in or for a business, as a hosted service, or in a commercial product) needs a paid commercial license: contact [Sudono Tanjung on LinkedIn](https://www.linkedin.com/in/sudtanj/) or [@sudtanj](https://github.com/sudtanj).
+- Versions published before the license change were MIT and remain available under it. See [LICENSE](LICENSE).

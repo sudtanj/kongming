@@ -1,0 +1,33 @@
+kongming licensing
+==================
+
+PolyForm Noncommercial 1.0.0 (SPDX: PolyForm-Noncommercial-1.0.0)
+
+Required Notice: Copyright (c) 2026-present Sudono Tanjung (https://github.com/sudtanj)
+
+kongming is original work by Sudono Tanjung. From the commit that introduced
+this file onward it is source-available under the PolyForm Noncommercial
+License 1.0.0, the full text of which is in LICENSE-POLYFORM-NONCOMMERCIAL.md.
+
+In plain words:
+  - FREE for personal use: running it for yourself, studying it,
+    hobby projects, research, education and experimentation.
+    Noncommercial organisations (charities, schools, public research
+    bodies) are covered too, as the license defines.
+  - NOT free for commercial use. Using it in or for a business,
+    offering it as a (hosted) service, bundling it into a commercial
+    product, or using it to make money in any way needs a paid
+    commercial license from the copyright holder.
+  - Redistribution must keep this notice and the license text.
+
+COMMERCIAL LICENSES: contact the copyright holder via
+https://www.linkedin.com/in/sudtanj/ or https://github.com/sudtanj.
+
+Third-party crates and the projects that inspired kongming (nanobot,
+hermes-agent) keep their own licenses; this file does not change them.
+
+Versions published before this file was added (all earlier commits) were
+distributed under the MIT License and remain available under it. These
+terms apply from this commit onward.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.

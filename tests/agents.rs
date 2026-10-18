@@ -42,6 +42,10 @@ async fn create_agents_and_validate_handles() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let (status, _) = app.post_raw("/api/agents", json!({"handle": "x", "managerId": "ghost"})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "unknown manager");
+    // Without a managerId a new agent joins the team under the default agent.
+    let w = app.post("/api/agents", json!({"handle": "writer"})).await;
+    assert_eq!(w["managerId"], json!(default.id));
+    app.delete(&format!("/api/agents/{}", str_of(&w, "id"))).await;
 
     let list = app.get("/api/agents").await;
     assert_eq!(list.as_array().unwrap().len(), 2);
@@ -216,8 +220,8 @@ async fn delegation_is_refused_outside_the_structure() {
     app.disable_reflection().await;
     let default = app.default_agent().await;
     create_researcher(&app, &default.id).await;
-    // "stranger" has no manager.
-    app.post("/api/agents", json!({"handle": "stranger"})).await;
+    // "stranger" has no manager (an explicit null; the default is Kongming).
+    app.post("/api/agents", json!({"handle": "stranger", "managerId": null})).await;
 
     let sid = app.create_session().await;
     assert_eq!(app.send_wait(&sid, "delegate").await["text"], json!("fine"));
@@ -226,4 +230,34 @@ async fn delegation_is_refused_outside_the_structure() {
     assert_eq!(result["isError"], json!(true));
     assert!(str_of(result, "content").contains("does not report to you"), "{result}");
     assert!(app.get("/api/tasks").await.as_array().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn kongming_hires_a_report_and_delegates_to_it_in_the_same_turn() {
+    let hire = json!({"op": "create", "handle": "Analyst", "role": "Data analyst", "description": "Crunches numbers."});
+    let app = spawn_app(vec![
+        tool_call("agent_manage", hire),
+        tool_call("delegate_task", json!({"agent": "analyst", "task": "sum 1 and 2"})),
+        text("3"),
+        text("the analyst says 3"),
+    ])
+    .await;
+    app.disable_reflection().await;
+    let default = app.default_agent().await;
+    let sid = app.create_session().await;
+
+    assert_eq!(app.send_wait(&sid, "hire an analyst and ask it").await["text"], json!("the analyst says 3"));
+    let analyst = app.get("/api/agents/analyst").await;
+    assert_eq!(analyst["managerId"], json!(default.id));
+    assert_eq!(analyst["role"], json!("Data analyst"));
+    let reqs = app.llm.requests();
+    let names = tool_names(&reqs[0]);
+    assert!(names.contains(&"agent_manage".to_string()), "{names:?}");
+    assert!(!names.contains(&"delegate_task".to_string()), "no reports yet: {names:?}");
+    assert!(tool_names(&reqs[1]).contains(&"delegate_task".to_string()), "delegation opens up after hiring");
+    let tasks = app.get("/api/tasks").await;
+    assert_eq!(tasks[0]["status"], json!("done"), "{tasks}");
+
+    // Only the lead agent hires.
+    assert!(!tool_names(&reqs[2]).contains(&"agent_manage".to_string()), "the analyst's tools");
 }

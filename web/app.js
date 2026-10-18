@@ -296,6 +296,8 @@ const STRINGS = {
     'channels.allowed': 'Allowed user IDs',
     'channels.allowedDesc': 'Comma separated numeric Telegram user IDs. Empty allows nobody.',
     'channels.enabled': 'Enable Telegram',
+    'channels.thinking': 'Show thinking',
+    'channels.thinkingDesc': 'Post the model\'s reasoning and the tools it calls in a message above each answer, updated live. The reasoning is in a collapsed quote; tap it to expand.',
     'automations.title': 'Automations',
     'automations.desc': 'Scheduled prompts. Schedules run in UTC.',
     'automations.new': 'New automation',
@@ -336,9 +338,11 @@ const STRINGS = {
     'activity.kind.skill_updated': 'Skill updated',
     'activity.kind.memory_saved': 'Memory saved',
     'activity.kind.reflection': 'Reflection',
+    'activity.kind.agent_created': 'Agent hired',
+    'activity.kind.agent_updated': 'Agent updated',
     'toast.learned': 'Learned: {{note}}',
     'about.title': 'About',
-    'about.desc': 'kongming is a small agentic daemon: a team of agents, skills that grow, and tools over MCP.',
+    'about.desc': 'kongming is a small agentic daemon: a team of agents, skills that grow, and tools over MCP. It is named after 孔明 Kongming, the courtesy name of 诸葛亮 Zhuge Liang, the strategist of the Three Kingdoms who planned and directed rather than fought. His feather fan (羽扇) is the logo.',
     'about.ui': 'Interface modeled after the nanobot web UI, rebuilt without dependencies.',
     'time.justNow': 'just now',
     'time.minutes': '{{n}}m ago',
@@ -655,7 +659,7 @@ function handleEvent(ev) {
   const open = S.current && S.current.id === sid;
   switch (ev.type) {
     case 'session_updated': upsertSession(ev.session); if (open) { S.current.agent = agentById(ev.session.agentId) || S.current.agent; renderTopbar(); renderComposerAgent(); } return;
-    case 'improvement': toast(t('toast.learned', { note: ev.note }), 'learn'); return;
+    case 'improvement': toast(t('toast.learned', { note: ev.note }), 'learn'); if (String(ev.kind).startsWith('agent_')) loadAgents(); return;
     case 'user_message': {
       upsertSession({ id: sid, updatedAt: ev.message.createdAt }, { running: true });
       if (open) {
@@ -1365,7 +1369,7 @@ function toast(msg, kind) {
 
 const settings = (() => {
   const PAGES = [['overview', 'home'], ['appearance', 'palette'], ['models', 'cpu'], ['agents', 'users'], ['skills', 'skill'], ['mcp', 'plug'], ['channels', 'channel'], ['automations', 'clock'], ['memory', 'memory'], ['activity', 'pulse'], ['about', 'info']];
-  const BUILTIN_TOOLS = ['skill_view', 'skill_manage', 'memory', 'delegate_task', 'web_fetch', 'list_agents', 'list_sessions', 'read_session', 'current_time'];
+  const BUILTIN_TOOLS = ['skill_view', 'skill_manage', 'memory', 'delegate_task', 'agent_manage', 'web_fetch', 'list_agents', 'list_sessions', 'read_session', 'current_time'];
   let viewEl, navEl, bodyEl, page = null, token = 0;
 
   function view() {
@@ -1535,7 +1539,7 @@ const settings = (() => {
     const description = textarea({ value: a.description || '', rows: 2, placeholder: 'Finds and summarises sources, checks facts.' });
     const systemPrompt = textarea({ value: a.systemPrompt || '', rows: 8, class: 'field code' });
     const model = input({ value: a.model || '', placeholder: t('common.optional') });
-    const manager = select([['', t('common.none')]].concat(S.agents.filter((x) => x.id !== a.id).map((x) => [x.id, `@${x.handle} — ${x.name}`])), a.managerId || '');
+    const manager = select([['', t('common.none')]].concat(S.agents.filter((x) => x.id !== a.id).map((x) => [x.id, `@${x.handle} — ${x.name}`])), a.managerId || (isNew ? (S.agents.find((x) => x.isDefault) || {}).id || '' : ''));
     const tools = multi(BUILTIN_TOOLS, a.tools || [], t('agents.tools'));
     const mcpSel = multi(S.mcp.map((m) => [m.id, m.name]), a.mcpServers || [], t('agents.mcp'));
     const pinned = multi(S.skills.map((k) => k.name), a.pinnedSkills || [], t('agents.pinned'));
@@ -1715,6 +1719,7 @@ const settings = (() => {
         row(t('channels.token'), t('channels.tokenDesc'), h('div', { class: 'row', style: 'flex-wrap:nowrap;width:100%' }, state, token, h('button', { class: 'btn ghost sm', type: 'button', title: t('channels.clearToken'), onClick: () => modal.confirm({ title: t('channels.clearToken'), confirm: t('common.confirm'), danger: true, onConfirm: async () => { await api.put('/api/settings', { telegram: { clearToken: true } }); reload(); } }) }, icon('x')))),
         row(t('channels.connection'), conn ? (conn.ok ? (conn.mode === 'webhook' ? t('channels.modeWebhook', { url: conn.webhookUrl }) : t('channels.modePolling')) : conn.error) : t('channels.connectionDesc'), connPill),
         row(t('channels.allowed'), t('channels.allowedDesc'), allowed),
+        row(t('channels.thinking'), t('channels.thinkingDesc'), switchEl(tg.showThinking !== false, (v) => api.put('/api/settings', { telegram: { showThinking: v } }), t('channels.thinking')), { switch: true }),
         h('div', { class: 'settings-footer' }, h('span'), h('div', { class: 'acts' }, saveBtn(null, async () => { const b = { allowedUsers: allowed.value }; if (token.value) b.token = token.value; await api.put('/api/settings', { telegram: b }); reload(); })))));
   };
 

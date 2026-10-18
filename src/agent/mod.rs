@@ -450,7 +450,7 @@ async fn run_turn_inner(
     }
     state.emit(Event::TurnStart { session_id: session.id.clone(), turn_id: turn_id.clone(), agent: agent.clone() });
 
-    let plan = match plan(state, session, agent, &mentions).await {
+    let mut plan = match plan(state, session, agent, &mentions).await {
         Ok(p) => p,
         Err(e) => {
             let msg = format!("{e:#}");
@@ -611,6 +611,12 @@ async fn run_turn_inner(
                 });
             }
             results.push(part);
+        }
+        // A report hired this turn can take work right away.
+        let hired = results.iter().any(|p| matches!(p, Part::ToolResult { name, is_error: false, .. } if name == "agent_manage"));
+        if hired && !plan.can_delegate {
+            plan.can_delegate = true;
+            plan.tools.extend(tools::builtin_specs(&plan.agent, true).into_iter().filter(|t| t.name == "delegate_task"));
         }
         let tool_msg = state.db.append_message(&session.id, "tool", &results, Some(&plan.agent.id)).await?;
         state.emit(Event::Message { session_id: session.id.clone(), message: tool_msg });

@@ -1,7 +1,8 @@
 //! Telegram bot, over long polling or, when kongming has a public HTTPS URL, a
 //! webhook. Each chat maps to a session; `@handle` switches agents; `/agent`,
 //! `/new`, `/agents`, `/skills`, `/status` are the commands. Replies stream by
-//! editing one message at a throttled rate.
+//! editing one message at a throttled rate, below a message that shows the
+//! model's reasoning and tool calls (unless `showThinking` is off).
 
 use std::time::Duration;
 
@@ -469,6 +470,89 @@ async fn session_for_chat(state: &Shared, chat_id: i64, fresh: bool) -> Result<c
     Ok(s)
 }
 
+/// Reasoning shown in the thinking message: the latest part, so it fits.
+const THINKING_CHARS: usize = 2800;
+/// Tool steps listed under it.
+const MAX_STEPS: usize = 12;
+
+/// The message above an answer that shows the model's reasoning and the tool
+/// calls it makes, edited live like the answer.
+#[derive(Default)]
+struct Progress {
+    thinking: String,
+    /// (call id, tool name, outcome once known)
+    steps: Vec<(String, String, Option<bool>)>,
+    message_id: Option<i64>,
+    sent: String,
+    last_edit: Option<tokio::time::Instant>,
+    /// An answer was posted below it: new activity starts a fresh message.
+    closed: bool,
+}
+
+impl Progress {
+    fn html(&self) -> String {
+        let mut out = String::new();
+        let thinking = self.thinking.trim();
+        if !thinking.is_empty() {
+            let n = thinking.chars().count();
+            let tail: String = thinking.chars().skip(n.saturating_sub(THINKING_CHARS)).collect();
+            out.push_str("💭 <b>Thinking</b>\n<blockquote expandable>");
+            if n > THINKING_CHARS {
+                out.push('…');
+            }
+            out.push_str(&esc(tail.trim()));
+            out.push_str("</blockquote>");
+        }
+        let skip = self.steps.len().saturating_sub(MAX_STEPS);
+        for (_, name, outcome) in self.steps.iter().skip(skip) {
+            let mark = match outcome {
+                None => "…",
+                Some(true) => "✓",
+                Some(false) => "✗",
+            };
+            out.push_str(&format!("\n🔧 <code>{}</code> {mark}", esc(name)));
+        }
+        out.trim_start().to_string()
+    }
+
+    /// Post or edit the message when it changed, at most once per interval
+    /// unless `now` (the turn is over).
+    async fn flush(&mut self, tg: &Telegram, chat_id: i64, now: bool) {
+        let html = self.html();
+        if html.is_empty() || html == self.sent {
+            return;
+        }
+        if !now && self.last_edit.is_some_and(|t| t.elapsed() < EDIT_INTERVAL) {
+            return;
+        }
+        match self.message_id {
+            None => {
+                if let Ok(id) = tg.send_message(chat_id, &html).await {
+                    self.message_id = Some(id);
+                }
+            }
+            Some(id) => {
+                let _ = tg.edit_message(chat_id, id, &html).await;
+            }
+        }
+        self.sent = html;
+        self.last_edit = Some(tokio::time::Instant::now());
+    }
+
+    /// Activity after an answer was posted goes into a new message below it.
+    fn reopen(&mut self) {
+        if self.closed {
+            *self = Progress::default();
+        }
+    }
+}
+
+/// Settings → Channels → "Show thinking" (on unless turned off).
+async fn show_thinking(state: &Shared) -> bool {
+    let tg = state.db.setting("telegram").await.ok().flatten();
+    tg.and_then(|v| v.get("showThinking").and_then(Value::as_bool)).unwrap_or(true)
+}
+
 async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
     let chat_id = msg.pointer("/chat/id").and_then(Value::as_i64).ok_or_else(|| anyhow!("no chat id"))?;
     let user_id = msg.pointer("/from/id").and_then(Value::as_i64).unwrap_or(0);
@@ -603,6 +687,7 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
     tg.typing(chat_id).await;
     let session_id = session.id.clone();
     let mut events = state.subscribe();
+    let thinking = show_thinking(&state).await;
     let streamer = {
         let tg = tg.clone();
         let sid = session_id.clone();
@@ -611,32 +696,56 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
             let mut message_id: Option<i64> = None;
             let mut last_edit = tokio::time::Instant::now() - EDIT_INTERVAL;
             let mut last_sent = String::new();
+            let mut progress = Progress::default();
             let mut ticker = tokio::time::interval(Duration::from_millis(300));
             loop {
+                let mut finished = false;
                 tokio::select! {
                     ev = events.recv() => {
                         match ev {
                             Ok(Event::Delta { session_id, text, .. }) if session_id == sid => buf.push_str(&text),
+                            Ok(Event::ReasoningDelta { session_id, text, .. }) if session_id == sid && thinking => {
+                                progress.reopen();
+                                progress.thinking.push_str(&text);
+                            }
+                            Ok(Event::ToolResult { session_id, id, is_error, .. }) if session_id == sid && thinking => {
+                                if let Some(step) = progress.steps.iter_mut().find(|s| s.0 == id) {
+                                    step.2 = Some(!is_error);
+                                }
+                            }
                             Ok(Event::Message { session_id, message }) if session_id == sid && message.role == "assistant" && buf.is_empty() => {
                                 // A text-only round that we did not stream (e.g. no deltas): mirror it.
                                 let t = message.text();
                                 if !t.is_empty() { buf = t; }
                             }
-                            Ok(Event::ToolCall { session_id, name, .. }) if session_id == sid => {
+                            Ok(Event::ToolCall { session_id, id, name, .. }) if session_id == sid => {
                                 let _ = tg.call("sendChatAction", json!({"chat_id": chat_id, "action": "typing"})).await;
                                 tracing::debug!(tool = %name, "telegram turn tool call");
                                 // Tool rounds start a fresh message so earlier text stays intact.
                                 if message_id.is_some() && !buf.is_empty() { buf.clear(); message_id = None; last_sent.clear(); }
+                                if thinking {
+                                    progress.reopen();
+                                    progress.steps.push((id, name, None));
+                                }
                             }
-                            Ok(Event::TurnEnd { session_id, .. }) if session_id == sid => break,
+                            Ok(Event::TurnEnd { session_id, .. }) if session_id == sid => finished = true,
                             Ok(_) => {}
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                            Err(_) => break,
+                            Err(_) => finished = true,
                         }
                     }
                     _ = ticker.tick() => {}
                 }
+                // The thinking message goes first, so it sits above the answer.
+                if thinking {
+                    progress.flush(&tg, chat_id, finished).await;
+                }
+                if finished {
+                    break;
+                }
                 if !buf.is_empty() && last_edit.elapsed() >= EDIT_INTERVAL && buf != last_sent {
+                    // An answer below the thinking message closes it.
+                    progress.closed = progress.message_id.is_some();
                     let html = markdown_to_html(&buf);
                     let shown =
                         if buf.chars().count() > MAX_MESSAGE - 50 { clamp(&html) } else { format!("{html} ▍") };
@@ -729,5 +838,28 @@ mod tests {
     #[test]
     fn strip_html_roundtrip() {
         assert_eq!(strip_html("<b>a &lt; b</b>"), "a < b");
+    }
+
+    #[test]
+    fn thinking_message_shows_reasoning_and_steps() {
+        let mut p = Progress::default();
+        assert_eq!(p.html(), "");
+        p.thinking = "  The user wants <b> & a list.  ".into();
+        p.steps.push(("c1".into(), "mcp__github__list".into(), Some(true)));
+        p.steps.push(("c2".into(), "web_fetch".into(), None));
+        assert_eq!(
+            p.html(),
+            "💭 <b>Thinking</b>\n<blockquote expandable>The user wants &lt;b&gt; &amp; a list.</blockquote>\n\
+🔧 <code>mcp__github__list</code> ✓\n🔧 <code>web_fetch</code> …"
+        );
+        // Long reasoning keeps its latest part; only tool steps: no quote.
+        p.thinking = "x".repeat(THINKING_CHARS + 10);
+        assert!(p.html().contains("<blockquote expandable>…xxx"));
+        assert!(p.html().chars().count() < MAX_MESSAGE);
+        p.thinking.clear();
+        assert!(p.html().starts_with("🔧 <code>mcp__github__list</code> ✓"));
+        p.closed = true;
+        p.reopen();
+        assert_eq!(p.html(), "");
     }
 }
