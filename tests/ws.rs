@@ -47,8 +47,7 @@ async fn send_json(ws: &mut Ws, v: Value) {
 async fn rejects_unauthenticated_connections() {
     let app = spawn_app(vec![]).await;
     let req = app.ws_url().into_client_request().expect("ws request");
-    let res =
-        tokio::time::timeout(support::timeout(), tokio_tungstenite::connect_async(req)).await.expect("timeout");
+    let res = tokio::time::timeout(support::timeout(), tokio_tungstenite::connect_async(req)).await.expect("timeout");
     assert!(res.is_err(), "connection without a cookie must be refused");
 }
 
