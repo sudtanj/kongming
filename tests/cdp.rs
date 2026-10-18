@@ -78,7 +78,9 @@ async fn serve(mut stream: TcpStream, calls: Calls) {
         let expr = call.pointer("/params/expression").and_then(Value::as_str).unwrap_or("");
         let result = match call["method"].as_str().unwrap_or("") {
             "Page.navigate" => json!({"frameId": "F1"}),
-            "Runtime.evaluate" if expr == "document.readyState" => json!({"result": {"type": "string", "value": "complete"}}),
+            "Runtime.evaluate" if expr == "document.readyState" => {
+                json!({"result": {"type": "string", "value": "complete"}})
+            }
             "Runtime.evaluate" if expr.contains("getBoundingClientRect") => {
                 json!({"result": {"type": "object", "value": {"x": 10.5, "y": 20}}})
             }
@@ -91,7 +93,11 @@ async fn serve(mut stream: TcpStream, calls: Calls) {
             }
             "Runtime.evaluate" => json!({"result": {"type": "string", "value": format!("eval:{expr}")}}),
             "Nope.method" => {
-                let _ = ws.send(Message::Text(json!({"id": call["id"], "error": {"message": "'Nope.method' wasn't found"}}).to_string())).await;
+                let _ = ws
+                    .send(Message::Text(
+                        json!({"id": call["id"], "error": {"message": "'Nope.method' wasn't found"}}).to_string(),
+                    ))
+                    .await;
                 continue;
             }
             _ => json!({}),

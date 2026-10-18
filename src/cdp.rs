@@ -19,7 +19,8 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-pub const USAGE: &str = "cdp: drive a Chrome browser over the DevTools protocol (the endpoint Playwright's connectOverCDP uses).
+pub const USAGE: &str =
+    "cdp: drive a Chrome browser over the DevTools protocol (the endpoint Playwright's connectOverCDP uses).
 Browser: $CDP_URL, or --url http://<tailnet ip>:9222. Page commands act on the first open tab, or on --tab ID.
 
   cdp version                  browser version
@@ -97,7 +98,11 @@ pub async fn run(args: Vec<String>) -> Result<String> {
             if pages.is_empty() {
                 return Ok("(no open tabs)".into());
             }
-            Ok(pages.iter().map(|t| format!("{}\t{}\t{}", s(t, "id"), s(t, "title"), s(t, "url"))).collect::<Vec<_>>().join("\n"))
+            Ok(pages
+                .iter()
+                .map(|t| format!("{}\t{}\t{}", s(t, "id"), s(t, "title"), s(t, "url")))
+                .collect::<Vec<_>>()
+                .join("\n"))
         }
         "open" => {
             let target = base.put(&format!("/json/new?{}", arg(1, "a URL")?)).await?;
@@ -376,15 +381,20 @@ impl Page {
             "arrowright" | "right" => ("ArrowRight", "ArrowRight", 39, None),
             "pageup" => ("PageUp", "PageUp", 33, None),
             "pagedown" => ("PageDown", "PageDown", 34, None),
-            _ => bail!("unknown key {key}; use Enter, Tab, Escape, Backspace, Space, ArrowUp/Down/Left/Right, PageUp/Down"),
+            _ => bail!(
+                "unknown key {key}; use Enter, Tab, Escape, Backspace, Space, ArrowUp/Down/Left/Right, PageUp/Down"
+            ),
         };
         let mut down = json!({"type": "keyDown", "key": name, "code": code, "windowsVirtualKeyCode": vk});
         if let Some(t) = text {
             down["text"] = json!(t);
         }
         self.call("Input.dispatchKeyEvent", down).await?;
-        self.call("Input.dispatchKeyEvent", json!({"type": "keyUp", "key": name, "code": code, "windowsVirtualKeyCode": vk}))
-            .await?;
+        self.call(
+            "Input.dispatchKeyEvent",
+            json!({"type": "keyUp", "key": name, "code": code, "windowsVirtualKeyCode": vk}),
+        )
+        .await?;
         Ok(())
     }
 }
