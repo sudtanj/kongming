@@ -1663,12 +1663,12 @@ const settings = (() => {
     ];
     return section(null,
       h('div', { class: 'list-row' }, h('div', { class: 'lr-main' },
-        h('div', { class: 'lr-title' }, m.name, statusPill(m.enabled ? m.status : 'disabled'), h('span', { class: 'pill' }, t('mcp.tools', { count: m.toolCount || 0 })), h('span', { class: 'pill' }, m.transport), h('span', { class: 'pill' }, m.authType + (m.authType === 'oauth' ? (m.oauthConnected ? ' ✓' : '') : m.authType === 'token' && m.hasToken ? ' ✓' : '')),
+        h('div', { class: 'lr-title' }, m.name, statusPill(m.enabled ? m.status : 'disabled'), h('span', { class: 'pill' }, t('mcp.tools', { count: m.toolCount || 0 })), h('span', { class: 'pill' }, m.transport), h('span', { class: 'pill' }, m.authType + (m.authType === 'oauth' ? (m.oauthConnected ? ' ✓' : '') : m.authType === 'token' && m.hasToken ? ' ✓' : ''))),
         h('div', { class: 'lr-sub mono' }, m.url), m.lastError ? h('div', { class: 'lr-sub danger-text' }, m.lastError) : null),
         h('div', { class: 'lr-acts' }, actions)),
       tools.length ? h('div', { class: 'settings-editor', style: 'padding-top:0' },
         h('details', { class: 'disclosure' }, h('summary', {}, icon('chev', 'chev'), t('mcp.showTools'), ` (${tools.length})`), h('div', { class: 'tool-list' }, tools.map((tl) => h('div', { class: 'tl' }, h('b', {}, tl.name), tl.description ? h('p', {}, tl.description) : null)))),
-        h('details', { class: 'disclosure' }, h('summary', {}, icon('chev', 'chev'), t('mcp.tryTool')), h('div', { class: 'form-grid two mt' }, field(t('mcp.toolName'), toolSel), field(t('mcp.args'), argsTa)), h('div', { class: 'row mt', style: 'justify-content:flex-end' }, callBtn), h('div', { class: 'mt' }, out)))) : null);
+        h('details', { class: 'disclosure' }, h('summary', {}, icon('chev', 'chev'), t('mcp.tryTool')), h('div', { class: 'form-grid two mt' }, field(t('mcp.toolName'), toolSel), field(t('mcp.args'), argsTa)), h('div', { class: 'row mt', style: 'justify-content:flex-end' }, callBtn), h('div', { class: 'mt' }, out))) : null);
   }
   function mcpEditor(m) {
     const isNew = !m.id;

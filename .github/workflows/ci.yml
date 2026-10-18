@@ -17,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Web UI syntax
+        run: node --check web/app.js
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
