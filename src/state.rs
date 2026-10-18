@@ -110,6 +110,8 @@ pub struct AppState {
     pub telegram_reload: tokio::sync::Notify,
     /// Outcome of the last Telegram setup (bot, mode, error), shown in the dashboard.
     pub telegram_status: Mutex<Value>,
+    /// The local shell behind the `shell` tool, when one is configured.
+    pub shell: Option<crate::agent::shell::Shell>,
     /// Sessions with a turn in flight, with a cancel flag each.
     running: Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
     provider_cache: RwLock<Option<(ProviderConfig, Arc<dyn Provider>)>>,
@@ -132,6 +134,7 @@ impl AppState {
             Some(s) if !s.is_empty() => s.as_bytes().to_vec(),
             _ => crate::mcp::oauth::random_token(32).into_bytes(),
         };
+        let shell = crate::agent::shell::Shell::from_config(&cfg.shell, &cfg.workdir);
         Arc::new(AppState {
             mcp: McpManager::new(db.clone(), http.clone()),
             cfg,
@@ -144,6 +147,7 @@ impl AppState {
             provider_cache: RwLock::new(None),
             telegram_reload: tokio::sync::Notify::new(),
             telegram_status: Mutex::new(Value::Null),
+            shell,
         })
     }
 

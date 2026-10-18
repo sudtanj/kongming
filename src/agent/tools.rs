@@ -4,6 +4,7 @@
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 
+use super::shell;
 use crate::db::{Agent, Session};
 use crate::llm::ToolSpec;
 use crate::state::{Event, Shared};
@@ -24,7 +25,7 @@ fn obj(props: Value, required: &[&str]) -> Value {
     json!({"type": "object", "properties": props, "required": required, "additionalProperties": false})
 }
 
-pub fn builtin_specs(agent: &Agent, can_delegate: bool) -> Vec<ToolSpec> {
+pub fn builtin_specs(agent: &Agent, can_delegate: bool, with_shell: bool) -> Vec<ToolSpec> {
     let mut v = vec![
         ToolSpec {
             name: "skill_view".into(),
@@ -57,6 +58,23 @@ pub fn builtin_specs(agent: &Agent, can_delegate: bool) -> Vec<ToolSpec> {
             parameters: obj(json!({}), &[]),
         },
     ];
+    if with_shell {
+        v.push(ToolSpec {
+            name: "shell".into(),
+            description: "Run a command in a local, isolated POSIX shell (BusyBox: sh, ls, cat, grep, sed, awk, find, \
+sort, wc, tar, gzip, wget, nc, nslookup, …) and get its output and exit code. The working directory is a small \
+scratch disk in memory; files there stay between calls until kongming restarts. Nothing secret is reachable from it. \
+Use it for calculations, text and file processing, quick scripts and for checking hosts, ports or URLs from this machine."
+                .into(),
+            parameters: obj(
+                json!({
+                    "command": {"type": "string", "description": "shell script to run with sh -c; stderr is merged into the output"},
+                    "timeout_secs": {"type": "integer", "minimum": 1, "maximum": shell::MAX_TIMEOUT, "description": "default 30"}
+                }),
+                &["command"],
+            ),
+        });
+    }
     if agent.self_improve {
         v.push(ToolSpec {
             name: "skill_manage".into(),
@@ -155,6 +173,7 @@ pub async fn run_builtin(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Option<
         "current_time" => Ok(current_time()),
         "delegate_task" => delegate(ctx, args).await,
         "agent_manage" => agent_manage(ctx, args).await,
+        "shell" => return Some(run_shell(ctx, args).await),
         _ => return None,
     };
     Some(r.map(|t| (t, false)))
@@ -382,6 +401,16 @@ async fn read_session(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
     let id = s(args, "session_id");
     let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(30).clamp(1, 60);
     session_transcript(ctx.state, id, limit).await
+}
+
+async fn run_shell(ctx: &ToolCtx<'_>, args: &Value) -> Result<(String, bool)> {
+    let sh = ctx.state.shell.as_ref().ok_or_else(|| anyhow!("the local shell is turned off (KONGMING_SHELL)"))?;
+    let command = s(args, "command");
+    if command.trim().is_empty() {
+        bail!("command is empty");
+    }
+    let timeout = args.get("timeout_secs").and_then(Value::as_u64).unwrap_or(shell::DEFAULT_TIMEOUT);
+    sh.run(command, timeout).await
 }
 
 async fn web_fetch(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
@@ -650,10 +679,11 @@ mod tests {
 
     #[test]
     fn specs_follow_agent_permissions() {
-        let names = |a: &Agent, d: bool| builtin_specs(a, d).into_iter().map(|t| t.name).collect::<Vec<_>>();
+        let names = |a: &Agent, d: bool| builtin_specs(a, d, true).into_iter().map(|t| t.name).collect::<Vec<_>>();
         let full = names(&agent(true, None), true);
         assert!(full.contains(&"skill_manage".to_string()));
         assert!(full.contains(&"delegate_task".to_string()));
+        assert!(full.contains(&"shell".to_string()));
         let worker = names(&agent(false, None), false);
         assert!(!worker.contains(&"skill_manage".to_string()));
         assert!(!worker.contains(&"delegate_task".to_string()));

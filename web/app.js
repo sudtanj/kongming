@@ -33,6 +33,9 @@ const STRINGS = {
     'session.clearDesc': 'Messages are deleted but the chat stays.',
     'session.running': 'Replying…',
     'session.info': '{{channel}} · {{count}} messages',
+    'session.telegram': 'Telegram chat',
+    'session.telegramBadge': 'Telegram',
+    'session.telegramDesc': 'Linked to a Telegram chat: what is sent to the bot there lands in this conversation.',
     'common.cancel': 'Cancel',
     'common.delete': 'Delete',
     'common.save': 'Save',
@@ -852,6 +855,7 @@ function sessionRow(s) {
   const row = h('div', { class: 'session-row' + (active ? ' active' : ''), role: 'link', tabindex: 0, 'aria-current': active ? 'page' : null,
     onClick: () => navigate('#/s/' + s.id), onKeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate('#/s/' + s.id); } } });
   if (s.running) row.appendChild(h('span', { class: 'dot-live', title: t('session.running'), 'aria-label': t('session.running') }));
+  if (s.channel === 'telegram') row.appendChild(h('span', { class: 'tg-mark', title: t('session.telegram'), 'aria-label': t('session.telegram') }, icon('channel')));
   row.appendChild(title);
   if (s.agentHandle) row.appendChild(h('span', { class: 'handle', style: `--h:${hue(s.agentHandle)}`, title: '@' + s.agentHandle }, '@' + s.agentHandle));
   const acts = h('span', { class: 'actions' },
@@ -892,10 +896,12 @@ function topbarView() {
 }
 function renderTopbar() {
   const tt = $('#topbar-title'); const ta = $('#topbar-agent'); if (!tt || !ta) return;
+  while (tt.childNodes.length > 1) tt.removeChild(tt.lastChild);
   if (S.route.name === 'settings') { tt.firstChild.textContent = t('settings.title'); clear(ta); return; }
   const sess = S.current && S.current.session;
   tt.firstChild.textContent = sess ? (sess.title || t('session.untitled')) : t('nav.newChat');
   tt.title = sess ? t('session.info', { channel: sess.channel, count: S.current.messages.length }) : '';
+  if (sess && sess.channel === 'telegram') tt.appendChild(h('span', { class: 'tg-badge', title: t('session.telegramDesc') }, icon('channel'), t('session.telegramBadge')));
   clear(ta); ta.appendChild(agentPill());
 }
 function agentPill() {
@@ -1369,7 +1375,7 @@ function toast(msg, kind) {
 
 const settings = (() => {
   const PAGES = [['overview', 'home'], ['appearance', 'palette'], ['models', 'cpu'], ['agents', 'users'], ['skills', 'skill'], ['mcp', 'plug'], ['channels', 'channel'], ['automations', 'clock'], ['memory', 'memory'], ['activity', 'pulse'], ['about', 'info']];
-  const BUILTIN_TOOLS = ['skill_view', 'skill_manage', 'memory', 'delegate_task', 'agent_manage', 'web_fetch', 'list_agents', 'list_sessions', 'read_session', 'current_time'];
+  const BUILTIN_TOOLS = ['skill_view', 'skill_manage', 'memory', 'delegate_task', 'agent_manage', 'web_fetch', 'shell', 'list_agents', 'list_sessions', 'read_session', 'current_time'];
   let viewEl, navEl, bodyEl, page = null, token = 0;
 
   function view() {

@@ -5,6 +5,7 @@
 
 pub mod mention;
 pub mod prompt;
+pub mod shell;
 pub mod tools;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -202,7 +203,7 @@ async fn plan(state: &Shared, session: &Session, agent: Agent, mentions: &mentio
     }
 
     // Tools: built-ins + MCP (restricted per agent, plus @mcp: mentions).
-    let mut tool_specs = tools::builtin_specs(&agent, can_delegate);
+    let mut tool_specs = tools::builtin_specs(&agent, can_delegate, state.shell.is_some());
     let mut allowed = agent.mcp_servers.clone();
     if let Some(a) = &mut allowed {
         a.extend(mentions.mcp.iter().cloned());
@@ -590,6 +591,13 @@ async fn run_turn_inner(
                     content: "cancelled by user".into(),
                     is_error: true,
                 }
+            } else if !plan.tools.iter().any(|t| t.name == *name) {
+                Part::ToolResult {
+                    id: id.clone(),
+                    name: name.clone(),
+                    content: format!("error: unknown tool {name}: use one of the tools you were given"),
+                    is_error: true,
+                }
             } else if let Some(problem) = check_args(plan.tools.iter().find(|t| t.name == *name), args) {
                 Part::ToolResult {
                     id: id.clone(),
@@ -619,7 +627,7 @@ async fn run_turn_inner(
         if hired && !plan.can_delegate {
             plan.can_delegate = true;
             plan.tools
-                .extend(tools::builtin_specs(&plan.agent, true).into_iter().filter(|t| t.name == "delegate_task"));
+                .extend(tools::builtin_specs(&plan.agent, true, false).into_iter().filter(|t| t.name == "delegate_task"));
         }
         let tool_msg = state.db.append_message(&session.id, "tool", &results, Some(&plan.agent.id)).await?;
         state.emit(Event::Message { session_id: session.id.clone(), message: tool_msg });
@@ -736,7 +744,7 @@ async fn reflect(state: Shared, agent: Agent, session: Session, model: String) -
         }
     }
     let system = prompt::reflection_prompt(&agent, &skills);
-    let specs: Vec<ToolSpec> = tools::builtin_specs(&agent, false)
+    let specs: Vec<ToolSpec> = tools::builtin_specs(&agent, false, false)
         .into_iter()
         .filter(|t| t.name == "skill_manage" || t.name == "memory" || t.name == "skill_view")
         .collect();
@@ -786,7 +794,11 @@ async fn reflect(state: Shared, agent: Agent, session: Session, model: String) -
         let mut results = Vec::new();
         for (id, name, args) in calls {
             parts.push(Part::ToolCall { id: id.clone(), name: name.clone(), args: args.clone() });
-            results.push(execute_tool(&ctx, &id, &name, &args).await);
+            if specs.iter().any(|t| t.name == name) {
+                results.push(execute_tool(&ctx, &id, &name, &args).await);
+            } else {
+                results.push(Part::ToolResult { id, name, content: "error: not available here".into(), is_error: true });
+            }
         }
         chat.push(ChatMessage { role: "assistant".into(), parts });
         chat.push(ChatMessage { role: "tool".into(), parts: results });

@@ -56,6 +56,16 @@ pub struct Config {
     /// Approximate context budget in tokens before old turns are compacted.
     #[arg(long, env = "KONGMING_CONTEXT_TOKENS", default_value_t = 48_000)]
     pub context_tokens: usize,
+
+    /// POSIX shell behind the `shell` tool: a path, or "off". Empty uses the
+    /// BusyBox bundled in the Docker image (/opt/busybox/bin/sh) when present.
+    #[arg(long, env = "KONGMING_SHELL", default_value = "")]
+    pub shell: String,
+
+    /// Scratch working directory of the `shell` tool (a tmpfs in the
+    /// container). Empty: <temp dir>/kongming-work.
+    #[arg(long, env = "KONGMING_WORKDIR", default_value = "")]
+    pub workdir: String,
 }
 
 impl Config {

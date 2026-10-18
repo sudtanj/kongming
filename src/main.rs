@@ -38,6 +38,15 @@ async fn run(cfg: config::Config) -> Result<()> {
     }
 
     let state = state::AppState::new(cfg.clone(), database);
+    if let Some(sh) = &state.shell {
+        // Shell commands run as the same user: keep them out of /proc/<pid>/environ
+        // and /proc/<pid>/mem, which hold the Turso token and the password.
+        // SAFETY: plain prctl call with constant arguments.
+        if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+            tracing::warn!("could not mark the process non-dumpable");
+        }
+        tracing::info!(sh = %sh.sh.display(), workdir = %sh.workdir.display(), "shell tool enabled");
+    }
     agent::ensure_default_agent(&state).await?;
     if let Err(e) = agent::seed_skills(&state).await {
         tracing::warn!("seeding skills failed: {e:#}");

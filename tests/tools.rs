@@ -337,3 +337,34 @@ async fn a_turn_that_repeats_itself_stops_at_the_step_limit() {
     assert!(str_of(&reply, "text").contains("kept repeating"), "{reply}");
     assert_eq!(app.llm.requests().len(), 2);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_shell_tool_runs_commands_without_the_daemon_secrets() {
+    let dir = std::env::temp_dir().join(format!("kongming-work-{}", uuid::Uuid::new_v4()));
+    let replies = vec![tool_call("shell", json!({"command": "echo 6x7=$((6*7)); env | grep -c -i turso"})), text("42")];
+    let app = spawn_app_with(replies, &["--shell", "/bin/sh", "--workdir", dir.to_str().unwrap()]).await;
+    app.disable_reflection().await;
+    let sid = app.create_session().await;
+    assert_eq!(app.send_wait(&sid, "what is 6x7?").await["text"], json!("42"));
+    assert!(tool_names(&app.llm.requests()[0]).contains(&"shell".to_string()));
+    let msgs = app.messages(&sid).await;
+    let part = &find_tool_message(&msgs).expect("tool message")["parts"][0];
+    let content = str_of(part, "content");
+    // grep -c finds nothing (exit 1): the environment is empty.
+    assert!(content.starts_with("exit 1\n6x7=42\n0"), "{part}");
+    assert!(dir.is_dir(), "the working directory was created");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_shell_tool_is_absent_when_turned_off() {
+    let replies = vec![tool_call("shell", json!({"command": "echo hi"})), text("no shell")];
+    let app = spawn_app_with(replies, &["--shell", "off"]).await;
+    app.disable_reflection().await;
+    let sid = app.create_session().await;
+    assert_eq!(app.send_wait(&sid, "run it").await["text"], json!("no shell"));
+    assert!(!tool_names(&app.llm.requests()[0]).contains(&"shell".to_string()));
+    let msgs = app.messages(&sid).await;
+    let part = &find_tool_message(&msgs).expect("tool message")["parts"][0];
+    assert_eq!(part["isError"], json!(true));
+    assert!(str_of(part, "content").contains("unknown tool"), "{part}");
+}

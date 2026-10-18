@@ -549,3 +549,9 @@ details.disclosure[open] > summary .chev { transform: rotate(90deg); }
 .thread[data-layout="hero"] .thread-viewport { display: flex; flex-direction: column; justify-content: flex-end; -webkit-mask-image: none; mask-image: none; }
 .thread[data-layout="hero"] .thread-col { max-width: 58rem; }
 .thread[data-layout="hero"] .composer-hint { visibility: hidden; }
+
+/* Telegram-linked conversations */
+.session-row .tg-mark { display: inline-flex; flex: none; color: #229ed9; }
+.session-row .tg-mark .i { width: 0.8rem; height: 0.8rem; }
+.topbar .title .tg-badge { display: inline-flex; flex: none; align-items: center; gap: 0.25rem; margin-left: 0.5rem; height: 1.25rem; padding: 0 0.45rem; border-radius: var(--radius-pill); font-size: 11px; background: rgb(34 158 217 / 0.12); color: #229ed9; overflow: visible; }
+.topbar .title .tg-badge .i { width: 0.75rem; height: 0.75rem; }

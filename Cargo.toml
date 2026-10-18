@@ -16,7 +16,7 @@ name = "kongming"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "process", "fs", "io-util"] }
 axum = { version = "0.7", features = ["json", "macros", "ws"] }
 tower-http = { version = "0.5", features = ["trace"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
@@ -40,6 +40,7 @@ clap = { version = "4", features = ["derive", "env"] }
 url = "2"
 async-trait = "0.1"
 subtle = "2"
+libc = "0.2"
 
 [dev-dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }

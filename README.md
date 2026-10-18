@@ -13,10 +13,11 @@ Inspired by [nanobot](https://github.com/HKUDS/nanobot) (UI, `@` mentions), [her
 - **Agents with roles.** Each agent has a handle, name, job title, description, persona prompt, optional model override, tool/MCP/skill allow-lists and a manager. A manager can `delegate_task` to its direct reports; the report works in its own session and returns a summary. New agents report to Kongming (the default agent) unless you pick another manager or none, and Kongming can grow its own team: `agent_manage` hires a specialist that reports to it, which it can hand work to straight away. Talk to any agent directly with `@handle` (sticky per session) or pick it in the UI/Telegram.
 - **Skills.** Hermes-style `SKILL.md` documents (name, when-to-use description, Markdown body) stored in Turso with version history. The index is in every prompt; the agent loads a skill with `skill_view` and creates/updates them with `skill_manage`. Import/export SKILL.md, pin skills to agents, attach one to a turn with `@skill:name`.
 - **Self-improvement loop.** After turns that used tools or contained a correction, a cheap reflection pass reviews the conversation with only `skill_manage`/`memory` available and saves procedures and durable facts. Everything it does is logged under Activity and shown as toasts.
+- **Local shell.** The `shell` tool runs commands in a static BusyBox `sh` bundled in the image (`ls`, `grep`, `sed`, `awk`, `wget`, `nc`, `tar`, … about 1 MB). Each command gets an empty environment (no tokens or passwords), a scratch directory in memory (`/work`, 32 MB tmpfs), a time limit (30 s by default, at most 5 min), and its whole process group is killed when it ends. The daemon marks itself non-dumpable so a command cannot read its secrets through `/proc`, and the kernel kills a runaway command before the daemon when memory runs out. It is still a shell inside the container: anyone you let talk to an agent (the web login, the Telegram allow-list) can run commands through it. Turn it off with `KONGMING_SHELL=off` or leave `shell` out of an agent's tools.
 - **Memory.** Shared or per-agent facts, preferences, lessons; searchable; injected into prompts.
 - **Context compaction.** Older turns are summarized into a rolling session summary when the estimated context exceeds the budget.
 - **MCP.** Remote servers only (Streamable HTTP or legacy SSE) with no auth, bearer token, or OAuth 2.1 (metadata discovery, dynamic client registration, PKCE, refresh; works behind a firewall by pasting the redirect URL). Tools are exposed as `mcp__<server>__<tool>`. `@mcp:name` in a message makes sure a server's tools are offered.
-- **Telegram.** Long polling, user-id allow-list, streamed replies via message edits, a live *thinking* message above each answer with the model's reasoning (in a collapsed quote) and the tools it calls (Settings → Channels → Show thinking), `/new`, `/agents`, `/agent <handle>`, `/skills`, `/status`, `/stop`, `@handle` switching. Cron jobs can deliver to a chat.
+- **Telegram.** Long polling, user-id allow-list, streamed replies via message edits, a live *thinking* message above each answer with the model's reasoning (in a collapsed quote) and the tools it calls (Settings → Channels → Show thinking), `/new`, `/agents`, `/agent <handle>`, `/skills`, `/status`, `/stop`, `@handle` switching. Cron jobs can deliver to a chat. Conversations that came in from Telegram carry a Telegram badge in the dashboard (sidebar and chat header).
 - **Automations.** `every:<minutes>` or 5-field cron (UTC) prompts run by an agent of your choice.
 - **Web UI.** Vanilla HTML/CSS/JS port of the nanobot UI (sidebar sessions, streaming thread, reasoning and tool activity cards, `@`/`/` palettes, settings pages for agents, skills, MCP, channels, models, automations, memory, activity). Password login, cookie session, WebSocket streaming.
 - **Providers.** Any OpenAI-compatible chat-completions endpoint (OpenAI, OpenRouter, zilong-router, Ollama, vLLM) or the Anthropic Messages API (adaptive thinking, prompt caching).
@@ -63,6 +64,7 @@ docker run -d --name kongming --read-only --cap-drop ALL \
   -e KONGMING_TURSO_AUTH_TOKEN=<token> \
   -e KONGMING_PASSWORD=<ui password> \
   -e KONGMING_SECRET=<random string> \
+  --tmpfs /work:rw,nosuid,nodev,size=32m,uid=65532,gid=65532,mode=0700 \
   --memory 96m --cpus 1 sudtanj/kongming:latest
 ```
 
@@ -84,6 +86,8 @@ Only the Turso credentials and the process settings come from the environment:
 | `KONGMING_MAX_ITERATIONS` | tool-call rounds per step block of a turn | `24` |
 | `KONGMING_AUTO_CONTINUE` | extra step blocks a long turn runs on its own before asking you to continue (older tool output is shortened; a turn repeating the same calls stops early; `0` = always ask) | `4` |
 | `KONGMING_CONTEXT_TOKENS` | compaction threshold | `48000` |
+| `KONGMING_SHELL` | shell behind the `shell` tool: a path, or `off`; empty uses the bundled BusyBox when it is there (the Docker image) | empty |
+| `KONGMING_WORKDIR` | scratch directory of the `shell` tool (a tmpfs in the container) | image: `/work` |
 | `LOG_LEVEL` | tracing filter | `info` |
 
 The Orange Pi deployment script lives in [`sudtanj/infrastructure-tools`](https://github.com/sudtanj/infrastructure-tools) (`bash-scripts/init-kongming.sh`, image from `builder-tools/kongming`).
