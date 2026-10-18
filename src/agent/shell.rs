@@ -240,7 +240,7 @@ mod landlock {
 }
 
 /// Keep the start and the end of long output; the end usually holds the error.
-fn head_tail(s: &str, max: usize) -> String {
+pub(crate) fn head_tail(s: &str, max: usize) -> String {
     let n = s.chars().count();
     if n <= max {
         return s.to_string();

@@ -77,7 +77,11 @@ fn history_to_chat(session: &Session, msgs: &[Message]) -> Vec<ChatMessage> {
     let mut out = Vec::with_capacity(msgs.len() + 1);
     if let Some(sum) = session.summary.as_deref().filter(|s| !s.trim().is_empty()) {
         out.push(ChatMessage::text("user", format!("[Summary of the earlier part of this conversation]\n{sum}")));
-        out.push(ChatMessage::text("assistant", "Understood, I have the summary of our earlier conversation."));
+        // Compaction inside a long task can leave an assistant message first.
+        let first = msgs.iter().find(|m| m.seq > session.summary_upto && m.role != "system");
+        if first.is_none_or(|m| m.role == "user") {
+            out.push(ChatMessage::text("assistant", "Understood, I have the summary of our earlier conversation."));
+        }
     }
     for m in msgs.iter().filter(|m| m.seq > session.summary_upto) {
         if m.role == "system" {
@@ -88,33 +92,75 @@ fn history_to_chat(session: &Session, msgs: &[Message]) -> Vec<ChatMessage> {
     out
 }
 
-/// Compact older history into the session summary when the estimate exceeds
-/// the budget. Keeps the most recent messages verbatim.
-async fn maybe_compact(
-    state: &Shared,
-    session: &mut Session,
-    msgs: &[Message],
-    provider_cfg: &llm::ProviderConfig,
-    model: &str,
-) -> Result<()> {
-    let chat = history_to_chat(session, msgs);
-    let total: usize = chat.iter().map(llm::estimate_message_tokens).sum();
-    if total < state.cfg.context_tokens {
-        return Ok(());
+/// The model's view of the session. The request being worked on keeps its
+/// live form; once compaction has folded it into the summary, it is restated
+/// after the summary so a long task does not lose what it was asked to do.
+async fn load_chat(state: &Shared, session: &Session, request: (i64, &str)) -> Result<Vec<ChatMessage>> {
+    let (seq, text) = request;
+    let mut msgs = state.db.messages(&session.id, session.summary_upto).await?;
+    msgs.retain(|m| m.seq > session.summary_upto);
+    if let Some(m) = msgs.iter_mut().find(|m| m.seq == seq) {
+        m.parts = vec![Part::Text { text: text.to_string() }];
     }
-    let live: Vec<&Message> = msgs.iter().filter(|m| m.seq > session.summary_upto).collect();
-    if live.len() <= KEEP_RECENT_MESSAGES {
-        return Ok(());
+    let mut chat = history_to_chat(session, &msgs);
+    if seq <= session.summary_upto {
+        if let Some(Part::Text { text: sum }) = chat.first_mut().and_then(|m| m.parts.first_mut()) {
+            sum.push_str(&format!("\n\n[The request you are working on now]\n{text}"));
+        }
     }
-    // Cut on a user message boundary so tool call/result pairs stay together.
-    let mut cut = live.len() - KEEP_RECENT_MESSAGES;
-    while cut > 0 && live[cut].role != "user" {
+    Ok(chat)
+}
+
+/// Rough size of a request: system prompt, tool schemas and history.
+fn request_tokens(system: &str, tools: &[ToolSpec], chat: &[ChatMessage]) -> usize {
+    let tools: usize = tools
+        .iter()
+        .map(|t| 8 + llm::estimate_tokens(&t.description) + llm::estimate_tokens(&t.parameters.to_string()))
+        .sum();
+    llm::estimate_tokens(system) + tools + chat.iter().map(llm::estimate_message_tokens).sum::<usize>()
+}
+
+/// Provider errors that mean the request no longer fits the model's context.
+fn is_context_overflow(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    [
+        "context_length_exceeded",
+        "context length",
+        "context window",
+        "context size",
+        "maximum context",
+        "exceeds the available context",
+        "prompt is too long",
+        "input is too long",
+        "too many tokens",
+    ]
+    .iter()
+    .any(|p| e.contains(p))
+}
+
+/// Fold older history into the session summary. Keeps the last `keep`
+/// messages verbatim and may cut inside a turn (a long task has one user
+/// message and many tool rounds), but never between a tool call and its
+/// results. Returns whether anything was folded.
+async fn compact(state: &Shared, session: &mut Session, turn_id: &str, model: &str, keep: usize) -> Result<bool> {
+    let msgs = state.db.messages(&session.id, session.summary_upto).await?;
+    let live: Vec<&Message> = msgs.iter().filter(|m| m.seq > session.summary_upto && m.role != "system").collect();
+    if live.len() <= keep {
+        return Ok(false);
+    }
+    let mut cut = live.len() - keep;
+    while cut > 0 && live[cut].role == "tool" {
         cut -= 1;
     }
     if cut == 0 {
-        return Ok(());
+        return Ok(false);
     }
     let upto = live[cut - 1].seq;
+    state.emit(Event::Status {
+        session_id: session.id.clone(),
+        turn_id: turn_id.into(),
+        text: "Summarizing older messages to stay within the context budget".into(),
+    });
     let mut transcript = String::new();
     if let Some(s) = &session.summary {
         transcript.push_str("Previous summary:\n");
@@ -138,7 +184,8 @@ async fn maybe_compact(
     let req = ChatRequest {
         model: model.to_string(),
         system: prompt::compaction_prompt().to_string(),
-        messages: vec![ChatMessage::text("user", crate::mcp::truncate(&transcript, 60_000))],
+        // The previous summary leads and the newest messages close it: keep both.
+        messages: vec![ChatMessage::text("user", shell::head_tail(&transcript, 60_000))],
         tools: vec![],
         max_tokens: 1500,
         temperature: Some(0.2),
@@ -146,13 +193,43 @@ async fn maybe_compact(
     };
     let summary = collect_text(provider.stream(req).await?).await?;
     if summary.trim().is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     state.db.set_session_summary(&session.id, &summary, upto).await?;
+    tracing::info!(session = %session.id, upto, "compacted older messages into the summary");
     session.summary = Some(summary);
     session.summary_upto = upto;
-    let _ = provider_cfg;
-    Ok(())
+    Ok(true)
+}
+
+/// `compact`, then reload the history if it changed. Failures are logged:
+/// the turn carries on with the history it has.
+async fn compact_chat(
+    state: &Shared,
+    session: &mut Session,
+    turn_id: &str,
+    model: &str,
+    keep: usize,
+    request: (i64, &str),
+    chat: &mut Vec<ChatMessage>,
+) -> bool {
+    match compact(state, session, turn_id, model, keep).await {
+        Ok(true) => match load_chat(state, session, request).await {
+            Ok(c) => {
+                *chat = c;
+                true
+            }
+            Err(e) => {
+                tracing::warn!("reloading history after compaction failed: {e:#}");
+                false
+            }
+        },
+        Ok(false) => false,
+        Err(e) => {
+            tracing::warn!("compaction failed: {e:#}");
+            false
+        }
+    }
 }
 
 /// Drain a stream into its text (for compaction, reflection, titles).
@@ -466,19 +543,19 @@ async fn run_turn_inner(
     };
     let (pcfg, _) = state.provider().await?;
 
-    // Context: compact if needed, then load.
-    let mut msgs = state.db.messages(&session.id, session.summary_upto).await?;
-    if let Err(e) = maybe_compact(state, session, &msgs, &pcfg, &plan.model).await {
-        tracing::warn!("compaction failed: {e:#}");
+    // Context: load, and fold older messages into the summary when the request
+    // would not fit the budget. The agent is addressed as "@handle: text"; the
+    // live copy of the request drops the prefix.
+    let request_text = mention::strip_leading_handle(&stored_text, &plan.agent.handle);
+    let request = (user_msg.seq, request_text.as_str());
+    let mut chat = load_chat(state, session, request).await?;
+    if request_tokens(&plan.system, &plan.tools, &chat) >= state.cfg.context_tokens {
+        compact_chat(state, session, &turn_id, &plan.model, KEEP_RECENT_MESSAGES, request, &mut chat).await;
     }
-    msgs.retain(|m| m.seq > session.summary_upto);
-    let mut chat = history_to_chat(session, &msgs);
-    // The agent is addressed as "@handle: text"; drop the prefix in the live copy.
-    if let Some(last) = chat.last_mut() {
-        if last.role == "user" {
-            last.parts = vec![Part::Text { text: mention::strip_leading_handle(&stored_text, &plan.agent.handle) }];
-        }
-    }
+    // Inside the turn: compact again once enough new rounds have piled up;
+    // in between, cut old tool output down instead.
+    let mut rounds_since_compact = KEEP_RECENT_MESSAGES / 2;
+    let mut overflow_retried = false;
 
     let mut final_text = String::new();
     let mut stop_reason = String::from("stop");
@@ -511,6 +588,17 @@ async fn run_turn_inner(
             Ok(r) => r,
             Err(e) => {
                 let msg = format!("{e:#}");
+                // Too long for the model after all: fold harder and try once more.
+                if is_context_overflow(&msg) && !overflow_retried {
+                    overflow_retried = true;
+                    tracing::warn!(session = %session.id, "the model rejected the request as too long; compacting");
+                    let keep = KEEP_RECENT_MESSAGES / 3;
+                    compact_chat(state, session, &turn_id, &plan.model, keep, request, &mut chat).await;
+                    let fresh = chat.len().saturating_sub(1);
+                    shorten_tool_results(&mut chat[..fresh]);
+                    rounds_since_compact = 0;
+                    continue;
+                }
                 if msg.contains("cancelled") {
                     stop_reason = "cancelled".into();
                 } else {
@@ -523,6 +611,7 @@ async fn run_turn_inner(
         if usage.0 > 0 || usage.1 > 0 {
             let _ = state.db.record_usage(Some(&session.id), Some(&plan.agent.id), &plan.model, usage.0, usage.1).await;
         }
+        let used_tokens = usize::try_from(usage.0 + usage.1).unwrap_or(0);
         let calls = parts
             .iter()
             .filter_map(|p| match p {
@@ -633,6 +722,18 @@ async fn run_turn_inner(
         let tool_msg = state.db.append_message(&session.id, "tool", &results, Some(&plan.agent.id)).await?;
         state.emit(Event::Message { session_id: session.id.clone(), message: tool_msg });
         chat.push(ChatMessage { role: "tool".into(), parts: results });
+        rounds_since_compact += 1;
+        let need = request_tokens(&plan.system, &plan.tools, &chat).max(used_tokens);
+        if need >= state.cfg.context_tokens {
+            let compacted = rounds_since_compact >= KEEP_RECENT_MESSAGES / 2
+                && compact_chat(state, session, &turn_id, &plan.model, KEEP_RECENT_MESSAGES, request, &mut chat).await;
+            if compacted {
+                rounds_since_compact = 0;
+            } else {
+                let fresh = chat.len().saturating_sub(1);
+                shorten_tool_results(&mut chat[..fresh]);
+            }
+        }
         let step = iteration + 1;
         if step % block != 0 {
             continue;
@@ -1049,9 +1150,8 @@ mod tests {
         assert!(check_args(None, &raw).expect("rejected").contains("not valid JSON"));
     }
 
-    #[test]
-    fn history_includes_summary_and_skips_system() {
-        let s = Session {
+    fn session(summary_upto: i64) -> Session {
+        Session {
             id: "s".into(),
             title: String::new(),
             agent_id: "a".into(),
@@ -1059,12 +1159,15 @@ mod tests {
             channel_ref: None,
             parent_session_id: None,
             summary: Some("earlier".into()),
-            summary_upto: 2,
+            summary_upto,
             archived: false,
             created_at: 0,
             updated_at: 0,
-        };
-        let m = |seq: i64, role: &str| Message {
+        }
+    }
+
+    fn msg(seq: i64, role: &str) -> Message {
+        Message {
             id: seq.to_string(),
             session_id: "s".into(),
             seq,
@@ -1072,10 +1175,29 @@ mod tests {
             parts: vec![Part::Text { text: "t".into() }],
             agent_id: None,
             created_at: 0,
-        };
-        let chat = history_to_chat(&s, &[m(1, "user"), m(2, "assistant"), m(3, "system"), m(4, "user")]);
+        }
+    }
+
+    #[test]
+    fn history_includes_summary_and_skips_system() {
+        let chat = history_to_chat(&session(2), &[msg(1, "user"), msg(2, "assistant"), msg(3, "system"), msg(4, "user")]);
         assert_eq!(chat.len(), 3);
         assert!(chat[0].parts.iter().any(|p| matches!(p, Part::Text { text } if text.contains("earlier"))));
         assert_eq!(chat[2].role, "user");
+    }
+
+    #[test]
+    fn summary_before_an_assistant_message_needs_no_reply() {
+        let chat = history_to_chat(&session(1), &[msg(1, "user"), msg(2, "assistant"), msg(3, "tool")]);
+        let roles: Vec<&str> = chat.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, ["user", "assistant", "tool"]);
+    }
+
+    #[test]
+    fn context_overflow_errors_are_recognized() {
+        assert!(is_context_overflow("llm HTTP 400 Bad Request: prompt is too long: 210000 tokens > 200000 maximum"));
+        assert!(is_context_overflow("llm HTTP 400: This model's maximum context length is 128000 tokens"));
+        assert!(is_context_overflow("llm HTTP 400: context_length_exceeded"));
+        assert!(!is_context_overflow("llm HTTP 401 Unauthorized: invalid api key"));
     }
 }

@@ -206,7 +206,8 @@ or exactly `nothing to save`.");
 pub fn compaction_prompt() -> &'static str {
     "Summarize the conversation so far for your own future reference. Keep: the user's goals and constraints, decisions made, \
 facts discovered (names, ids, urls, paths, numbers), what was tried and what failed, open questions, and the current state of \
-any task. Use terse bullet points. Omit pleasantries. Do not invent anything."
+any task (for a task still in progress: what is done and what remains). Use terse bullet points. Omit pleasantries. Do not \
+invent anything."
 }
 
 #[cfg(test)]

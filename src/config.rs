@@ -53,7 +53,9 @@ pub struct Config {
     #[arg(long, env = "KONGMING_AUTO_CONTINUE", default_value_t = 4)]
     pub auto_continue: usize,
 
-    /// Approximate context budget in tokens before old turns are compacted.
+    /// Approximate request size in tokens (system prompt, tools, history)
+    /// past which older messages are compacted into the session summary, also
+    /// between the tool rounds of a long turn.
     #[arg(long, env = "KONGMING_CONTEXT_TOKENS", default_value_t = 48_000)]
     pub context_tokens: usize,
 

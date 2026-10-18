@@ -4,7 +4,7 @@ mod support;
 
 use reqwest::StatusCode;
 use serde_json::{json, Value};
-use support::{part_types, role, spawn_app, str_of, system_prompt, text, within};
+use support::{part_types, role, spawn_app, str_of, system_prompt, text, tool_call, within};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn simple_turn_round_trips_through_the_mock() {
@@ -88,6 +88,38 @@ async fn second_turn_sends_the_history() {
     assert_eq!(msgs[2]["content"], json!("first"));
     assert_eq!(msgs[3]["content"], json!("two"));
     assert_eq!(app.messages(&sid).await.len(), 4);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_long_task_is_compacted_between_tool_rounds() {
+    // A one-token budget: compaction is due as soon as enough rounds pile up.
+    let mut script: Vec<_> = (0..6).map(|_| tool_call("current_time", json!({}))).collect();
+    script.push(text("SUMMARY: read the clock six times"));
+    script.push(text("done"));
+    let app = support::spawn_app_with(script, &["--context-tokens", "1"]).await;
+    app.disable_reflection().await;
+    let sid = app.create_session().await;
+    assert_eq!(app.send_wait(&sid, "keep reading the clock").await["text"], json!("done"));
+
+    // Six tool rounds, the compaction, then the last round on the compacted history.
+    let reqs = app.llm.requests();
+    assert_eq!(reqs.len(), 8);
+    assert!(system_prompt(&reqs[6]).contains("Summarize the conversation"), "{}", reqs[6]);
+    assert!(reqs[6].to_string().contains("keep reading the clock"));
+    let msgs = reqs[7]["messages"].as_array().unwrap();
+    // System prompt, the summary restating the request, the 12 newest messages
+    // (a tool call first, so no acknowledgement in between).
+    assert_eq!(msgs.len(), 14, "{msgs:?}");
+    let summary = msgs[1]["content"].as_str().unwrap_or("");
+    assert!(summary.contains("SUMMARY: read the clock six times"), "{summary}");
+    assert!(summary.contains("[The request you are working on now]\nkeep reading the clock"), "{summary}");
+    assert_eq!(msgs[2]["role"], json!("assistant"));
+    assert!(msgs[2]["tool_calls"].is_array(), "{}", msgs[2]);
+
+    let s = app.state.db.session(&sid).await.unwrap().unwrap();
+    assert_eq!(s.summary_upto, 1, "only the request was folded");
+    // Nothing is lost from the stored conversation.
+    assert_eq!(app.messages(&sid).await.len(), 14);
 }
 
 #[tokio::test(flavor = "multi_thread")]
