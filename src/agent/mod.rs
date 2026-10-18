@@ -56,7 +56,9 @@ pub struct TurnOptions {
 /// conversations Kongming hands to its reports are read-only.
 pub async fn user_agent(state: &Shared, session: &Session) -> Result<Agent> {
     if session.channel == "delegation" {
-        return Err(anyhow!("this conversation is a task handed to a team member and is read-only; talk to the lead agent instead"));
+        return Err(anyhow!(
+            "this conversation is a task handed to a team member and is read-only; talk to the lead agent instead"
+        ));
     }
     ensure_default_agent(state).await
 }

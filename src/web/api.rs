@@ -55,7 +55,8 @@ fn forbidden(msg: impl Into<String>) -> ApiError {
 async fn lead_agent(state: &Shared, body: &Value) -> Result<Agent, ApiError> {
     let lead = agent::ensure_default_agent(state).await?;
     if let Some(id) = s(body, "agentId") {
-        let a = state.db.agent(id).await?.or(state.db.agent_by_handle(id).await?).ok_or_else(|| bad("agent not found"))?;
+        let a =
+            state.db.agent(id).await?.or(state.db.agent_by_handle(id).await?).ok_or_else(|| bad("agent not found"))?;
         if a.id != lead.id {
             return Err(forbidden(format!("you talk to @{} only; it hands work to @{} itself", lead.handle, a.handle)));
         }

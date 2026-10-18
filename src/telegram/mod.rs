@@ -578,7 +578,7 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
     }
 
     if let Some(cmd) = text.strip_prefix('/') {
-        let (name, arg) = cmd.split_once(char::is_whitespace).map(|(a, b)| (a, b.trim())).unwrap_or((cmd, ""));
+        let name = cmd.split(char::is_whitespace).next().unwrap_or(cmd);
         let name = name.split('@').next().unwrap_or(name);
         match name {
             "start" | "help" => {
