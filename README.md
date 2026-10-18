@@ -46,7 +46,7 @@ Browser: a current Chrome, Firefox or Safari for the web UI.
 
 ```bash
 docker run -d --name kongming --read-only --cap-drop ALL \
-  -p 127.0.0.1:18800:18800 \
+  -p 18800:18800 \
   -e KONGMING_TURSO_DATABASE_URL=libsql://<db>-<org>.turso.io \
   -e KONGMING_TURSO_AUTH_TOKEN=<token> \
   -e KONGMING_PASSWORD=<ui password> \
@@ -54,7 +54,7 @@ docker run -d --name kongming --read-only --cap-drop ALL \
   --memory 96m --cpus 1 sudtanj/kongming:latest
 ```
 
-Open `http://127.0.0.1:18800`, log in and set up the rest in the dashboard; it is stored in Turso:
+Open `http://<board-ip>:18800` from any machine on your network (the port is published on every interface, so keep `KONGMING_PASSWORD` set), log in and set up the rest in the dashboard; it is stored in Turso:
 
 - **Settings → Models**: LLM provider (OpenAI-compatible or Anthropic), base URL, API key and model.
 - **Settings → Channels**: Telegram bot token from @BotFather and the allowed user ids. Saving the token checks it with Telegram and connects the bot right away (see below).
