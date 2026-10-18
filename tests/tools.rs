@@ -4,7 +4,9 @@
 mod support;
 
 use serde_json::{json, Value};
-use support::{part_types, poll_until, role, spawn_app, spawn_app_with, str_of, system_prompt, text, tool_call, tool_names};
+use support::{
+    part_types, poll_until, role, spawn_app, spawn_app_with, str_of, system_prompt, text, tool_call, tool_names,
+};
 
 fn find_tool_message(msgs: &[Value]) -> Option<&Value> {
     msgs.iter().find(|m| m["role"] == json!("tool"))

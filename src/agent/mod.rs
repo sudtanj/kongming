@@ -629,7 +629,9 @@ async fn run_turn_inner(
 or to continue."
             )
         } else {
-            format!("I used all {step} steps allowed for one turn. Tell me to continue and I will pick up where I stopped.")
+            format!(
+                "I used all {step} steps allowed for one turn. Tell me to continue and I will pick up where I stopped."
+            )
         };
         let m = state
             .db
