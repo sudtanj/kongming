@@ -261,3 +261,30 @@ async fn reflection_is_skipped_for_plain_chat_when_disabled() {
     assert_eq!(app.llm.request_count(), 2);
     assert!(app.get("/api/improvements").await.as_array().unwrap().is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_wrapped_in_the_wrong_tool_is_bounced_back_to_the_model() {
+    // Seen with weaker models: another tool's call put inside the arguments.
+    let wrapped = json!({"name": "read session", "parameters": {"session_id": "x", "limit": "10"}});
+    let app = spawn_app(vec![tool_call("skill_view", wrapped), text("let me retry")]).await;
+    app.disable_reflection().await;
+    let sid = app.create_session().await;
+    assert_eq!(app.send_wait(&sid, "read it").await["text"], json!("let me retry"));
+    let msgs = app.messages(&sid).await;
+    let result = &find_tool_message(&msgs).expect("tool message")["parts"][0];
+    assert_eq!(result["isError"], json!(true));
+    let content = str_of(result, "content");
+    assert!(content.contains("unknown: parameters"), "{content}");
+    assert!(content.contains("call it directly"), "{content}");
+    assert!(content.contains("\"required\":[\"name\"]"), "the schema is shown: {content}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_reply_after_tools_is_reported_not_silent() {
+    let app = spawn_app(vec![tool_call("current_time", json!({})), text(""), text("")]).await;
+    app.disable_reflection().await;
+    let sid = app.create_session().await;
+    let reply = app.send_wait(&sid, "what time is it?").await;
+    assert_eq!(reply["stopReason"], json!("error"), "{reply}");
+    assert!(str_of(&reply, "error").contains("empty reply after the tool results"), "{reply}");
+}

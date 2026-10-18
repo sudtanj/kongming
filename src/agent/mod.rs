@@ -340,6 +340,56 @@ async fn execute_tool(ctx: &ToolCtx<'_>, id: &str, name: &str, args: &Value) -> 
     Part::ToolResult { id: id.to_string(), name: name.to_string(), content, is_error }
 }
 
+/// Catch malformed calls before they reach the tool and answer with an error
+/// the model can act on: weaker models send invalid JSON, drop required
+/// arguments, or wrap another tool's call inside the arguments.
+pub fn check_args(spec: Option<&ToolSpec>, args: &Value) -> Option<String> {
+    if let Some(raw) = args.get("_raw") {
+        return Some(format!(
+            "the arguments were not valid JSON ({}); call the tool again with a JSON object",
+            crate::mcp::truncate(raw.as_str().unwrap_or(""), 200)
+        ));
+    }
+    let spec = spec?;
+    let schema = &spec.parameters;
+    let props = schema.get("properties").and_then(Value::as_object);
+    let given: Vec<&str> = args.as_object().map(|a| a.keys().map(String::as_str).collect()).unwrap_or_default();
+    let missing: Vec<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|r| r.iter().filter_map(Value::as_str).filter(|k| !given.contains(k)).collect())
+        .unwrap_or_default();
+    let unknown: Vec<&str> = match props {
+        Some(p) if !p.is_empty() => given.iter().copied().filter(|k| !p.contains_key(*k)).collect(),
+        _ => vec![],
+    };
+    let strict = schema.get("additionalProperties") == Some(&Value::Bool(false));
+    let all_unknown = !given.is_empty() && unknown.len() == given.len();
+    if missing.is_empty() && (unknown.is_empty() || (!strict && !all_unknown)) {
+        return None;
+    }
+    let mut msg = format!("invalid arguments for {}", spec.name);
+    if !missing.is_empty() {
+        msg.push_str(&format!("; missing required: {}", missing.join(", ")));
+    }
+    if !unknown.is_empty() {
+        msg.push_str(&format!("; unknown: {}", unknown.join(", ")));
+    }
+    if let Some(other) = args.get("name").and_then(Value::as_str) {
+        if ["name", "parameters", "arguments"].iter().any(|k| unknown.contains(k)) {
+            msg.push_str(&format!(
+                ". These arguments look like a call to '{other}' put inside {}: to use '{other}', call it directly as its own tool",
+                spec.name
+            ));
+        }
+    }
+    msg.push_str(&format!(
+        ". Expected arguments (JSON schema): {}",
+        crate::mcp::truncate(&schema.to_string(), 2000)
+    ));
+    Some(msg)
+}
+
 /// Run one user turn end to end. The user message is persisted here.
 pub async fn run_turn(state: Shared, mut session: Session, user_text: String, opts: TurnOptions) -> Result<TurnResult> {
     let Some(cancel) = state.begin_turn(&session.id) else {
@@ -416,6 +466,7 @@ async fn run_turn_inner(
     let mut stop_reason = String::from("stop");
     let mut error: Option<String> = None;
     let mut used_tools = false;
+    let mut retried_empty = false;
 
     for iteration in 0..state.cfg.max_iterations {
         if cancel.load(Ordering::Relaxed) {
@@ -454,11 +505,20 @@ async fn run_turn_inner(
                 _ => None,
             })
             .collect::<Vec<_>>();
-        if parts.is_empty() && calls.is_empty() {
-            // Nothing came back (rare provider hiccup): one retry, then give up.
-            if iteration == 0 {
+        let has_text = parts.iter().any(|p| matches!(p, Part::Text { text } if !text.trim().is_empty()));
+        if !has_text && calls.is_empty() {
+            // No answer (only thinking, or nothing at all): ask once more, then
+            // say so instead of ending the turn in silence.
+            if !retried_empty {
+                retried_empty = true;
                 continue;
             }
+            stop_reason = "error".into();
+            error = Some(format!(
+                "the model ({}) returned an empty reply{}; try again, or pick a stronger model in Settings → Models",
+                plan.model,
+                if used_tools { " after the tool results" } else { "" }
+            ));
             break;
         }
         let assistant_msg = state.db.append_message(&session.id, "assistant", &parts, Some(&plan.agent.id)).await?;
@@ -500,6 +560,13 @@ async fn run_turn_inner(
                     id: id.clone(),
                     name: name.clone(),
                     content: "cancelled by user".into(),
+                    is_error: true,
+                }
+            } else if let Some(problem) = check_args(plan.tools.iter().find(|t| t.name == *name), args) {
+                Part::ToolResult {
+                    id: id.clone(),
+                    name: name.clone(),
+                    content: format!("error: {problem}"),
                     is_error: true,
                 }
             } else {
@@ -801,6 +868,30 @@ mod tests {
         assert_eq!(auto_title(""), "New chat");
         let long = "x".repeat(100);
         assert_eq!(auto_title(&long).chars().count(), 61);
+    }
+
+    #[test]
+    fn check_args_lets_good_calls_through_and_explains_bad_ones() {
+        let spec = ToolSpec {
+            name: "mcp__composio__SEARCH".into(),
+            description: String::new(),
+            parameters: serde_json::json!({"type": "object", "properties": {"queries": {"type": "array"}}, "required": ["queries"]}),
+        };
+        assert_eq!(check_args(Some(&spec), &serde_json::json!({"queries": []})), None);
+        // Extra keys are fine on a loose schema as long as something matches.
+        assert_eq!(check_args(Some(&spec), &serde_json::json!({"queries": [], "x": 1})), None);
+        // Unknown tools are left to the executor.
+        assert_eq!(check_args(None, &serde_json::json!({"anything": 1})), None);
+
+        let wrapped = serde_json::json!({"name": "read session", "parameters": {"session_id": "x"}});
+        let msg = check_args(Some(&spec), &wrapped).expect("rejected");
+        assert!(msg.contains("missing required: queries"), "{msg}");
+        assert!(msg.contains("unknown: name, parameters"), "{msg}");
+        assert!(msg.contains("call it directly"), "{msg}");
+        assert!(msg.contains("\"queries\""), "{msg}");
+
+        let raw = serde_json::json!({"_raw": "{bad"});
+        assert!(check_args(None, &raw).expect("rejected").contains("not valid JSON"));
     }
 
     #[test]
