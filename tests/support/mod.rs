@@ -385,7 +385,8 @@ async fn mcp_handler(State(st): State<Arc<McpInner>>, headers: HeaderMap, body: 
             }
             let text = v.pointer("/params/arguments/text").and_then(Value::as_str).unwrap_or("");
             mcp_json(json!({"jsonrpc": "2.0", "id": id, "result": {
-                "content": [{"type": "text", "text": format!("echo: {text}")}],
+                // JSON is passed through as-is, to play servers that report failures in the text.
+                "content": [{"type": "text", "text": if text.starts_with('{') { text.to_string() } else { format!("echo: {text}") }}],
                 "isError": false
             }}))
         }

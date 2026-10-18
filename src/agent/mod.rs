@@ -20,6 +20,11 @@ use crate::state::{Event, Shared};
 use tools::ToolCtx;
 
 const MAX_TOOL_RESULT_CHARS: usize = 16_000;
+/// Appended to failed tool results: weaker models otherwise stop at the first
+/// error and hand it to the user instead of fixing the call.
+const RETRY_HINT: &str = "[kongming] This call failed. Work out why from the error above and fix it yourself: add \
+missing arguments or correct wrong ones (find the values with another tool, such as a list or search call, or take them \
+from the conversation), or use a different tool. Ask the user only for what you cannot find out yourself.";
 /// Tool results from earlier step blocks, once a turn continues past the limit.
 const OLD_TOOL_RESULT_CHARS: usize = 1_500;
 const KEEP_RECENT_MESSAGES: usize = 12;
@@ -339,6 +344,7 @@ async fn execute_tool(ctx: &ToolCtx<'_>, id: &str, name: &str, args: &Value) -> 
         Err(e) => (format!("error: {e:#}"), true),
     };
     let content = crate::mcp::truncate(&content, MAX_TOOL_RESULT_CHARS);
+    let content = if is_error { format!("{content}\n\n{RETRY_HINT}") } else { content };
     Part::ToolResult { id: id.to_string(), name: name.to_string(), content, is_error }
 }
 

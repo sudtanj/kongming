@@ -150,3 +150,22 @@ async fn server_without_auth_and_input_validation() {
     let missing: Value = app.post_raw("/api/mcp/doesnotexist/refresh", json!({})).await.1;
     assert!(missing.get("error").is_some(), "{missing}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failure_reported_inside_a_result_is_an_error_the_agent_is_told_to_fix() {
+    let mcp = McpMock::start(false).await;
+    let failed = r#"{"successful":false,"error":"Following fields are missing: {'owner', 'repo'}"}"#;
+    let app = spawn_app(vec![tool_call("mcp__echo__echo", json!({"text": failed})), text("retrying")]).await;
+    app.disable_reflection().await;
+    let created = app.post("/api/mcp", json!({"name": "Echo", "url": mcp.endpoint(), "transport": "http"})).await;
+    app.post(&format!("/api/mcp/{}/refresh", str_of(&created, "id")), json!({})).await;
+
+    let sid = app.create_session().await;
+    assert_eq!(app.send_wait(&sid, "list my workflows").await["text"], json!("retrying"));
+    let msgs = app.messages(&sid).await;
+    let result = &msgs[2]["parts"][0];
+    assert_eq!(result["isError"], json!(true), "{result}");
+    assert!(str_of(result, "content").contains("fix it yourself"), "{result}");
+    let sys = system_prompt(&app.llm.requests()[0]);
+    assert!(sys.contains("When a tool call fails, fix it"), "{sys}");
+}

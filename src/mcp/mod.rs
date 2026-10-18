@@ -553,7 +553,16 @@ pub fn render_result(r: &Value) -> (String, bool) {
         out.push_str(&r.to_string());
     }
     let out = out.trim_end().to_string();
+    let is_error = is_error || reports_failure(&out);
     (truncate(&out, MAX_RESULT_CHARS), is_error)
+}
+
+/// Servers such as Composio answer a failed call as a normal result whose JSON
+/// says `"successful": false`; treat that as the error it is.
+fn reports_failure(text: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<Value>(text) else { return false };
+    let flag = |k: &str| v.get(k).and_then(Value::as_bool);
+    flag("successful") == Some(false) || flag("success") == Some(false) || flag("isError") == Some(true)
 }
 
 pub fn truncate(s: &str, max: usize) -> String {
@@ -596,6 +605,11 @@ mod tests {
         let (t, e) = render_result(&json!({"structuredContent": {"x": 1}}));
         assert_eq!(t, "{\"x\":1}");
         assert!(!e);
+        // Composio reports failures in the text of a normal result.
+        let failed = r#"{"successful":false,"data":{},"error":"Following fields are missing: {'owner', 'repo'}"}"#;
+        assert!(render_result(&json!({"content": [{"type": "text", "text": failed}]})).1);
+        let fine = r#"{"successful":true,"data":{"items":[]},"error":null}"#;
+        assert!(!render_result(&json!({"content": [{"type": "text", "text": fine}]})).1);
     }
 
     #[test]

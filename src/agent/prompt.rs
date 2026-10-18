@@ -127,6 +127,13 @@ preferences with `memory`. Fix a skill that misled you instead of working around
     }
 
     // 6. Tools / MCP
+    s.push_str("# Using tools\n");
+    s.push_str(
+        "When a tool call fails, fix it before anything else: read the error, then supply the missing arguments or correct \
+the wrong ones and call again. Look up values you lack with other tools first (for example the account, owner or repository \
+behind a request) or take them from the conversation; try another tool when one cannot do the job. Give up only after real \
+attempts, then tell the user in plain words what failed and what you need. Never answer with raw tool output; summarize it.\n\n",
+    );
     if !p.mcp_servers.is_empty() {
         s.push_str("# Connected services\n");
         s.push_str(&format!(
