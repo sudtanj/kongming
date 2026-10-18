@@ -35,6 +35,9 @@ const STRINGS = {
     'session.info': '{{channel}} · {{count}} messages',
     'session.telegram': 'Telegram chat',
     'session.telegramBadge': 'Telegram',
+    'session.delegatedBadge': 'Delegated task',
+    'session.readonly': 'A task @{{lead}} handed to @{{agent}}. It is read-only: to correct it, tell @{{lead}}.',
+    'session.backToLead': 'Open the conversation with @{{lead}}',
     'session.telegramDesc': 'Linked to a Telegram chat: what is sent to the bot there lands in this conversation.',
     'common.cancel': 'Cancel',
     'common.delete': 'Delete',
@@ -70,7 +73,7 @@ const STRINGS = {
     'greeting.start': 'Where should we start?',
     'greeting.build': 'What are we building today?',
     'greeting.tackle': 'What should we tackle together?',
-    'hero.sub': 'Talk to {{agent}} — mention teammates with @, run commands with /.',
+    'hero.sub': 'Talk to {{agent}}; it runs the team. Mention teammates or skills with @, run commands with /.',
     'hero.quick.plan': 'Make a plan',
     'hero.quick.planPrompt': 'Create a concise plan for what I should do next.',
     'hero.quick.skills': 'What can you do?',
@@ -81,12 +84,11 @@ const STRINGS = {
     'composer.placeholderGeneric': 'Send a message…',
     'composer.send': 'Send',
     'composer.stop': 'Stop',
-    'composer.mention': 'Mention an agent, skill, session or MCP server',
+    'composer.mention': 'Mention a teammate, skill, session or MCP server',
     'composer.commands': 'Slash commands',
     'composer.attach': 'Attachments are not available in kongming',
     'composer.hint': 'Enter to send · Shift+Enter for a new line',
     'composer.agent': 'Agent',
-    'composer.pickAgent': 'Choose an agent',
     'composer.chars': '{{count}} characters',
     'palette.agents': 'Agents',
     'palette.skills': 'Skills',
@@ -96,13 +98,9 @@ const STRINGS = {
     'palette.empty': 'No matches',
     'cmd.new': 'Start a new chat',
     'cmd.clear': 'Clear this chat',
-    'cmd.agent': 'Switch this chat to another agent',
     'cmd.stop': 'Stop the current reply',
     'cmd.help': 'Show available commands',
-    'cmd.helpText': 'Commands: /new, /clear, /agent <handle>, /stop, /help. Mention teammates with @handle, attach skills with @skill:name, sessions with @session:id, MCP servers with @mcp:name.',
-    'cmd.agentUsage': 'Usage: /agent <handle>',
-    'cmd.noAgent': 'No agent named @{{handle}}',
-    'cmd.switched': 'Switched to @{{handle}}',
+    'cmd.helpText': 'Commands: /new, /clear, /stop, /help. Name a teammate for Kongming with @handle, attach skills with @skill:name, sessions with @session:id, MCP servers with @mcp:name.',
     'cmd.nothingToStop': 'Nothing is running',
     'cmd.needSession': 'Open a chat first',
     'thread.thinking': 'Thinking',
@@ -188,8 +186,7 @@ const STRINGS = {
     'models.publicUrl': 'Public URL',
     'models.publicUrlDesc': 'Optional. When kongming is reachable at this address, MCP OAuth returns here automatically; leave empty behind a firewall to paste the redirect URL instead.',
     'agents.title': 'Agents',
-    'agents.desc': 'Your team. Managers can delegate to the agents that report to them.',
-    'agents.new': 'New agent',
+    'agents.desc': 'Kongming hires, adjusts and retires the team and hands it work. You talk to Kongming; the others are read-only here.',
     'agents.orgChart': 'Org chart',
     'agents.handle': 'Handle',
     'agents.handleDesc': 'Used in @mentions. Lowercase letters, digits, - and _.',
@@ -210,13 +207,12 @@ const STRINGS = {
     'agents.pinnedDesc': 'Always loaded into the prompt.',
     'agents.selfImprove': 'Self-improve',
     'agents.selfImproveDesc': 'May create and update skills and memories on its own.',
-    'agents.isDefault': 'Default agent',
-    'agents.isDefaultDesc': 'Used for new chats and unaddressed messages.',
-    'agents.deleteTitle': 'Delete @{{handle}}?',
-    'agents.deleteDesc': 'Sessions keep their history, but nobody will answer in them until you pick another agent.',
     'agents.reports': 'reports to @{{handle}}',
     'agents.noReports': 'top level',
     'agents.chat': 'Chat',
+    'agents.readonly': 'Managed by @{{handle}}. To change this agent, tell @{{handle}} what is wrong.',
+    'agents.view': 'View',
+    'agents.allTools': 'all',
     'skills.title': 'Skills',
     'skills.desc': 'Reusable procedures in SKILL.md format. Agents load them on demand or when pinned.',
     'skills.import': 'Import SKILL.md',
@@ -305,7 +301,6 @@ const STRINGS = {
     'automations.desc': 'Scheduled prompts. Schedules run in UTC.',
     'automations.new': 'New automation',
     'automations.name': 'Name',
-    'automations.agent': 'Agent',
     'automations.schedule': 'Schedule',
     'automations.scheduleDesc': 'every:30 (minutes) or a 5-field cron expression, UTC.',
     'automations.prompt': 'Prompt',
@@ -343,6 +338,7 @@ const STRINGS = {
     'activity.kind.reflection': 'Reflection',
     'activity.kind.agent_created': 'Agent hired',
     'activity.kind.agent_updated': 'Agent updated',
+    'activity.kind.agent_retired': 'Agent retired',
     'toast.learned': 'Learned: {{note}}',
     'about.title': 'About',
     'about.desc': 'kongming is a small agentic daemon: a team of agents, skills that grow, and tools over MCP. It is named after 孔明 Kongming, the courtesy name of 诸葛亮 Zhuge Liang, the strategist of the Three Kingdoms who planned and directed rather than fought. His feather fan (羽扇) is the logo.',
@@ -576,7 +572,6 @@ const S = {
   current: null,            // { id, session, messages, agent, running, pendingUser }
   live: new Map(),          // sessionId -> { turnId, agent, text, reasoning, tools: [], status, error, stopReason }
   ws: 'offline',
-  pendingAgentId: null,     // agent chosen in the hero before the session exists
   sidebarCollapsed: false, sidebarOpen: false,
   info: null,
   greeting: ['workOn', 'start', 'build', 'tackle'][Math.floor(Math.random() * 4)],
@@ -584,9 +579,8 @@ const S = {
 try { S.sidebarCollapsed = localStorage.getItem('kongming.sidebar') === 'collapsed'; } catch (e) { /* ignore */ }
 
 const agentById = (id) => S.agents.find((a) => a.id === id);
-const agentByHandle = (hd) => S.agents.find((a) => a.handle === String(hd || '').toLowerCase());
 const defaultAgent = () => S.agents.find((a) => a.isDefault) || S.agents[0];
-function sessionAgent() { return (S.current && S.current.agent) || (S.pendingAgentId && agentById(S.pendingAgentId)) || defaultAgent(); }
+function sessionAgent() { return (S.current && S.current.agent) || defaultAgent(); }
 function liveFor(id, create) { let l = S.live.get(id); if (!l && create) { l = { turnId: null, agent: null, text: '', reasoning: '', tools: [], status: '', error: null, stopReason: null }; S.live.set(id, l); } return l; }
 
 async function loadAgents() { S.agents = await api.get('/api/agents'); }
@@ -761,10 +755,8 @@ async function openSession(id, opts) {
   }
 }
 
-async function newSession(agentId) {
-  const body = {}; const aid = agentId || S.pendingAgentId; if (aid) body.agentId = aid;
-  const sess = await api.post('/api/sessions', body);
-  S.pendingAgentId = null;
+async function newSession() {
+  const sess = await api.post('/api/sessions', {});
   S.current = { id: sess.id, session: sess, messages: [], agent: agentById(sess.agentId) || defaultAgent(), running: false };
   upsertSession(sess, { running: false });
   if (location.hash !== '#/s/' + sess.id) { location.hash = '#/s/' + sess.id; }
@@ -819,7 +811,7 @@ function sidebarView() {
       h('span', { class: 'grow' }),
       h('button', { class: 'icon-btn quiet', type: 'button', title: t('nav.closeSidebar'), 'aria-label': t('nav.closeSidebar'), onClick: toggleSidebar }, icon('panel'))),
     h('nav', { class: 'sidebar-nav' },
-      h('a', { class: 'nav-item newchat', href: '#/', onClick: (e) => { e.preventDefault(); S.pendingAgentId = null; S.current = null; navigate('#/'); setTimeout(() => composer.focus(), 0); } }, icon('compose'), h('span', {}, t('nav.newChat')), h('kbd', {}, '⌘⇧O')),
+      h('a', { class: 'nav-item newchat', href: '#/', onClick: (e) => { e.preventDefault(); S.current = null; navigate('#/'); setTimeout(() => composer.focus(), 0); } }, icon('compose'), h('span', {}, t('nav.newChat')), h('kbd', {}, '⌘⇧O')),
       h('a', { class: 'nav-item quiet', href: '#/settings/agents' }, icon('users'), h('span', {}, t('nav.agents'))),
       h('a', { class: 'nav-item quiet', href: '#/settings/skills' }, icon('skill'), h('span', {}, t('nav.skills'))),
       h('a', { class: 'nav-item quiet', href: '#/settings/automations' }, icon('clock'), h('span', {}, t('nav.automations')))),
@@ -902,29 +894,16 @@ function renderTopbar() {
   tt.firstChild.textContent = sess ? (sess.title || t('session.untitled')) : t('nav.newChat');
   tt.title = sess ? t('session.info', { channel: sess.channel, count: S.current.messages.length }) : '';
   if (sess && sess.channel === 'telegram') tt.appendChild(h('span', { class: 'tg-badge', title: t('session.telegramDesc') }, icon('channel'), t('session.telegramBadge')));
+  if (sess && sess.channel === 'delegation') tt.appendChild(h('span', { class: 'tg-badge delegated', title: t('session.delegatedBadge') }, icon('users'), t('session.delegatedBadge')));
   clear(ta); ta.appendChild(agentPill());
 }
+// Who answers here: Kongming in every chat the user starts; a report in a
+// delegated task. Links to the agent's page.
 function agentPill() {
   const a = sessionAgent();
-  const pill = h('button', { class: 'agent-pill quiet', type: 'button', title: t('composer.pickAgent'), 'aria-haspopup': 'listbox', 'aria-expanded': 'false' },
+  return h('a', { class: 'agent-pill quiet', href: a ? '#/settings/agents?edit=' + a.id : '#/settings/agents', title: a ? [a.name, a.role].filter(Boolean).join(' · ') : t('composer.agent') },
     a ? h('span', { class: 'avatar', style: `--h:${hue(a.handle)}`, 'aria-hidden': 'true' }, a.handle.slice(0, 2)) : icon('bot'),
-    h('span', {}, a ? '@' + a.handle : t('composer.agent')), icon('chev-down'));
-  pill.addEventListener('click', () => agentPicker(pill));
-  return pill;
-}
-function agentPicker(anchor) {
-  const cur = sessionAgent();
-  popover.open(anchor, {
-    items: S.agents.map((a) => ({ key: a.id, title: '@' + a.handle, sub: [a.name, a.role].filter(Boolean).join(' · '), avatar: a.handle, selected: cur && cur.id === a.id })),
-    label: t('composer.pickAgent'),
-    onSelect: async (key) => {
-      if (S.current) {
-        try { const sess = await api.patch('/api/sessions/' + S.current.id, { agentId: key }); S.current.agent = agentById(key); upsertSession(sess); }
-        catch (e) { toast(e.message, 'err'); return; }
-      } else S.pendingAgentId = key;
-      renderTopbar(); renderComposerAgent(); thread.renderHero();
-    },
-  });
+    h('span', {}, a ? '@' + a.handle : t('composer.agent')));
 }
 function renderComposerAgent() { const el = $('#composer-agent'); if (el) { clear(el); el.appendChild(agentPill()); } composer.updatePlaceholder(); }
 
@@ -1104,11 +1083,11 @@ const thread = (() => {
 /* ============================================================ views: composer + palettes */
 
 const SLASH_COMMANDS = [
-  { cmd: '/new', desc: 'cmd.new' }, { cmd: '/clear', desc: 'cmd.clear' }, { cmd: '/agent', desc: 'cmd.agent', arg: '<handle>' }, { cmd: '/stop', desc: 'cmd.stop' }, { cmd: '/help', desc: 'cmd.help' },
+  { cmd: '/new', desc: 'cmd.new' }, { cmd: '/clear', desc: 'cmd.clear' }, { cmd: '/stop', desc: 'cmd.stop' }, { cmd: '/help', desc: 'cmd.help' },
 ];
 
 const composer = (() => {
-  let root, ta, sendBtn, paletteEl, metaEl;
+  let root, ta, sendBtn, paletteEl, metaEl, readonlyEl;
   let pal = null; // { kind: 'mention' | 'slash', items, index, start, end }
   let lastSent = null;
 
@@ -1130,7 +1109,8 @@ const composer = (() => {
           h('span', { id: 'composer-agent' }, agentPill()),
           h('span', { class: 'grow' }), metaEl, sendBtn)),
       h('div', { class: 'composer-hint' }, t('composer.hint')));
-    return h('div', { class: 'composer-dock' }, root);
+    readonlyEl = h('div', { class: 'composer-readonly', hidden: true });
+    return h('div', { class: 'composer-dock' }, root, readonlyEl);
   }
   function autosize() { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, Math.floor(window.innerHeight * 0.4)) + 'px'; }
   function onInput() { autosize(); syncSendState(); detectPalette(); const n = ta.value.length; metaEl.textContent = n > 400 ? t('composer.chars', { count: n }) : ''; }
@@ -1146,7 +1126,18 @@ const composer = (() => {
   }
   function focus() { if (ta) ta.focus(); }
   function updatePlaceholder() { if (!ta) return; const a = sessionAgent(); ta.placeholder = a ? t('composer.placeholder', { agent: '@' + a.handle }) : t('composer.placeholderGeneric'); }
-  function reset() { if (!ta) return; closePalette(); updatePlaceholder(); syncSendState(); renderComposerAgent(); }
+  function reset() { if (!ta) return; closePalette(); updatePlaceholder(); syncSendState(); renderComposerAgent(); syncReadonly(); }
+  // A task Kongming handed to a report is read-only: the user corrects it
+  // through Kongming, so the composer gives way to a pointer back to it.
+  function syncReadonly() {
+    const sess = S.current && S.current.session;
+    const ro = !!(sess && sess.channel === 'delegation');
+    root.hidden = ro; readonlyEl.hidden = !ro; clear(readonlyEl);
+    if (!ro) return;
+    const lead = (defaultAgent() || {}).handle || 'kongming'; const a = sessionAgent();
+    readonlyEl.appendChild(h('p', {}, icon('lock'), t('session.readonly', { lead, agent: a ? a.handle : '?' })));
+    if (sess.parentSessionId) readonlyEl.appendChild(h('a', { class: 'btn ghost sm', href: '#/s/' + sess.parentSessionId }, t('session.backToLead', { lead })));
+  }
   function syncSendState() {
     if (!sendBtn) return;
     const running = !!(S.current && S.current.running);
@@ -1195,21 +1186,12 @@ const composer = (() => {
 
   async function runSlash(cmd, arg) {
     switch (cmd) {
-      case 'new': S.pendingAgentId = null; S.current = null; navigate('#/'); focus(); return;
+      case 'new': S.current = null; navigate('#/'); focus(); return;
       case 'clear': {
         if (!S.current) { toast(t('cmd.needSession'), 'err'); return; }
         modal.confirm({ title: t('session.clearTitle'), desc: t('session.clearDesc'), confirm: t('common.confirm'), danger: true, onConfirm: async () => {
           await api.post('/api/sessions/' + S.current.id + '/clear'); S.current.messages = []; S.current.lastError = null; thread.rebuild(); toast(t('thread.cleared'));
         } });
-        return;
-      }
-      case 'agent': {
-        const handle = arg.replace(/^@/, '').toLowerCase();
-        if (!handle) { toast(t('cmd.agentUsage'), 'err'); return; }
-        const a = agentByHandle(handle); if (!a) { toast(t('cmd.noAgent', { handle }), 'err'); return; }
-        if (S.current) { try { const sess = await api.patch('/api/sessions/' + S.current.id, { agentId: a.id }); S.current.agent = a; upsertSession(sess); } catch (e) { toast(e.message, 'err'); return; } }
-        else S.pendingAgentId = a.id;
-        renderTopbar(); renderComposerAgent(); thread.renderHero(); toast(t('cmd.switched', { handle }));
         return;
       }
       case 'stop': if (S.current && S.current.running) stop(); else toast(t('cmd.nothingToStop')); return;
@@ -1510,12 +1492,14 @@ const settings = (() => {
   };
 
   /* ---- agents ---- */
+  // The team is Kongming's to run (it hires, adjusts and retires its reports);
+  // the user edits Kongming only and sees the others read-only.
   pages.agents = async (query) => {
     await Promise.all([loadAgents(), S.mcp.length ? null : loadMcp().catch(() => {}), loadSkills().catch(() => {})]);
     const wrap = h('div', { class: 'settings-stack' });
-    const editing = query.edit === 'new' ? {} : query.edit ? agentById(query.edit) : null;
-    wrap.appendChild(header(t('agents.title'), t('agents.desc'), h('button', { class: 'btn primary', type: 'button', onClick: () => navigate('#/settings/agents?edit=new') }, icon('plus'), t('agents.new'))));
-    if (editing) { wrap.appendChild(agentEditor(editing)); return wrap; }
+    const viewing = query.edit ? agentById(query.edit) : null;
+    wrap.appendChild(header(t('agents.title'), t('agents.desc')));
+    if (viewing) { wrap.appendChild(viewing.isDefault ? agentEditor(viewing) : agentDetail(viewing)); return wrap; }
     // Org chart: managers → reports.
     const byMgr = new Map();
     for (const a of S.agents) { const k = a.managerId && agentById(a.managerId) ? a.managerId : null; if (!byMgr.has(k)) byMgr.set(k, []); byMgr.get(k).push(a); }
@@ -1528,45 +1512,56 @@ const settings = (() => {
         h('span', { class: 'avatar', style: `--h:${hue(a.handle)};width:2rem;height:2rem;font-size:12px`, 'aria-hidden': 'true' }, a.handle.slice(0, 2)),
         h('div', { class: 'lr-main' }, h('div', { class: 'lr-title' }, a.name, h('span', { class: 'pill mono' }, '@' + a.handle), a.role ? h('span', { class: 'muted small' }, a.role) : null, a.isDefault ? h('span', { class: 'pill ok' }, t('common.default')) : null),
           h('div', { class: 'lr-sub' }, [a.description, mgr ? t('agents.reports', { handle: mgr.handle }) : t('agents.noReports'), a.model ? a.model : null].filter(Boolean).join(' · '))),
-        h('div', { class: 'lr-acts' },
-          h('button', { class: 'btn ghost sm', type: 'button', onClick: async () => { await newSession(a.id); } }, t('agents.chat')),
-          h('button', { class: 'icon-btn quiet', type: 'button', title: t('common.edit'), 'aria-label': t('common.edit'), onClick: () => navigate('#/settings/agents?edit=' + a.id) }, icon('pencil')),
-          h('button', { class: 'icon-btn quiet', type: 'button', title: t('common.delete'), 'aria-label': t('common.delete'), disabled: S.agents.length <= 1, onClick: () => deleteAgent(a) }, icon('trash')))));
+        h('div', { class: 'lr-acts' }, a.isDefault
+          ? [h('button', { class: 'btn ghost sm', type: 'button', onClick: async () => { await newSession(); } }, t('agents.chat')),
+            h('button', { class: 'icon-btn quiet', type: 'button', title: t('common.edit'), 'aria-label': t('common.edit'), onClick: () => navigate('#/settings/agents?edit=' + a.id) }, icon('pencil'))]
+          : h('button', { class: 'icon-btn quiet', type: 'button', title: t('agents.view'), 'aria-label': t('agents.view'), onClick: () => navigate('#/settings/agents?edit=' + a.id) }, icon('eye')))));
     }
     wrap.appendChild(section(t('agents.title'), list));
     return wrap;
   };
-  function deleteAgent(a) { modal.confirm({ title: t('agents.deleteTitle', { handle: a.handle }), desc: t('agents.deleteDesc'), confirm: t('common.delete'), danger: true, onConfirm: async () => { await api.del('/api/agents/' + a.id); await loadAgents(); navigate('#/settings/agents'); reload(); } }); }
+  function agentDetail(a) {
+    const mgr = (a.managerId && agentById(a.managerId)) || defaultAgent() || {};
+    const ro = (v, code) => h('div', { class: 'ro-value' + (code ? ' code' : '') }, v || '—');
+    const names = (xs, all) => (xs && xs.length ? xs.map((x) => (S.mcp.find((m) => m.id === x) || {}).name || x).join(', ') : all);
+    return section('@' + a.handle,
+      h('div', { class: 'settings-editor' },
+        h('p', { class: 'hint' }, icon('lock'), ' ', t('agents.readonly', { handle: mgr.handle || 'kongming' })),
+        h('div', { class: 'form-grid two' },
+          field(t('agents.name'), ro(a.name)), field(t('agents.role'), ro(a.role)),
+          field(t('agents.manager'), ro(a.managerId && agentById(a.managerId) ? '@' + mgr.handle : t('common.none'))), field(t('agents.model'), ro(a.model)),
+          field(t('agents.description'), ro(a.description), null, true),
+          field(t('agents.systemPrompt'), ro(a.systemPrompt, true), null, true),
+          field(t('agents.tools'), ro(names(a.tools, t('agents.allTools'))), null, true),
+          field(t('agents.mcp'), ro(names(a.mcpServers, t('agents.allTools'))), null, true),
+          field(t('agents.pinned'), ro(names(a.pinnedSkills, t('common.none'))), null, true))),
+      h('div', { class: 'settings-footer' }, h('span'), h('div', { class: 'acts' }, h('button', { class: 'btn secondary', type: 'button', onClick: () => navigate('#/settings/agents') }, t('common.back')))));
+  }
   function agentEditor(a) {
-    const isNew = !a.id;
-    const handle = input({ value: a.handle || '', placeholder: 'researcher', maxlength: 32 });
-    const name = input({ value: a.name || '', placeholder: 'Researcher' });
-    const role = input({ value: a.role || '', placeholder: 'Research analyst' });
-    const description = textarea({ value: a.description || '', rows: 2, placeholder: 'Finds and summarises sources, checks facts.' });
+    const handle = input({ value: a.handle || '', placeholder: 'kongming', maxlength: 32 });
+    const name = input({ value: a.name || '', placeholder: 'Kongming' });
+    const role = input({ value: a.role || '', placeholder: 'Chief of staff' });
+    const description = textarea({ value: a.description || '', rows: 2 });
     const systemPrompt = textarea({ value: a.systemPrompt || '', rows: 8, class: 'field code' });
     const model = input({ value: a.model || '', placeholder: t('common.optional') });
-    const manager = select([['', t('common.none')]].concat(S.agents.filter((x) => x.id !== a.id).map((x) => [x.id, `@${x.handle} — ${x.name}`])), a.managerId || (isNew ? (S.agents.find((x) => x.isDefault) || {}).id || '' : ''));
     const tools = multi(BUILTIN_TOOLS, a.tools || [], t('agents.tools'));
     const mcpSel = multi(S.mcp.map((m) => [m.id, m.name]), a.mcpServers || [], t('agents.mcp'));
     const pinned = multi(S.skills.map((k) => k.name), a.pinnedSkills || [], t('agents.pinned'));
     const selfImprove = switchEl(a.selfImprove !== false, null, t('agents.selfImprove'));
-    const isDefault = switchEl(!!a.isDefault, null, t('agents.isDefault'));
-    const body = () => ({ handle: handle.value.trim(), name: name.value.trim(), role: role.value.trim(), description: description.value.trim(), systemPrompt: systemPrompt.value, model: model.value.trim(), managerId: manager.value || null, tools: tools.values(), mcpServers: mcpSel.values(), pinnedSkills: pinned.values(), selfImprove: selfImprove.checked(), isDefault: isDefault.checked() });
-    const save = saveBtn(isNew ? t('common.create') : t('common.save'), async () => { if (isNew) await api.post('/api/agents', body()); else await api.put('/api/agents/' + a.id, body()); await loadAgents(); navigate('#/settings/agents'); renderTopbar(); });
-    return section(isNew ? t('agents.new') : '@' + a.handle,
+    const body = () => ({ handle: handle.value.trim(), name: name.value.trim(), role: role.value.trim(), description: description.value.trim(), systemPrompt: systemPrompt.value, model: model.value.trim(), tools: tools.values(), mcpServers: mcpSel.values(), pinnedSkills: pinned.values(), selfImprove: selfImprove.checked() });
+    const save = saveBtn(t('common.save'), async () => { await api.put('/api/agents/' + a.id, body()); await loadAgents(); navigate('#/settings/agents'); renderTopbar(); });
+    return section('@' + a.handle,
       h('div', { class: 'settings-editor' },
         h('div', { class: 'form-grid two' },
           field(t('agents.handle'), handle, t('agents.handleDesc')), field(t('agents.name'), name),
-          field(t('agents.role'), role, t('agents.roleDesc')), field(t('agents.manager'), manager),
+          field(t('agents.role'), role, t('agents.roleDesc')), field(t('agents.model'), model, t('agents.modelDesc')),
           field(t('agents.description'), description, t('agents.descriptionDesc'), true),
           field(t('agents.systemPrompt'), systemPrompt, null, true),
-          field(t('agents.model'), model, t('agents.modelDesc')), h('div'),
           field(t('agents.tools'), tools, t('agents.toolsDesc'), true),
           field(t('agents.mcp'), S.mcp.length ? mcpSel : h('div', { class: 'hint' }, t('mcp.empty')), t('agents.mcpDesc'), true),
           field(t('agents.pinned'), S.skills.length ? pinned : h('div', { class: 'hint' }, t('skills.empty')), t('agents.pinnedDesc'), true))),
       row(t('agents.selfImprove'), t('agents.selfImproveDesc'), selfImprove, { switch: true }),
-      row(t('agents.isDefault'), t('agents.isDefaultDesc'), isDefault, { switch: true }),
-      h('div', { class: 'settings-footer' }, isNew ? h('span') : h('button', { class: 'btn danger-ghost sm', type: 'button', disabled: S.agents.length <= 1, onClick: () => deleteAgent(a) }, icon('trash'), t('common.delete')),
+      h('div', { class: 'settings-footer' }, h('span'),
         h('div', { class: 'acts' }, h('button', { class: 'btn secondary', type: 'button', onClick: () => navigate('#/settings/agents') }, t('common.cancel')), save)));
   }
 
@@ -1741,7 +1736,7 @@ const settings = (() => {
     for (const j of jobs) {
       const runBtn = h('button', { class: 'btn outline sm', type: 'button', onClick: async () => { runBtn.disabled = true; try { await api.post('/api/cron/' + j.id + '/run'); toast(t('automations.started')); } catch (e) { toast(e.message, 'err'); } runBtn.disabled = false; } }, icon('play'), t('automations.runNow'));
       list.appendChild(h('div', { class: 'list-row' },
-        h('div', { class: 'lr-main' }, h('div', { class: 'lr-title' }, j.name, h('span', { class: 'pill mono' }, j.schedule), h('span', { class: 'pill' }, agentName(j.agentId)), !j.enabled ? h('span', { class: 'pill' }, t('common.disabled')) : null, j.lastStatus ? h('span', { class: 'pill ' + (j.lastStatus === 'ok' || j.lastStatus === 'done' ? 'ok' : 'err') }, j.lastStatus) : null),
+        h('div', { class: 'lr-main' }, h('div', { class: 'lr-title' }, j.name, h('span', { class: 'pill mono' }, j.schedule), !j.enabled ? h('span', { class: 'pill' }, t('common.disabled')) : null, j.lastStatus ? h('span', { class: 'pill ' + (j.lastStatus === 'ok' || j.lastStatus === 'done' ? 'ok' : 'err') }, j.lastStatus) : null),
           h('div', { class: 'lr-sub' }, j.prompt), h('div', { class: 'lr-sub' }, [j.lastRunAt ? t('automations.last', { when: relTime(j.lastRunAt), status: j.lastStatus || '—' }) : null, j.nextRunAt ? t('automations.next', { when: fmtDate(j.nextRunAt) }) : null, j.deliverTo ? 'Telegram ' + j.deliverTo : null].filter(Boolean).join(' · '))),
         h('div', { class: 'lr-acts' }, runBtn,
           switchEl(j.enabled, (v) => api.put('/api/cron/' + j.id, { enabled: v }), t('common.enabled')),
@@ -1754,14 +1749,13 @@ const settings = (() => {
   function cronEditor(j) {
     const isNew = !j.id;
     const name = input({ value: j.name || '', placeholder: 'Morning briefing' });
-    const agent = select(S.agents.map((a) => [a.id, `@${a.handle} — ${a.name}`]), j.agentId || (defaultAgent() || {}).id);
     const schedule = input({ value: j.schedule || '', placeholder: 'every:30  or  0 8 * * 1-5' });
     const prompt = textarea({ value: j.prompt || '', rows: 5 });
     const deliverTo = input({ value: j.deliverTo || '', placeholder: '123456789' });
     const enabled = switchEl(j.enabled !== false, null, t('common.enabled'));
-    const body = () => ({ name: name.value.trim(), agentId: agent.value, schedule: schedule.value.trim(), prompt: prompt.value.trim(), deliverTo: deliverTo.value.trim() || null, enabled: enabled.checked() });
+    const body = () => ({ name: name.value.trim(), schedule: schedule.value.trim(), prompt: prompt.value.trim(), deliverTo: deliverTo.value.trim() || null, enabled: enabled.checked() });
     return section(isNew ? t('automations.new') : j.name,
-      h('div', { class: 'settings-editor' }, h('div', { class: 'form-grid two' }, field(t('automations.name'), name), field(t('automations.agent'), agent), field(t('automations.schedule'), schedule, t('automations.scheduleDesc')), field(t('automations.deliverTo'), deliverTo, t('automations.deliverToDesc')), field(t('automations.prompt'), prompt, null, true))),
+      h('div', { class: 'settings-editor' }, h('div', { class: 'form-grid two' }, field(t('automations.name'), name), field(t('automations.schedule'), schedule, t('automations.scheduleDesc')), field(t('automations.deliverTo'), deliverTo, t('automations.deliverToDesc')), h('div'), field(t('automations.prompt'), prompt, null, true))),
       row(t('common.enabled'), null, enabled, { switch: true }),
       h('div', { class: 'settings-footer' }, h('span'), h('div', { class: 'acts' }, h('button', { class: 'btn secondary', type: 'button', onClick: () => navigate('#/settings/automations') }, t('common.cancel')),
         saveBtn(isNew ? t('common.create') : t('common.save'), async () => { if (isNew) await api.post('/api/cron', body()); else await api.put('/api/cron/' + j.id, body()); navigate('#/settings/automations'); }))));
@@ -1835,7 +1829,7 @@ async function boot(afterLogin) {
 
 document.addEventListener('keydown', (e) => {
   const mod = e.metaKey || e.ctrlKey;
-  if (mod && e.shiftKey && (e.key === 'o' || e.key === 'O')) { e.preventDefault(); S.pendingAgentId = null; S.current = null; navigate('#/'); setTimeout(() => composer.focus(), 0); }
+  if (mod && e.shiftKey && (e.key === 'o' || e.key === 'O')) { e.preventDefault(); S.current = null; navigate('#/'); setTimeout(() => composer.focus(), 0); }
   else if (mod && e.key === ',') { e.preventDefault(); navigate('#/settings/overview'); }
   else if (mod && (e.key === 'b' || e.key === 'B')) { e.preventDefault(); toggleSidebar(); }
 });

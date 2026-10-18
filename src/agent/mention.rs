@@ -1,12 +1,12 @@
 //! `@` mentions in user text, nanobot-style:
 //!
-//! * `@handle`          — talk to that agent (the first agent mention wins)
+//! * `@handle`          — names a teammate; the lead agent still answers
 //! * `@skill:name`      — attach a skill's full body to this turn
 //! * `@session:<id>`    — include another session's recent transcript as context
 //! * `@mcp:<server>`    — make sure that MCP server's tools are offered this turn
 //!
 //! Structured mentions are removed from the text; plain `@handle` stays so the
-//! agent can see it was addressed.
+//! lead agent sees who the user meant.
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Mentions {

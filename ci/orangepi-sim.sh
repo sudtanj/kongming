@@ -110,10 +110,13 @@ run_smoke() {
     curl -fsS http://127.0.0.1:18800/ | grep -qi '<html'
     api GET /api/skills > /dev/null
     api GET /api/settings > /dev/null
-    api POST /api/agents '{"handle":"scout","name":"Scout","role":"researcher"}' | grep -q '"handle":"scout"'
-    api POST /api/agents '{"handle":"lead","name":"Lead","role":"manager"}' > /dev/null
+    api GET /api/agents > /dev/null
+    api PUT /api/agents/kongming '{"role":"Strategist"}' | grep -q '"role":"Strategist"'
+    # The team is Kongming's to run: the user cannot add agents.
+    [ "$(curl -sS -o /dev/null -w '%{http_code}' -b /tmp/jar -H 'content-type: application/json' \
+        -d '{"handle":"scout"}' http://127.0.0.1:18800/api/agents)" = "403" ]
     api POST /api/memories '{"content":"the board is an Orange Pi Zero 3"}' > /dev/null
-    sid=$(api POST /api/sessions '{"agentId":"scout","title":"sim"}' | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+    sid=$(api POST /api/sessions '{"title":"sim"}' | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
     [ -n "$sid" ] || { echo "no session id"; return 1; }
 
     # A burst: 400 requests, 8 at a time, mixed reads and writes.
@@ -135,7 +138,7 @@ run_smoke() {
     wait_healthy
     curl -fsS -c /tmp/jar -H 'content-type: application/json' -d '{"password":"orangepi"}' \
         http://127.0.0.1:18800/api/auth/login > /dev/null
-    api GET /api/agents | grep -q '"handle":"lead"'
+    api GET /api/agents | grep -q '"role":"Strategist"'
     api GET "/api/sessions/$sid" | grep -q '"title":"sim '
 
     [ "$(docker inspect -f '{{.State.OOMKilled}}' kongming)" = "false" ]

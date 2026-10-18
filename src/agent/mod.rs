@@ -51,19 +51,14 @@ pub struct TurnOptions {
     pub agent_override: Option<Agent>,
 }
 
-/// Resolve which agent answers: an `@handle` mention switches the session's
-/// agent (sticky, nanobot-style), otherwise the session's current agent.
-pub async fn resolve_agent(state: &Shared, session: &Session, handles: &[String]) -> Result<(Agent, bool)> {
-    for h in handles {
-        if let Some(a) = state.db.agent_by_handle(h).await? {
-            let switched = a.id != session.agent_id;
-            return Ok((a, switched));
-        }
+/// The user talks only to the lead agent; the rest of the team takes work from
+/// it. A person's message goes to Kongming whatever `@handle` it names, and the
+/// conversations Kongming hands to its reports are read-only.
+pub async fn user_agent(state: &Shared, session: &Session) -> Result<Agent> {
+    if session.channel == "delegation" {
+        return Err(anyhow!("this conversation is a task handed to a team member and is read-only; talk to the lead agent instead"));
     }
-    match state.db.agent(&session.agent_id).await? {
-        Some(a) => Ok((a, false)),
-        None => Ok((state.db.default_agent().await?, true)),
-    }
+    ensure_default_agent(state).await
 }
 
 fn now_utc_string() -> String {
@@ -504,11 +499,11 @@ async fn run_turn_inner(
 ) -> Result<TurnResult> {
     let turn_id = new_id();
     let mentions = mention::parse(&user_text);
-    let (agent, switched) = match &opts.agent_override {
-        Some(a) => (a.clone(), a.id != session.agent_id),
-        None => resolve_agent(state, session, &mentions.handles).await?,
+    let agent = match &opts.agent_override {
+        Some(a) => a.clone(),
+        None => user_agent(state, session).await?,
     };
-    if switched {
+    if agent.id != session.agent_id {
         state.db.set_session_agent(&session.id, &agent.id).await?;
         session.agent_id = agent.id.clone();
     }

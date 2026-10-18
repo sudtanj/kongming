@@ -79,15 +79,13 @@ pub fn next_run(schedule: &str, after_ms: i64) -> Option<i64> {
 
 pub async fn run_job(state: Shared, job: CronJob) {
     tracing::info!(job = %job.name, "cron job start");
-    let agent = match state.db.agent(&job.agent_id).await {
-        Ok(Some(a)) => a,
-        _ => match agent::ensure_default_agent(&state).await {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::warn!("cron: no agent: {e:#}");
-                return;
-            }
-        },
+    // Scheduled prompts come from the user, so they go to the lead agent.
+    let agent = match agent::ensure_default_agent(&state).await {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!("cron: no agent: {e:#}");
+            return;
+        }
     };
     let title = format!("⏰ {}", job.name);
     let session = match state.db.create_session(&agent.id, "cron", Some(&job.id), None, &title).await {

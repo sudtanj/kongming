@@ -568,6 +568,32 @@ impl TestApp {
     pub async fn default_agent(&self) -> kongming::db::Agent {
         self.state.db.default_agent().await.expect("default agent")
     }
+
+    /// Put an agent on the team the way Kongming's `agent_manage` would (the
+    /// API leaves the team read-only).
+    pub async fn hire(&self, handle: &str, role: &str, manager_id: Option<&str>) -> kongming::db::Agent {
+        let now = kongming::db::now_ms();
+        let a = kongming::db::Agent {
+            id: kongming::db::new_id(),
+            handle: handle.into(),
+            name: handle[..1].to_uppercase() + &handle[1..],
+            role: role.into(),
+            description: format!("{role} work."),
+            system_prompt: String::new(),
+            model: None,
+            provider: None,
+            manager_id: manager_id.map(str::to_string),
+            tools: None,
+            mcp_servers: None,
+            pinned_skills: vec![],
+            self_improve: true,
+            is_default: false,
+            created_at: now,
+            updated_at: now,
+        };
+        self.state.db.upsert_agent(&a).await.expect("hire");
+        a
+    }
 }
 
 /// Poll `check` every 50 ms until it returns `Some`, or panic after `timeout()`.

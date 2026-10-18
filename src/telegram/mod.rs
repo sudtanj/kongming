@@ -1,8 +1,9 @@
 //! Telegram bot, over long polling or, when kongming has a public HTTPS URL, a
-//! webhook. Each chat maps to a session; `@handle` switches agents; `/agent`,
-//! `/new`, `/agents`, `/skills`, `/status` are the commands. Replies stream by
-//! editing one message at a throttled rate, below a message that shows the
-//! model's reasoning and tool calls (unless `showThinking` is off).
+//! webhook. Each chat maps to a session with the lead agent (the rest of the
+//! team takes work only from it); `/new`, `/agents`, `/skills`, `/status` are
+//! the commands. Replies stream by editing one message at a throttled rate,
+//! below a message that shows the model's reasoning and tool calls (unless
+//! `showThinking` is off).
 
 use std::time::Duration;
 
@@ -271,8 +272,7 @@ pub const WEBHOOK_PATH: &str = "/api/telegram/webhook";
 fn commands() -> Value {
     json!({"commands": [
         {"command": "new", "description": "Start a new conversation"},
-        {"command": "agents", "description": "List agents"},
-        {"command": "agent", "description": "Switch agent: /agent <handle>"},
+        {"command": "agents", "description": "Show the team"},
         {"command": "skills", "description": "List skills"},
         {"command": "status", "description": "Show status"},
         {"command": "stop", "description": "Stop the current reply"},
@@ -461,10 +461,7 @@ async fn session_for_chat(state: &Shared, chat_id: i64, fresh: bool) -> Result<c
             }
         }
     }
-    let agent = match state.db.telegram_chat(chat_id).await? {
-        Some((_, aid)) => state.db.agent(&aid).await?.unwrap_or(agent::ensure_default_agent(state).await?),
-        None => agent::ensure_default_agent(state).await?,
-    };
+    let agent = agent::ensure_default_agent(state).await?;
     let s = state.db.create_session(&agent.id, "telegram", Some(&chat_id.to_string()), None, "").await?;
     state.db.set_telegram_chat(chat_id, &s.id, &agent.id).await?;
     Ok(s)
@@ -585,7 +582,7 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
         let name = name.split('@').next().unwrap_or(name);
         match name {
             "start" | "help" => {
-                tg.send_message(chat_id, "Hi! Just type to talk to the current agent.\nMention <b>@handle</b> to talk to another agent.\n/new – new conversation\n/agents – list agents\n/agent &lt;handle&gt; – switch agent\n/skills – list skills\n/status – status\n/stop – stop the current reply").await?;
+                tg.send_message(chat_id, "Hi! Just type to talk to the lead agent; it runs the team and hands work to the others.\n/new – new conversation\n/agents – show the team\n/skills – list skills\n/status – status\n/stop – stop the current reply").await?;
             }
             "new" => {
                 let s = session_for_chat(&state, chat_id, true).await?;
@@ -616,16 +613,6 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
                     })
                     .collect();
                 tg.send_message(chat_id, &lines.join("\n")).await?;
-            }
-            "agent" => {
-                let Some(a) = state.db.agent_by_handle(arg).await? else {
-                    tg.send_message(chat_id, &format!("No agent @{}", esc(arg))).await?;
-                    return Ok(());
-                };
-                let s = session_for_chat(&state, chat_id, false).await?;
-                state.db.set_session_agent(&s.id, &a.id).await?;
-                state.db.set_telegram_chat(chat_id, &s.id, &a.id).await?;
-                tg.send_message(chat_id, &format!("Now talking to <b>@{}</b> ({}).", a.handle, esc(&a.role))).await?;
             }
             "skills" => {
                 let skills = state.db.skills().await?;
@@ -676,14 +663,6 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
         tg.send_message(chat_id, "Still working on the previous message. /stop to cancel it.").await?;
         return Ok(());
     }
-    // Remember a sticky agent switch for this chat.
-    let mentions = agent::mention::parse(&text);
-    if let Some(h) = mentions.handles.first() {
-        if let Some(a) = state.db.agent_by_handle(h).await? {
-            state.db.set_telegram_chat(chat_id, &session.id, &a.id).await?;
-        }
-    }
-
     tg.typing(chat_id).await;
     let session_id = session.id.clone();
     let mut events = state.subscribe();

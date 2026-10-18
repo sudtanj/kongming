@@ -58,7 +58,17 @@ pub fn build(p: &PromptInput<'_>) -> String {
     let manager = a.manager_id.as_ref().and_then(|m| p.team.iter().find(|t| &t.id == m));
     if p.team.len() > 1 {
         s.push_str("# Team\n");
-        s.push_str("You are part of a team of agents. Users can address any agent with `@handle`.\n");
+        if a.is_default {
+            s.push_str(
+                "You lead a team of agents and are the only one the user talks to. The others take work only from their \
+manager; the user can watch their conversations but not message them, so everything goes through you and you answer for \
+the team's work. When the user names an agent with `@handle`, they mean that agent's work: hand it on, follow up or fix it \
+yourself. When something went wrong, own it: correct the result, adjust the report with `agent_manage` so it does not \
+happen again, or retire it.\n",
+            );
+        } else {
+            s.push_str("You are part of a team of agents and take work only from your manager; the user does not talk to you directly.\n");
+        }
         if let Some(m) = manager {
             s.push_str(&format!("Your manager is **{}** (@{}) — {}.\n", m.name, m.handle, short(&m.role, 60)));
         }
@@ -81,7 +91,7 @@ and sanity-check them before presenting them as fact. Do simple things yourself.
             })
             .collect();
         if !others.is_empty() {
-            s.push_str("Other agents (for the user's reference; you cannot delegate to them):\n");
+            s.push_str("Other agents (you cannot delegate to them):\n");
             for o in others {
                 s.push_str(&format!("- @{} — {}\n", o.handle, short(&o.role, 60)));
             }
@@ -237,7 +247,7 @@ mod tests {
 
     #[test]
     fn manager_sees_reports_and_delegation_rules() {
-        let boss = agent("1", "boss", None);
+        let boss = Agent { is_default: true, ..agent("1", "boss", None) };
         let dev = agent("2", "dev", Some("1"));
         let team = vec![boss.clone(), dev.clone()];
         let p = PromptInput {
@@ -256,10 +266,12 @@ mod tests {
         assert!(s.contains("@dev"));
         assert!(s.contains("delegate_task"));
         assert!(s.contains(DEFAULT_PERSONA));
+        assert!(s.contains("the only one the user talks to"), "the lead answers to the user: {s}");
         let p2 = PromptInput { agent: &dev, can_delegate: false, ..p };
         let s2 = build(&p2);
         assert!(s2.contains("Your manager is **BOSS**"));
         assert!(!s2.contains("delegate_task"));
+        assert!(s2.contains("the user does not talk to you directly"), "{s2}");
     }
 
     #[test]

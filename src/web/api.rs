@@ -29,6 +29,8 @@ impl From<anyhow::Error> for ApiError {
             StatusCode::NOT_FOUND
         } else if msg.contains("already in progress") {
             StatusCode::CONFLICT
+        } else if msg.contains("read-only") {
+            StatusCode::FORBIDDEN
         } else if msg.contains("required") || msg.contains("invalid") || msg.contains("must") {
             StatusCode::BAD_REQUEST
         } else {
@@ -43,6 +45,22 @@ fn bad(msg: impl Into<String>) -> ApiError {
 }
 fn not_found(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::NOT_FOUND, msg.into())
+}
+fn forbidden(msg: impl Into<String>) -> ApiError {
+    ApiError(StatusCode::FORBIDDEN, msg.into())
+}
+
+/// The user talks only to the lead agent: an `agentId` in a request must name
+/// it (or be left out).
+async fn lead_agent(state: &Shared, body: &Value) -> Result<Agent, ApiError> {
+    let lead = agent::ensure_default_agent(state).await?;
+    if let Some(id) = s(body, "agentId") {
+        let a = state.db.agent(id).await?.or(state.db.agent_by_handle(id).await?).ok_or_else(|| bad("agent not found"))?;
+        if a.id != lead.id {
+            return Err(forbidden(format!("you talk to @{} only; it hands work to @{} itself", lead.handle, a.handle)));
+        }
+    }
+    Ok(lead)
 }
 
 type R = Result<Json<Value>, ApiError>;
@@ -139,15 +157,7 @@ pub async fn list_sessions(State(state): State<Shared>, Query(q): Query<Limit>) 
 
 pub async fn create_session(State(state): State<Shared>, body: Option<Json<Value>>) -> R {
     let body = body.map(|b| b.0).unwrap_or(json!({}));
-    let agent = match s(&body, "agentId") {
-        Some(id) => state
-            .db
-            .agent(id)
-            .await?
-            .or(state.db.agent_by_handle(id).await?)
-            .ok_or_else(|| not_found("no such agent"))?,
-        None => agent::ensure_default_agent(&state).await?,
-    };
+    let agent = lead_agent(&state, &body).await?;
     let sess = state.db.create_session(&agent.id, "web", None, None, s(&body, "title").unwrap_or("")).await?;
     Ok(Json(serde_json::to_value(sess).unwrap()))
 }
@@ -165,13 +175,11 @@ pub async fn patch_session(State(state): State<Shared>, Path(id): Path<String>, 
         state.db.update_session_title(&id, t).await?;
         sess.title = t.to_string();
     }
-    if let Some(a) = s(&body, "agentId") {
-        let agent = state
-            .db
-            .agent(a)
-            .await?
-            .or(state.db.agent_by_handle(a).await?)
-            .ok_or_else(|| not_found("no such agent"))?;
+    if body.get("agentId").is_some() {
+        if sess.channel == "delegation" {
+            return Err(forbidden("a delegated task is read-only"));
+        }
+        let agent = lead_agent(&state, &body).await?;
         state.db.set_session_agent(&id, &agent.id).await?;
         sess.agent_id = agent.id;
     }
@@ -186,6 +194,8 @@ pub async fn delete_session(State(state): State<Shared>, Path(id): Path<String>)
 }
 
 pub async fn clear_session(State(state): State<Shared>, Path(id): Path<String>) -> R {
+    let sess = state.db.session(&id).await?.ok_or_else(|| not_found("session not found"))?;
+    agent::user_agent(&state, &sess).await?;
     state.db.clear_session(&id).await?;
     Ok(Json(json!({"ok": true})))
 }
@@ -209,6 +219,7 @@ pub async fn send_message(
 ) -> R {
     let text = s(&body, "text").ok_or_else(|| bad("text is required"))?.to_string();
     let sess = state.db.session(&id).await?.ok_or_else(|| not_found("session not found"))?;
+    agent::user_agent(&state, &sess).await?;
     if state.is_running(&id) {
         return Err(ApiError(StatusCode::CONFLICT, "a reply is already in progress".into()));
     }
@@ -236,31 +247,14 @@ fn normalize_handle(h: &str) -> Result<String, ApiError> {
     crate::db::normalize_handle(h).map_err(|e| bad(e.to_string()))
 }
 
-async fn agent_from_body(state: &Shared, existing: Option<Agent>, body: &Value) -> Result<Agent, ApiError> {
-    let now = now_ms();
-    let mut a = existing.unwrap_or(Agent {
-        id: new_id(),
-        handle: String::new(),
-        name: String::new(),
-        role: String::new(),
-        description: String::new(),
-        system_prompt: String::new(),
-        model: None,
-        provider: None,
-        manager_id: None,
-        tools: None,
-        mcp_servers: None,
-        pinned_skills: vec![],
-        self_improve: true,
-        is_default: false,
-        created_at: now,
-        updated_at: now,
-    });
+/// The team is Kongming's to run: it hires, adjusts and retires its reports
+/// with `agent_manage`. The user can look at every agent but edit only the
+/// lead agent.
+const TEAM_IS_READ_ONLY: &str = "the team is read-only: ask the lead agent to hire, change or retire its reports";
+
+fn apply_agent_body(mut a: Agent, body: &Value) -> Result<Agent, ApiError> {
     if let Some(h) = s(body, "handle") {
         a.handle = normalize_handle(h)?;
-    }
-    if a.handle.is_empty() {
-        return Err(bad("handle is required"));
     }
     if let Some(n) = s(body, "name") {
         a.name = n.to_string();
@@ -280,36 +274,11 @@ async fn agent_from_body(state: &Shared, existing: Option<Agent>, body: &Value) 
     if body.get("model").is_some() {
         a.model = s(body, "model").map(str::to_string);
     }
-    if body.get("managerId").is_some() {
-        a.manager_id = match s(body, "managerId") {
-            Some(m) => {
-                let mgr = state
-                    .db
-                    .agent(m)
-                    .await?
-                    .or(state.db.agent_by_handle(m).await?)
-                    .ok_or_else(|| bad("manager not found"))?;
-                if mgr.id == a.id {
-                    return Err(bad("an agent cannot manage itself"));
-                }
-                // No cycles: walk up from the manager.
-                let team = state.db.agents().await?;
-                let mut cur = mgr.manager_id.clone();
-                let mut hops = 0;
-                while let Some(c) = cur {
-                    if c == a.id {
-                        return Err(bad("that would create a management cycle"));
-                    }
-                    cur = team.iter().find(|t| t.id == c).and_then(|t| t.manager_id.clone());
-                    hops += 1;
-                    if hops > 32 {
-                        break;
-                    }
-                }
-                Some(mgr.id)
-            }
-            None => None,
-        };
+    if s(body, "managerId").is_some() {
+        return Err(bad("the lead agent reports to you, not to another agent"));
+    }
+    if body.get("isDefault").and_then(Value::as_bool) == Some(false) {
+        return Err(bad("the lead agent is the one you talk to; it cannot hand that over"));
     }
     if body.get("tools").is_some() {
         a.tools = strings(body, "tools");
@@ -323,25 +292,12 @@ async fn agent_from_body(state: &Shared, existing: Option<Agent>, body: &Value) 
     if let Some(b) = body.get("selfImprove").and_then(Value::as_bool) {
         a.self_improve = b;
     }
-    if let Some(b) = body.get("isDefault").and_then(Value::as_bool) {
-        a.is_default = b;
-    }
-    a.updated_at = now;
+    a.updated_at = now_ms();
     Ok(a)
 }
 
-pub async fn create_agent(State(state): State<Shared>, Json(body): Json<Value>) -> R {
-    let mut a = agent_from_body(&state, None, &body).await?;
-    if state.db.agent_by_handle(&a.handle).await?.is_some() {
-        return Err(bad("handle already in use"));
-    }
-    // New agents join the team under the default agent (Kongming) unless the
-    // request says otherwise (`"managerId": null` for none).
-    if body.get("managerId").is_none() && !a.is_default {
-        a.manager_id = Some(agent::ensure_default_agent(&state).await?.id);
-    }
-    state.db.upsert_agent(&a).await?;
-    Ok(Json(json!(a)))
+pub async fn create_agent() -> R {
+    Err(forbidden(TEAM_IS_READ_ONLY))
 }
 
 pub async fn get_agent(State(state): State<Shared>, Path(id): Path<String>) -> R {
@@ -355,8 +311,16 @@ pub async fn get_agent(State(state): State<Shared>, Path(id): Path<String>) -> R
 }
 
 pub async fn update_agent(State(state): State<Shared>, Path(id): Path<String>, Json(body): Json<Value>) -> R {
-    let existing = state.db.agent(&id).await?.ok_or_else(|| not_found("agent not found"))?;
-    let a = agent_from_body(&state, Some(existing), &body).await?;
+    let existing = state
+        .db
+        .agent(&id)
+        .await?
+        .or(state.db.agent_by_handle(&id).await?)
+        .ok_or_else(|| not_found("agent not found"))?;
+    if !existing.is_default {
+        return Err(forbidden(TEAM_IS_READ_ONLY));
+    }
+    let a = apply_agent_body(existing, &body)?;
     if let Some(other) = state.db.agent_by_handle(&a.handle).await? {
         if other.id != a.id {
             return Err(bad("handle already in use"));
@@ -366,20 +330,8 @@ pub async fn update_agent(State(state): State<Shared>, Path(id): Path<String>, J
     Ok(Json(json!(a)))
 }
 
-pub async fn delete_agent(State(state): State<Shared>, Path(id): Path<String>) -> R {
-    let agents = state.db.agents().await?;
-    if agents.len() <= 1 {
-        return Err(bad("cannot delete the last agent"));
-    }
-    let a = agents.iter().find(|a| a.id == id).ok_or_else(|| not_found("agent not found"))?.clone();
-    state.db.delete_agent(&id).await?;
-    if a.is_default {
-        if let Some(mut next) = state.db.agents().await?.into_iter().next() {
-            next.is_default = true;
-            state.db.upsert_agent(&next).await?;
-        }
-    }
-    Ok(Json(json!({"ok": true})))
+pub async fn delete_agent() -> R {
+    Err(forbidden(TEAM_IS_READ_ONLY))
 }
 
 // ---------------------------------------------------------------------- skills
@@ -846,13 +798,8 @@ async fn cron_from_body(state: &Shared, existing: Option<CronJob>, body: &Value)
     if let Some(n) = s(body, "name") {
         c.name = n.to_string();
     }
-    if let Some(a) = s(body, "agentId") {
-        c.agent_id =
-            state.db.agent(a).await?.or(state.db.agent_by_handle(a).await?).ok_or_else(|| bad("agent not found"))?.id;
-    }
-    if c.agent_id.is_empty() {
-        c.agent_id = agent::ensure_default_agent(state).await?.id;
-    }
+    // Scheduled prompts go to the lead agent like everything else the user says.
+    c.agent_id = lead_agent(state, body).await?.id;
     if let Some(sch) = s(body, "schedule") {
         crate::cron::next_run(sch, now_ms())
             .ok_or_else(|| bad("schedule must be 'every:<minutes>' or a 5-field cron expression"))?;

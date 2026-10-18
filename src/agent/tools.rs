@@ -113,19 +113,22 @@ how to use it for particular jobs."
     if agent.is_default {
         v.push(ToolSpec {
             name: "agent_manage".into(),
-            description: "Grow your team. create: a new agent that reports to you, with a handle, a role and a description \
-of what it owns; hand it work with delegate_task (available as soon as it exists). update: change an agent that reports to \
-you. Create an agent for a recurring specialty, not for a single task."
+            description: "Run your team; the user cannot change it themselves. create: a new agent that reports to you, \
+with a handle, a role and a description of what it owns; hand it work with delegate_task (available as soon as it exists). \
+update: change an agent that reports to you, e.g. sharpen its system_prompt after a mistake. retire: remove a report that \
+is no longer needed (its past conversations stay). Create an agent for a recurring specialty, not for a single task."
                 .into(),
             parameters: obj(
                 json!({
-                    "op": {"type": "string", "enum": ["create", "update"]},
+                    "op": {"type": "string", "enum": ["create", "update", "retire"]},
                     "handle": {"type": "string", "description": "short lowercase handle, e.g. researcher"},
                     "name": {"type": "string", "description": "display name, e.g. Researcher"},
                     "role": {"type": "string", "description": "job title, e.g. Research analyst"},
                     "description": {"type": "string", "description": "what it is responsible for; you see it when delegating"},
                     "system_prompt": {"type": "string", "description": "persona and working rules (optional)"},
                     "tools": {"type": "array", "items": {"type": "string"}, "description": "built-in tools it may use; omit for all"},
+                    "skills": {"type": "array", "items": {"type": "string"}, "description": "skills always loaded into its prompt"},
+                    "mcp_servers": {"type": "array", "items": {"type": "string"}, "description": "MCP servers it may use; omit for all"},
                     "model": {"type": "string", "description": "model override; omit to use the default model"}
                 }),
                 &["op", "handle"],
@@ -583,11 +586,24 @@ async fn agent_manage(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
                 updated_at: now,
             }
         }
-        ("update", Some(a)) if a.manager_id.as_deref() == Some(ctx.agent.id.as_str()) => a,
-        ("update", Some(_)) => bail!("@{handle} does not report to you; you can only change your direct reports"),
-        ("update", None) => bail!("no agent @{handle}; use op create"),
-        (other, _) => bail!("unknown op '{other}' (create|update)"),
+        ("update" | "retire", Some(a)) if a.manager_id.as_deref() == Some(ctx.agent.id.as_str()) => a,
+        ("update" | "retire", Some(_)) => {
+            bail!("@{handle} does not report to you; you can only change your direct reports")
+        }
+        ("update" | "retire", None) => bail!("no agent @{handle}"),
+        (other, _) => bail!("unknown op '{other}' (create|update|retire)"),
     };
+    if op == "retire" {
+        ctx.state.db.delete_agent(&a.id).await?;
+        let note = format!("Retired agent @{} ({})", a.handle, a.role);
+        ctx.state.db.log_improvement(Some(&ctx.agent.id), Some(&ctx.session.id), "agent_retired", None, &note).await?;
+        ctx.state.emit(Event::Improvement {
+            kind: "agent_retired".into(),
+            note: note.clone(),
+            agent_id: Some(ctx.agent.id.clone()),
+        });
+        return Ok(format!("{note}. Its past conversations stay readable."));
+    }
     let text = |k: &str| args.get(k).and_then(Value::as_str).map(|v| v.trim().to_string());
     if let Some(v) = text("name").filter(|v| !v.is_empty()) {
         a.name = v;
@@ -607,6 +623,22 @@ async fn agent_manage(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
     if args.get("tools").is_some() {
         let t = strings(args.get("tools"));
         a.tools = if t.is_empty() { None } else { Some(t) };
+    }
+    if args.get("skills").is_some() {
+        let known = ctx.state.db.skills().await?;
+        let want = strings(args.get("skills"));
+        if let Some(x) = want.iter().find(|w| !known.iter().any(|k| &k.name == *w)) {
+            bail!("no skill named '{x}'; pick names from the skills index");
+        }
+        a.pinned_skills = want;
+    }
+    if args.get("mcp_servers").is_some() {
+        let known = ctx.state.db.mcp_servers().await?;
+        let want = strings(args.get("mcp_servers"));
+        if let Some(x) = want.iter().find(|w| !known.iter().any(|m| &m.name == *w || &m.id == *w)) {
+            bail!("no MCP server named '{x}'");
+        }
+        a.mcp_servers = if want.is_empty() { None } else { Some(want) };
     }
     if op == "create" && (a.role.is_empty() || a.description.is_empty()) {
         bail!("create {handle}: role and description are required, so you know what to delegate to it");

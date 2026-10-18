@@ -176,6 +176,9 @@ select.field { appearance: auto; padding-right: 1.75rem; }
 .field[type="number"] { font-variant-numeric: tabular-nums; }
 label.lbl { display: block; font-size: 12px; font-weight: 500; color: hsl(var(--muted-foreground)); margin-bottom: 0.3rem; }
 .hint { font-size: 12px; line-height: 1.4; color: hsl(var(--muted-foreground)); }
+.hint .i { width: 0.8rem; height: 0.8rem; vertical-align: -0.1em; }
+.ro-value { font-size: 13.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; padding: 0.35rem 0; }
+.ro-value.code { font-family: "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace; font-size: 12.5px; max-height: 24rem; overflow-y: auto; }
 
 /* Switch (nanobot role="switch") */
 .switch { position: relative; display: inline-flex; width: 2.25rem; height: 1.25rem; flex-shrink: 0; border-radius: var(--radius-pill); background: hsl(var(--foreground) / 0.18); transition: background-color 150ms; }
@@ -357,6 +360,9 @@ label.lbl { display: block; font-size: 12px; font-weight: 500; color: hsl(var(--
 .composer-foot .grow { flex: 1; }
 .composer-foot .agent-pill { height: 2rem; margin-left: 0.2rem; }
 .composer-foot .meta { font-size: 11px; color: hsl(var(--muted-foreground)); padding: 0 0.5rem; display: none; }
+.composer-readonly { width: 100%; max-width: var(--content-column-width); margin: 0 auto; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem 1rem; padding: 0.85rem 1.1rem; border-radius: var(--radius-prominent); background: hsl(var(--muted) / 0.8); font-size: 13.5px; color: hsl(var(--muted-foreground)); }
+.composer-readonly p { margin: 0; display: inline-flex; align-items: center; gap: 0.5rem; }
+.composer-readonly .i { width: 0.95rem; height: 0.95rem; flex: none; }
 @media (min-width: 640px) { .composer-foot .meta { display: inline; } }
 .composer-action { width: 2.25rem; height: 2.25rem; border-radius: var(--radius-pill); color: hsl(var(--muted-foreground)); display: inline-flex; align-items: center; justify-content: center; }
 .composer-action:hover { color: hsl(var(--foreground)); background: hsl(var(--foreground) / 0.055); }
@@ -555,3 +561,4 @@ details.disclosure[open] > summary .chev { transform: rotate(90deg); }
 .session-row .tg-mark .i { width: 0.8rem; height: 0.8rem; }
 .topbar .title .tg-badge { display: inline-flex; flex: none; align-items: center; gap: 0.25rem; margin-left: 0.5rem; height: 1.25rem; padding: 0 0.45rem; border-radius: var(--radius-pill); font-size: 11px; background: rgb(34 158 217 / 0.12); color: #229ed9; overflow: visible; }
 .topbar .title .tg-badge .i { width: 0.75rem; height: 0.75rem; }
+.topbar .title .tg-badge.delegated { background: hsl(var(--muted)); color: hsl(var(--muted-foreground)); }

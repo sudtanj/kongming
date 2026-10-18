@@ -131,7 +131,7 @@ async fn send_validates_input_and_session() {
     let (status, _) = app.post_raw("/api/sessions/nope/messages?wait=true", json!({"text": "hi"})).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _) = app.post_raw("/api/sessions", json!({"agentId": "ghost"})).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     // Without wait the request is accepted and the turn runs in the background.
     app.llm.push(vec![text("bg")]);
     let v = app.post(&format!("/api/sessions/{sid}/messages"), json!({"text": "later"})).await;

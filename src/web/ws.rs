@@ -84,6 +84,11 @@ pub async fn handle_frame(state: &Shared, text: &str) -> Option<Value> {
                 }
                 Err(e) => return Some(json!({"type": "error", "requestId": request_id, "message": format!("{e:#}")})),
             };
+            if let Err(e) = agent::user_agent(state, &sess).await {
+                return Some(
+                    json!({"type": "error", "requestId": request_id, "sessionId": session_id, "message": format!("{e:#}")}),
+                );
+            }
             if state.is_running(&session_id) {
                 return Some(
                     json!({"type": "error", "requestId": request_id, "sessionId": session_id, "message": "a reply is already in progress"}),
