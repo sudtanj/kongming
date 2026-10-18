@@ -18,8 +18,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-pub const USAGE: &str =
-    "cdp: drive a Chrome browser over the Chrome DevTools Protocol (CDP).
+pub const USAGE: &str = "cdp: drive a Chrome browser over the Chrome DevTools Protocol (CDP).
 Browser: $CDP_URL, or --url http://<tailnet ip>:9222. Page commands act on the first open tab, or on --tab ID.
 
   cdp version                  browser version

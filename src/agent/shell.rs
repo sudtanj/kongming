@@ -156,7 +156,7 @@ impl Shell {
 fn confine(ruleset: Option<RawFd>) -> std::io::Result<()> {
     // SAFETY: plain syscalls on constant or stack arguments.
     unsafe {
-        let fd = libc::open(b"/proc/self/oom_score_adj\0".as_ptr().cast(), libc::O_WRONLY | libc::O_CLOEXEC);
+        let fd = libc::open(c"/proc/self/oom_score_adj".as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
         if fd >= 0 {
             libc::write(fd, b"1000".as_ptr().cast(), 4);
             libc::close(fd);
@@ -223,7 +223,8 @@ mod landlock {
                 null_access |= TRUNCATE;
             }
             let attr = RulesetAttr { handled_access_fs: handled };
-            let fd = libc::syscall(CREATE_RULESET, &attr as *const RulesetAttr, std::mem::size_of::<RulesetAttr>(), 0u32);
+            let fd =
+                libc::syscall(CREATE_RULESET, &attr as *const RulesetAttr, std::mem::size_of::<RulesetAttr>(), 0u32);
             if fd < 0 {
                 return Err(err());
             }
@@ -285,7 +286,10 @@ mod tests {
     #[tokio::test]
     async fn runs_without_secrets_in_the_root() {
         let (out, failed) = sh()
-            .run("echo hi; echo oops >&2; pwd; echo \"[$KONGMING_TURSO_AUTH_TOKEN]\"; echo x >/dev/null && echo null-ok", 10)
+            .run(
+                "echo hi; echo oops >&2; pwd; echo \"[$KONGMING_TURSO_AUTH_TOKEN]\"; echo x >/dev/null && echo null-ok",
+                10,
+            )
             .await
             .unwrap();
         assert!(!failed, "{out}");
@@ -299,7 +303,8 @@ mod tests {
     async fn nothing_is_stored_on_disk() {
         let f = std::env::temp_dir().join(format!("kongming-shell-test-{}", uuid::Uuid::new_v4()));
         let s = sh();
-        let (out, _) = s.run(&format!("echo stored > {0}; echo rc=$?; cat {0}; echo end", f.display()), 10).await.unwrap();
+        let (out, _) =
+            s.run(&format!("echo stored > {0}; echo rc=$?; cat {0}; echo end", f.display()), 10).await.unwrap();
         let kept = std::fs::read_to_string(&f).unwrap_or_default();
         let _ = std::fs::remove_file(&f);
         assert!(!out.contains("rc=0"), "{} {out}", s.confinement());

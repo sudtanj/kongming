@@ -344,11 +344,7 @@ async fn the_shell_tool_runs_commands_without_the_daemon_secrets() {
         tool_call("shell", json!({"command": "echo 6x7=$((6*7)); echo cdp=$CDP_URL; env | grep -c -i turso"})),
         text("42"),
     ];
-    let app = spawn_app_with(
-        replies,
-        &["--shell", "/bin/sh", "--cdp-url", "http://100.64.0.9:9222"],
-    )
-    .await;
+    let app = spawn_app_with(replies, &["--shell", "/bin/sh", "--cdp-url", "http://100.64.0.9:9222"]).await;
     app.disable_reflection().await;
     let sid = app.create_session().await;
     assert_eq!(app.send_wait(&sid, "what is 6x7?").await["text"], json!("42"));
