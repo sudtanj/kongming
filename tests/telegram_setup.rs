@@ -33,22 +33,29 @@ impl BotApi {
 
 async fn start_bot_api() -> (String, BotApi) {
     let api = BotApi::default();
-    let router = Router::new()
-        .route(
-            "/:bot/:method",
-            post(|State(api): State<BotApi>, Path((bot, method)): Path<(String, String)>, Json(body): Json<Value>| async move {
-                if bot != format!("bot{GOOD}") {
-                    return Json(json!({"ok": false, "error_code": 401, "description": "Unauthorized"}));
-                }
-                api.calls.lock().push((method.clone(), body));
-                match method.as_str() {
-                    "getMe" => Json(json!({"ok": true, "result": {"id": 123, "is_bot": true, "username": "kongming_bot"}})),
-                    "sendMessage" => Json(json!({"ok": true, "result": {"message_id": 1}})),
-                    _ => Json(json!({"ok": true, "result": true})),
-                }
-            }),
-        )
-        .with_state(api.clone());
+    let router =
+        Router::new()
+            .route(
+                "/:bot/:method",
+                post(
+                    |State(api): State<BotApi>,
+                     Path((bot, method)): Path<(String, String)>,
+                     Json(body): Json<Value>| async move {
+                        if bot != format!("bot{GOOD}") {
+                            return Json(json!({"ok": false, "error_code": 401, "description": "Unauthorized"}));
+                        }
+                        api.calls.lock().push((method.clone(), body));
+                        match method.as_str() {
+                            "getMe" => Json(
+                                json!({"ok": true, "result": {"id": 123, "is_bot": true, "username": "kongming_bot"}}),
+                            ),
+                            "sendMessage" => Json(json!({"ok": true, "result": {"message_id": 1}})),
+                            _ => Json(json!({"ok": true, "result": true})),
+                        }
+                    },
+                ),
+            )
+            .with_state(api.clone());
     (serve(router).await, api)
 }
 
@@ -100,13 +107,16 @@ async fn with_a_public_https_url_the_webhook_is_registered_and_checked() {
     let secret = set["secret_token"].as_str().expect("secret token").to_string();
     assert!(secret.len() >= 32);
 
-    let update = json!({"update_id": 1, "message": {"message_id": 5, "chat": {"id": 77}, "from": {"id": 77}, "text": "hi"}});
+    let update =
+        json!({"update_id": 1, "message": {"message_id": 5, "chat": {"id": 77}, "from": {"id": 77}, "text": "hi"}});
     let hook = app.url("/api/telegram/webhook");
-    let wrong = app.plain.post(&hook).header("x-telegram-bot-api-secret-token", "nope").json(&update).send().await.unwrap();
+    let wrong =
+        app.plain.post(&hook).header("x-telegram-bot-api-secret-token", "nope").json(&update).send().await.unwrap();
     assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
     let missing = app.plain.post(&hook).json(&update).send().await.unwrap();
     assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
-    let ok = app.plain.post(&hook).header("x-telegram-bot-api-secret-token", &secret).json(&update).send().await.unwrap();
+    let ok =
+        app.plain.post(&hook).header("x-telegram-bot-api-secret-token", &secret).json(&update).send().await.unwrap();
     assert_eq!(ok.status(), StatusCode::OK);
     // User 77 is not allowed: the bot answers with their id.
     let reply = poll_until("the private-bot reply", || {
@@ -122,7 +132,8 @@ async fn with_a_public_https_url_the_webhook_is_registered_and_checked() {
     let settings = app.put("/api/settings", json!({"telegram": {"enabled": false}})).await;
     assert!(settings["telegram"]["status"].is_null(), "{settings}");
     assert_eq!(api.methods().iter().filter(|m| *m == "deleteWebhook").count(), before + 1);
-    let closed = app.plain.post(&hook).header("x-telegram-bot-api-secret-token", &secret).json(&update).send().await.unwrap();
+    let closed =
+        app.plain.post(&hook).header("x-telegram-bot-api-secret-token", &secret).json(&update).send().await.unwrap();
     assert_eq!(closed.status(), StatusCode::NOT_FOUND);
 }
 

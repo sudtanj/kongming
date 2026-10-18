@@ -71,14 +71,7 @@ mod tests {
 
     #[test]
     fn parses_minimal_args() {
-        let c = Config::from_args([
-            "kongming",
-            "--turso-url",
-            "libsql://x.turso.io",
-            "--turso-token",
-            "t",
-        ])
-        .unwrap();
+        let c = Config::from_args(["kongming", "--turso-url", "libsql://x.turso.io", "--turso-token", "t"]).unwrap();
         assert_eq!(c.port, 18800);
         assert_eq!(c.telegram_api, "https://api.telegram.org");
         assert_eq!(c.workers, 1);

@@ -457,7 +457,8 @@ pub async fn spawn_app_with(replies: Vec<ScriptedReply>, extra_args: &[&str]) ->
     let db = Db::new(turso);
     db.migrate().await.expect("migrate");
     // The LLM is configured from the dashboard, i.e. a saved setting.
-    let llm_setting = json!({"kind": "openai", "baseUrl": format!("{}/v1", llm.url), "apiKey": "test", "model": "test-model"});
+    let llm_setting =
+        json!({"kind": "openai", "baseUrl": format!("{}/v1", llm.url), "apiKey": "test", "model": "test-model"});
     db.set_setting("llm", &llm_setting).await.expect("llm setting");
     let state = AppState::new(cfg, db);
     kongming::agent::ensure_default_agent(&state).await.expect("default agent");
