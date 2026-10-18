@@ -1180,7 +1180,8 @@ mod tests {
 
     #[test]
     fn history_includes_summary_and_skips_system() {
-        let chat = history_to_chat(&session(2), &[msg(1, "user"), msg(2, "assistant"), msg(3, "system"), msg(4, "user")]);
+        let chat =
+            history_to_chat(&session(2), &[msg(1, "user"), msg(2, "assistant"), msg(3, "system"), msg(4, "user")]);
         assert_eq!(chat.len(), 3);
         assert!(chat[0].parts.iter().any(|p| matches!(p, Part::Text { text } if text.contains("earlier"))));
         assert_eq!(chat[2].role, "user");
