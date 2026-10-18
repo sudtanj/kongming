@@ -59,9 +59,26 @@ async fn unknown_tool_yields_an_error_result() {
     assert!(str_of(&tool_msg["parts"][0], "content").contains("unknown tool"), "{}", tool_msg["parts"][0]);
 }
 
+const STEPS: &str = "# Deploy\n\n1. Run `make release` on the build host.\n2. Copy the tarball to the board and restart.";
+const STEPS_V2: &str = "# Deploy\n\n1. Run `make release` on the build host.\n2. Copy the tarball over.\n3. Restart and check /health.";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_skill_without_a_real_body_is_sent_back() {
+    let ops = json!({"operations": [{"op": "create", "name": "deploy", "description": "Use when deploying", "body": "Use when deploying."}]});
+    let app = spawn_app(vec![tool_call("skill_manage", ops), text("could not save")]).await;
+    app.disable_reflection().await;
+    let sid = app.create_session().await;
+    app.send_wait(&sid, "save a deploy skill").await;
+    let msgs = app.messages(&sid).await;
+    let result = &find_tool_message(&msgs).expect("tool message")["parts"][0];
+    assert_eq!(result["isError"], json!(true));
+    assert!(str_of(result, "content").contains("only repeats the description"), "{result}");
+    assert!(app.get("/api/skills").await.as_array().unwrap().is_empty());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn skill_manage_creates_a_skill_that_shows_up_in_later_prompts() {
-    let ops = json!({"operations": [{"op": "create", "name": "Deploy Notes", "description": "when deploying", "body": "# steps"}]});
+    let ops = json!({"operations": [{"op": "create", "name": "Deploy Notes", "description": "when deploying", "body": STEPS}]});
     let app = spawn_app(vec![tool_call("skill_manage", ops), text("saved")]).await;
     app.disable_reflection().await;
     let agent = app.default_agent().await;
@@ -92,7 +109,7 @@ async fn skill_manage_creates_a_skill_that_shows_up_in_later_prompts() {
     assert_eq!(list[0]["enabled"], json!(true));
 
     let detail = app.get("/api/skills/deploy-notes").await;
-    assert_eq!(detail["body"], json!("# steps"));
+    assert_eq!(detail["body"], json!(STEPS));
     assert!(str_of(&detail, "markdown").starts_with("---\nname: deploy-notes\n"));
     assert!(detail["versions"].as_array().unwrap().is_empty());
 
@@ -118,16 +135,16 @@ async fn skill_manage_creates_a_skill_that_shows_up_in_later_prompts() {
     assert!(sys.contains("</available_skills>"), "{sys}");
 
     // Updating through the tool bumps the version and keeps the old body.
-    let update = json!({"operations": [{"op": "update", "name": "deploy-notes", "body": "# steps v2"}]});
+    let update = json!({"operations": [{"op": "update", "name": "deploy-notes", "body": STEPS_V2}]});
     app.llm.push(vec![tool_call("skill_manage", update), text("updated")]);
     assert_eq!(app.send_wait(&sid, "update it").await["text"], json!("updated"));
     let detail = app.get("/api/skills/deploy-notes").await;
     assert_eq!(detail["version"], json!(2));
-    assert_eq!(detail["body"], json!("# steps v2"));
+    assert_eq!(detail["body"], json!(STEPS_V2));
     assert_eq!(detail["description"], json!("when deploying"), "description is inherited on update");
     let versions = detail["versions"].as_array().unwrap();
     assert_eq!(versions.len(), 1);
-    assert_eq!(versions[0]["body"], json!("# steps"));
+    assert_eq!(versions[0]["body"], json!(STEPS));
     let kinds: Vec<String> =
         app.get("/api/improvements").await.as_array().unwrap().iter().map(|i| str_of(i, "kind").to_string()).collect();
     assert!(kinds.contains(&"skill_updated".to_string()), "{kinds:?}");

@@ -174,14 +174,19 @@ should be kept for future runs.\n\n",
     ));
     s.push_str("Save a SKILL when the conversation contains a reusable multi-step procedure, a non-obvious fix, or a workflow the \
 user is likely to ask for again. A skill has a short slug name, a one-line description that says WHEN to use it, and a body \
-with the exact steps, commands, parameters and pitfalls. Prefer updating an existing skill over creating a near-duplicate.\n\
+that a future run follows without seeing this conversation: Markdown with the inputs it needs, numbered steps with the exact \
+tools, commands, parameters, ids and urls that worked, how to check the result, and the pitfalls hit here. The body is the \
+skill; never send a skill without one or with the description repeated. Prefer updating an existing skill over creating a \
+near-duplicate: `skill_view` it first and send the merged body.\n\
 Save a MEMORY for durable facts: who the user is, their systems, names, preferences, decisions, and corrections they made.\n\
 Do NOTHING when the conversation was small talk, a one-off question, or already covered by existing skills and memory. \
 Never store secrets (tokens, passwords).\n\n");
     if !skills.is_empty() {
         s.push_str("Existing skills:\n");
         for k in skills.iter().filter(|k| k.enabled) {
-            s.push_str(&format!("- {}: {}\n", k.name, short(&k.description, MAX_DESC)));
+            // Older skills saved with no real body: worth an update when this conversation shows how.
+            let thin = super::tools::thin_body(&k.body, &k.description).map_or("", |_| " [EMPTY BODY: rewrite it]");
+            s.push_str(&format!("- {}: {}{thin}\n", k.name, short(&k.description, MAX_DESC)));
         }
         s.push('\n');
     }

@@ -664,11 +664,11 @@ async fn reflect(state: Shared, agent: Agent, session: Session, model: String) -
                     transcript.push_str(&format!("[{}] {}\n", m.role, crate::mcp::truncate(text, 2000)))
                 }
                 Part::ToolCall { name, args, .. } => transcript
-                    .push_str(&format!("[tool call] {name} {}\n", crate::mcp::truncate(&args.to_string(), 400))),
+                    .push_str(&format!("[tool call] {name} {}\n", crate::mcp::truncate(&args.to_string(), 1000))),
                 Part::ToolResult { name, content, is_error, .. } => transcript.push_str(&format!(
                     "[tool result {name}{}] {}\n",
                     if *is_error { " ERROR" } else { "" },
-                    crate::mcp::truncate(content, 500)
+                    crate::mcp::truncate(content, 1500)
                 )),
                 Part::Thinking { .. } => {}
             }
@@ -698,7 +698,8 @@ async fn reflect(state: Shared, agent: Agent, session: Session, model: String) -
             system: system.clone(),
             messages: chat.clone(),
             tools: specs.clone(),
-            max_tokens: 2000,
+            // Room for a whole skill body: a cut-off call arrives as invalid JSON.
+            max_tokens: 8000,
             temperature: pcfg.temperature,
             effort: Some("low".into()),
         };

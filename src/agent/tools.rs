@@ -65,8 +65,8 @@ pub fn builtin_specs(agent: &Agent, can_delegate: bool) -> Vec<ToolSpec> {
                 json!({"operations": {"type": "array", "minItems": 1, "maxItems": 10, "items": obj(json!({
                     "op": {"type": "string", "enum": ["create", "update", "delete"]},
                     "name": {"type": "string"},
-                    "description": {"type": "string"},
-                    "body": {"type": "string"},
+                    "description": {"type": "string", "description": "one line: when to use the skill"},
+                    "body": {"type": "string", "description": "Markdown with the whole procedure: inputs, numbered steps with the exact tools, commands and parameters, how to check the result, pitfalls"},
                     "tags": {"type": "array", "items": {"type": "string"}}
                 }), &["op", "name"])}}),
                 &["operations"],
@@ -144,6 +144,43 @@ async fn skill_view(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
     Ok(skill.to_markdown())
 }
 
+const BODY_HELP: &str = "Send `body` as Markdown with the whole procedure: when it applies, numbered steps with the exact \
+tools, commands and parameters, how to check the result, and pitfalls. The description only says when to use the skill; \
+the body is what a future run follows.";
+
+/// A skill body as models send it: Markdown, or a list of steps. A whole
+/// SKILL.md loses its frontmatter, which would otherwise be all the body shows.
+fn skill_body(v: Option<&Value>) -> String {
+    let text = match v {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(steps)) => steps
+            .iter()
+            .filter_map(Value::as_str)
+            .enumerate()
+            .map(|(i, step)| format!("{}. {}", i + 1, step.trim()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    };
+    match crate::web::api::parse_skill_markdown(&text) {
+        Some((_, _, _, body)) => body.trim().to_string(),
+        None => text.trim().to_string(),
+    }
+}
+
+/// Why `body` would not be worth saving as a skill, if it would not.
+pub(crate) fn thin_body(body: &str, description: &str) -> Option<&'static str> {
+    let flat = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+    if flat(description).contains(&flat(body)) {
+        return Some("only repeats the description");
+    }
+    let lines = body.lines().filter(|l| !l.trim().is_empty()).count();
+    if body.chars().count() < 80 || lines < 2 {
+        return Some("is too short to be a procedure");
+    }
+    None
+}
+
 async fn skill_manage(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
     if !ctx.agent.self_improve {
         bail!("this agent may not edit skills");
@@ -161,11 +198,14 @@ async fn skill_manage(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
                     ("", None) => bail!("{kind} {name}: description is required"),
                     (d, _) => d.to_string(),
                 };
-                let body = match (s(op, "body"), &existing) {
-                    ("", Some(e)) => e.body.clone(),
-                    ("", None) => bail!("{kind} {name}: body is required"),
-                    (b, _) => b.to_string(),
+                let body = match (skill_body(op.get("body")), &existing) {
+                    (b, Some(e)) if b.is_empty() => e.body.clone(),
+                    (b, None) if b.is_empty() => bail!("{kind} {name}: body is required. {BODY_HELP}"),
+                    (b, _) => b,
                 };
+                if let Some(why) = thin_body(&body, &description) {
+                    bail!("{kind} {name}: the body {why}, so the skill would be useless. {BODY_HELP}");
+                }
                 if body.len() > 40_000 {
                     bail!("{kind} {name}: body too long (max 40000 chars)");
                 }
@@ -550,5 +590,21 @@ mod tests {
     #[test]
     fn current_time_mentions_utc() {
         assert!(current_time().contains("UTC (unix "));
+    }
+
+    #[test]
+    fn skill_bodies_must_hold_a_procedure() {
+        let steps = "# Deploy\n\n1. Run `make release` on the build host.\n2. Copy the tarball to the board and restart the service.";
+        assert_eq!(skill_body(Some(&json!(steps))), steps);
+        let md = format!("---\nname: deploy\ndescription: Use when deploying\n---\n\n{steps}\n");
+        assert_eq!(skill_body(Some(&json!(md))), steps, "frontmatter is dropped");
+        assert_eq!(skill_body(Some(&json!(["Build it", "Ship it"]))), "1. Build it\n2. Ship it");
+        assert_eq!(skill_body(None), "");
+
+        assert_eq!(thin_body(steps, "Use when deploying"), None);
+        assert!(thin_body("Use when deploying the app.", "Use when deploying the app").unwrap().contains("repeats"));
+        assert!(thin_body("# Steps", "Use when deploying").unwrap().contains("too short"));
+        let one_line = "Deploy by running make release and copying the tarball to the board, then restart it.";
+        assert!(thin_body(one_line, "Use when deploying").unwrap().contains("too short"));
     }
 }
