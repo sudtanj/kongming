@@ -73,6 +73,11 @@ with the `cdp` command, e.g. `cdp tabs`, `cdp goto URL`, `cdp text | head -c 400
 `cdp type 'SELECTOR' 'TEXT'`, `cdp press Enter`, `cdp eval 'JS'`, `cdp call Domain.method '{json}'`; `cdp help` \
 lists everything. Use it for pages that need JavaScript or a logged-in session.",
             );
+        } else {
+            description.push_str(
+                " `cdp` drives a Chrome browser over the Chrome DevTools Protocol when you have its address (from a \
+skill or the user): `cdp --url http://<ip>:9222 tabs`; `cdp help` lists everything.",
+            );
         }
         v.push(ToolSpec {
             name: "shell".into(),

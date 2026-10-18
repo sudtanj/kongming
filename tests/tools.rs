@@ -384,7 +384,12 @@ async fn new_starter_skills_reach_existing_databases_once() {
     let skill = db.skill_by_name("shell-and-browser").await.unwrap().expect("the shell skill is added");
     assert!(skill.body.contains("cdp goto URL"), "{}", skill.body);
     assert!(db.skill_by_name("writing-skills").await.unwrap().is_none(), "a deleted starter stays deleted");
-    assert_eq!(db.skill_by_name("team-delegation").await.unwrap().unwrap().body, "# b");
+    // An unedited starter follows the built-in text; an edited one is kept.
+    let builtin = |n: &str| kongming::agent::SEED_SKILLS.iter().find(|s| s.0 == n).unwrap().2;
+    assert_eq!(db.skill_by_name("team-delegation").await.unwrap().unwrap().body, builtin("team-delegation"));
+    db.save_skill("team-delegation", "d", "# my way", &[], "user", None).await.unwrap();
+    kongming::agent::seed_skills(&app.state).await.unwrap();
+    assert_eq!(db.skill_by_name("team-delegation").await.unwrap().unwrap().body, "# my way");
 
     db.delete_skill("shell-and-browser").await.unwrap();
     kongming::agent::seed_skills(&app.state).await.unwrap();

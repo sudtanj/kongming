@@ -943,7 +943,7 @@ The `shell` tool runs one `sh -c` script in a read-only BusyBox sandbox on the k
 - `busybox --list` shows every applet.
 
 ## Driving Chrome with cdp
-Only when the shell tool's description says a browser is connected. `cdp help` lists everything; page commands act on the first open tab unless you pass `--tab ID`.
+The browser address is `$CDP_URL` when kongming has one configured (the shell tool's description then says a browser is connected); otherwise take it from another skill or from the user and start the command with it: `export CDP_URL=http://<ip>:9222; cdp tabs` (or `cdp --url http://<ip>:9222 tabs`). It is not kept between calls, so set it in every command. `cdp help` lists everything; page commands act on the first open tab unless you pass `--tab ID`.
 1. `cdp tabs` lists the tabs (id, title, url).
 2. `cdp goto URL` loads a page and waits for it.
 3. Read it: `cdp text | head -c 4000`, or search it: `cdp text | grep -i -n -A2 'price'`.
@@ -953,7 +953,7 @@ Only when the shell tool's description says a browser is connected. `cdp help` l
 - Chain steps in one call with `&&`, e.g. `cdp goto https://example.com && cdp click 'a.more' && cdp text | head -c 2000`.
 - Selectors: prefer ids, names and visible attributes (`input[name=q]`, `button[type=submit]`); find them with `cdp eval 'document.querySelector("form").outerHTML.slice(0,2000)'`.
 - The browser is the user's real profile and may be logged in: never buy, post, send, delete or change settings without the user's explicit OK, and never open a URL ending in `#stop-session` (it ends the browser session).
-- If `cdp` says the browser cannot be reached, the chrome-cdp session is not running: tell the user to start it instead of retrying."##,
+- If `cdp` says the browser cannot be reached, the chrome-cdp session is probably not running, or the address is wrong: tell the user instead of retrying."##,
         &["tools", "browser"],
     ),
 ];
@@ -969,24 +969,49 @@ pub async fn seed_skills(state: &Shared) -> Result<()> {
         }
         None => vec![],
     };
-    let before = seeded.len();
+    // The text each one was last written with: a starter nobody has edited
+    // follows the built-in text when it changes, an edited one is left alone.
+    let mut bodies: std::collections::HashMap<String, String> = match state.db.setting(SEED_BODIES_KEY).await? {
+        Some(v) => serde_json::from_value(v).unwrap_or_default(),
+        None => std::collections::HashMap::new(),
+    };
+    let (seeded_before, bodies_before) = (seeded.clone(), bodies.clone());
     for (name, description, body, tags) in SEED_SKILLS {
-        if seeded.iter().any(|s| s == name) {
+        let tags: Vec<String> = tags.iter().map(|t| t.to_string()).collect();
+        let existing = state.db.skill_by_name(name).await?;
+        if !seeded.iter().any(|s| s == name) {
+            if existing.is_none() {
+                state.db.save_skill(name, description, body, &tags, "seed", None).await?;
+                bodies.insert(name.to_string(), body.to_string());
+            }
+            seeded.push(name.to_string());
             continue;
         }
-        if state.db.skill_by_name(name).await?.is_none() {
-            let tags: Vec<String> = tags.iter().map(|t| t.to_string()).collect();
-            state.db.save_skill(name, description, body, &tags, "seed", None).await?;
+        let Some(skill) = existing else { continue };
+        if skill.body == *body {
+            bodies.insert(name.to_string(), body.to_string());
+            continue;
         }
-        seeded.push(name.to_string());
+        let unedited = match bodies.get(*name) {
+            Some(last) => *last == skill.body,
+            None => skill.source == "seed" && skill.version == 1,
+        };
+        if unedited {
+            state.db.save_skill(name, description, body, &tags, "seed", None).await?;
+            bodies.insert(name.to_string(), body.to_string());
+        }
     }
-    if seeded.len() != before || state.db.setting(SEEDED_SKILLS_KEY).await?.is_none() {
+    if seeded != seeded_before || state.db.setting(SEEDED_SKILLS_KEY).await?.is_none() {
         state.db.set_setting(SEEDED_SKILLS_KEY, &serde_json::json!(seeded)).await?;
+    }
+    if bodies != bodies_before {
+        state.db.set_setting(SEED_BODIES_KEY, &serde_json::json!(bodies)).await?;
     }
     Ok(())
 }
 
 const SEEDED_SKILLS_KEY: &str = "seeded_skills";
+const SEED_BODIES_KEY: &str = "seeded_skill_bodies";
 
 #[cfg(test)]
 mod tests {
