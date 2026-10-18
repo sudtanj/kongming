@@ -59,7 +59,7 @@ Browser: a current Chrome, Firefox or Safari for the web UI.
 ## Run
 
 ```bash
-docker run -d --name kongming --read-only --cap-drop ALL \
+docker run -d --name kongming --read-only --ipc none --cap-drop ALL \
   -p 18800:18800 \
   -e KONGMING_TURSO_DATABASE_URL=libsql://<db>-<org>.turso.io \
   -e KONGMING_TURSO_AUTH_TOKEN=<token> \
