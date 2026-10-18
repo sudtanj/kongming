@@ -121,6 +121,8 @@ jobs:
       - name: Install cross
         run: cargo install cross --git https://github.com/cross-rs/cross --locked
       - name: Build test binaries
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: |
           cross test --target aarch64-unknown-linux-musl --no-run --message-format=json-render-diagnostics > build.jsonl
           mkdir -p sim/tests

@@ -19,7 +19,7 @@ set -eu
 IMAGE=busybox:1.36
 BOARD="--platform linux/arm64 --cpus=4 --pids-limit=256 --read-only -e QEMU_CPU=cortex-a53"
 LABEL=${SIM_LABEL:-orangepi}
-SUMMARY=${GITHUB_STEP_SUMMARY:-/dev/stdout}
+SUMMARY=${GITHUB_STEP_SUMMARY:-/dev/null}
 
 mib() { echo $(( $1 / 1048576 )); }
 
@@ -32,7 +32,7 @@ run_tests() {
     { docker run --rm $BOARD --memory=1g --memory-swap=1g --tmpfs /tmp:size=16m \
         -e KONGMING_TEST_TIMEOUT_SECS=$timeout_secs -e RUST_BACKTRACE=1 \
         -v "$dir:/sim:ro" $IMAGE sh -c '
-            uname -m; failed=""
+            uname -m; grep -m1 "CPU part" /proc/cpuinfo || true; failed=""
             for t in /sim/*; do
                 echo "::group::$(basename "$t")"
                 "$t" --test-threads=4 || failed="$failed $(basename "$t")"
@@ -48,7 +48,7 @@ run_tests() {
         echo "### $LABEL: tests"
         echo "- test binaries: $(ls "$dir" | wc -l)"
         echo "- peak memory of the whole run (harness + mocks + app): $(mib "${peak:-0}") MiB"
-    } >> "$SUMMARY"
+    } | tee -a "$SUMMARY"
     return "${status:-1}"
 }
 
@@ -149,7 +149,7 @@ run_smoke() {
         echo "- container memory after the burst: $(mib "$current") MiB, peak: $(mib "$peak") MiB"
         [ "$(uname -m)" = "x86_64" ] && echo "- under QEMU these figures include the emulator; the arm64 run has the real ones"
         echo "- restart: agents and sessions came back from the database"
-    } >> "$SUMMARY"
+    } | tee -a "$SUMMARY"
 }
 
 case "${1:-}" in
