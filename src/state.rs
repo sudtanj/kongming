@@ -106,6 +106,10 @@ pub struct AppState {
     pub mcp: McpManager,
     pub secret: Vec<u8>,
     pub started_at: i64,
+    /// Wakes the Telegram loop when its settings change.
+    pub telegram_reload: tokio::sync::Notify,
+    /// Outcome of the last Telegram setup (bot, mode, error), shown in the dashboard.
+    pub telegram_status: Mutex<Value>,
     /// Sessions with a turn in flight, with a cancel flag each.
     running: Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
     provider_cache: RwLock<Option<(ProviderConfig, Arc<dyn Provider>)>>,
@@ -138,6 +142,8 @@ impl AppState {
             started_at: crate::db::now_ms(),
             running: Mutex::new(Default::default()),
             provider_cache: RwLock::new(None),
+            telegram_reload: tokio::sync::Notify::new(),
+            telegram_status: Mutex::new(Value::Null),
         })
     }
 
@@ -178,38 +184,27 @@ impl AppState {
         self.running.lock().contains_key(session_id)
     }
 
-    /// Effective LLM configuration: the saved setting, else the environment.
+    /// LLM configuration as saved from the dashboard. Nothing saved yet means
+    /// OpenAI with no key, and `provider()` asks the user to open Settings.
     pub async fn provider_config(&self) -> Result<ProviderConfig> {
-        if let Some(v) = self.db.setting("llm").await? {
-            if let Ok(mut c) = serde_json::from_value::<ProviderConfig>(v) {
-                if c.api_key.as_deref().is_none_or(str::is_empty) {
-                    c.api_key = self.cfg.llm_api_key.clone();
-                }
-                if c.model.is_empty() {
-                    c.model = self.cfg.llm_model.clone().unwrap_or_default();
-                }
-                if c.base_url.as_deref().is_none_or(str::is_empty) {
-                    c.base_url = self.cfg.llm_base_url.clone();
-                }
-                if c.kind.is_empty() {
-                    c.kind = self.cfg.llm_provider.clone();
-                }
-                return Ok(c);
-            }
+        let mut c = match self.db.setting("llm").await? {
+            Some(v) => serde_json::from_value::<ProviderConfig>(v).unwrap_or_default(),
+            None => ProviderConfig::default(),
+        };
+        if c.kind.is_empty() {
+            c.kind = "openai".into();
         }
-        Ok(ProviderConfig {
-            kind: self.cfg.llm_provider.clone(),
-            base_url: self.cfg.llm_base_url.clone(),
-            api_key: self.cfg.llm_api_key.clone(),
-            model: self.cfg.llm_model.clone().unwrap_or_else(|| default_model(&self.cfg.llm_provider)),
-            max_tokens: None,
-            temperature: None,
-            effort: None,
-        })
+        if c.model.is_empty() {
+            c.model = default_model(&c.kind);
+        }
+        Ok(c)
     }
 
     pub async fn provider(&self) -> Result<(ProviderConfig, Arc<dyn Provider>)> {
         let cfg = self.provider_config().await?;
+        if cfg.api_key.as_deref().is_none_or(str::is_empty) && cfg.base_url.as_deref().is_none_or(str::is_empty) {
+            anyhow::bail!("no LLM is set up yet: add a provider and API key in Settings → Models");
+        }
         if let Some((c, p)) = self.provider_cache.read().as_ref() {
             if *c == cfg {
                 return Ok((cfg, p.clone()));
@@ -220,20 +215,14 @@ impl AppState {
         Ok((cfg, p))
     }
 
-    /// Telegram token: saved setting first, then the environment.
+    /// Telegram bot token saved from the dashboard.
     pub async fn telegram_token(&self) -> Option<String> {
-        if let Ok(Some(v)) = self.db.setting("telegram").await {
-            if let Some(t) = v.get("token").and_then(Value::as_str) {
-                if !t.is_empty() {
-                    return Some(t.to_string());
-                }
-            }
-        }
-        self.cfg.telegram_token.clone().filter(|t| !t.is_empty())
+        let v = self.db.setting("telegram").await.ok().flatten()?;
+        v.get("token").and_then(Value::as_str).filter(|t| !t.is_empty()).map(str::to_string)
     }
 
     pub async fn telegram_allowed(&self) -> Vec<i64> {
-        let mut ids = self.cfg.telegram_allowed();
+        let mut ids: Vec<i64> = Vec::new();
         if let Ok(Some(v)) = self.db.setting("telegram").await {
             if let Some(list) = v.get("allowedUsers").and_then(Value::as_array) {
                 ids.extend(

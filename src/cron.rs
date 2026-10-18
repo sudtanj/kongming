@@ -113,7 +113,7 @@ pub async fn run_job(state: Shared, job: CronJob) {
     let _ = state.db.mark_cron_run(&job.id, next, &status).await;
     if let (Some(chat), Ok(r)) = (job.deliver_to.as_deref(), &res) {
         if let (Ok(chat_id), Some(token)) = (chat.trim().parse::<i64>(), state.telegram_token().await) {
-            let tg = crate::telegram::Telegram::new(state.http.clone(), token);
+            let tg = crate::telegram::Telegram::new(state.http.clone(), &state.cfg.telegram_api, token);
             let text = if r.text.trim().is_empty() { status.clone() } else { r.text.clone() };
             let body = format!("<b>⏰ {}</b>\n{}", job.name, crate::telegram::markdown_to_html(&text));
             if let Err(e) = tg.send_long(chat_id, &body).await {

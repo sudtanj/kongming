@@ -171,7 +171,6 @@ const STRINGS = {
     'models.apiKey': 'API key',
     'models.apiKeyDesc': 'Stored in the database. Leave blank to keep the current key.',
     'models.apiKeySet': 'A key is set',
-    'models.apiKeyEnv': 'from environment',
     'models.apiKeyNone': 'No key',
     'models.clearKey': 'Clear key',
     'models.model': 'Model',
@@ -282,9 +281,16 @@ const STRINGS = {
     'channels.desc': 'Where kongming listens besides this web UI.',
     'channels.telegram': 'Telegram',
     'channels.token': 'Bot token',
-    'channels.tokenDesc': 'From @BotFather. Leave blank to keep the stored token.',
+    'channels.tokenDesc': 'From @BotFather. Saving checks it with Telegram and connects the bot. Leave blank to keep the stored token.',
+    'channels.connection': 'Connection',
+    'channels.connectionDesc': 'Saving a bot token checks it with Telegram and sets up delivery automatically.',
+    'channels.connectedAs': 'Connected as {{bot}}',
+    'channels.notConnected': 'Not connected',
+    'channels.connecting': 'Connecting…',
+    'channels.notSetUp': 'Not set up',
+    'channels.modeWebhook': 'Webhook: Telegram pushes updates to {{url}}',
+    'channels.modePolling': 'Long polling: kongming fetches updates from Telegram, so nothing has to reach this machine. Set a public HTTPS URL in Settings to use a webhook instead.',
     'channels.tokenSet': 'Token set',
-    'channels.tokenEnv': 'from environment',
     'channels.tokenNone': 'No token',
     'channels.clearToken': 'Clear token',
     'channels.allowed': 'Allowed user IDs',
@@ -1469,7 +1475,7 @@ const settings = (() => {
     const maxTokens = input({ type: 'number', min: 1, value: llm.maxTokens == null ? '' : llm.maxTokens, placeholder: 'auto' });
     const temperature = input({ type: 'number', min: 0, max: 2, step: 0.1, value: llm.temperature == null ? '' : llm.temperature, placeholder: 'default' });
     const effort = select([['', t('common.none')], ['low', 'low'], ['medium', 'medium'], ['high', 'high']], llm.effort || '');
-    const keyState = h('span', { class: 'pill ' + (llm.apiKeySet ? 'ok' : 'warn') }, llm.apiKeySet ? t('models.apiKeySet') + (st.env && st.env.llmFromEnv ? ` (${t('models.apiKeyEnv')})` : '') : t('models.apiKeyNone'));
+    const keyState = h('span', { class: 'pill ' + (llm.apiKeySet ? 'ok' : 'warn') }, llm.apiKeySet ? t('models.apiKeySet') : t('models.apiKeyNone'));
     const testOut = h('div', { class: 'hint', style: 'margin-top:0.4rem' });
     const save = saveBtn(null, async () => {
       const body = { kind: kind.value, baseUrl: baseUrl.value.trim(), model: model.value.trim(), maxTokens: maxTokens.value ? Number(maxTokens.value) : null, temperature: temperature.value !== '' ? Number(temperature.value) : null, effort: effort.value || null };
@@ -1700,11 +1706,14 @@ const settings = (() => {
     const st = await api.get('/api/settings'); const tg = st.telegram || {};
     const token = input({ type: 'password', autocomplete: 'off', placeholder: tg.tokenSet ? '••••••••' : '123456:ABC…' });
     const allowed = input({ value: (tg.allowedUsers || []).join(', '), placeholder: '12345678, 87654321', inputmode: 'numeric' });
-    const state = h('span', { class: 'pill ' + (tg.tokenSet ? 'ok' : 'warn') }, tg.tokenSet ? t('channels.tokenSet') + (st.env && st.env.telegramFromEnv ? ` (${t('channels.tokenEnv')})` : '') : t('channels.tokenNone'));
+    const state = h('span', { class: 'pill ' + (tg.tokenSet ? 'ok' : 'warn') }, tg.tokenSet ? t('channels.tokenSet') : t('channels.tokenNone'));
+    const conn = tg.tokenSet && tg.enabled !== false ? tg.status : null;
+    const connPill = !tg.tokenSet || tg.enabled === false ? h('span', { class: 'pill' }, t('channels.notSetUp')) : !conn ? h('span', { class: 'pill warn' }, t('channels.connecting')) : conn.ok ? h('span', { class: 'pill ok' }, t('channels.connectedAs', { bot: '@' + conn.bot })) : h('span', { class: 'pill err' }, t('channels.notConnected'));
     return h('div', { class: 'settings-stack' }, header(t('channels.title'), t('channels.desc')),
       section(t('channels.telegram'),
-        row(t('channels.enabled'), null, switchEl(tg.enabled !== false, (v) => api.put('/api/settings', { telegram: { enabled: v } }), t('channels.enabled')), { switch: true }),
+        row(t('channels.enabled'), null, switchEl(tg.enabled !== false, (v) => api.put('/api/settings', { telegram: { enabled: v } }).then(reload), t('channels.enabled')), { switch: true }),
         row(t('channels.token'), t('channels.tokenDesc'), h('div', { class: 'row', style: 'flex-wrap:nowrap;width:100%' }, state, token, h('button', { class: 'btn ghost sm', type: 'button', title: t('channels.clearToken'), onClick: () => modal.confirm({ title: t('channels.clearToken'), confirm: t('common.confirm'), danger: true, onConfirm: async () => { await api.put('/api/settings', { telegram: { clearToken: true } }); reload(); } }) }, icon('x')))),
+        row(t('channels.connection'), conn ? (conn.ok ? (conn.mode === 'webhook' ? t('channels.modeWebhook', { url: conn.webhookUrl }) : t('channels.modePolling')) : conn.error) : t('channels.connectionDesc'), connPill),
         row(t('channels.allowed'), t('channels.allowedDesc'), allowed),
         h('div', { class: 'settings-footer' }, h('span'), h('div', { class: 'acts' }, saveBtn(null, async () => { const b = { allowedUsers: allowed.value }; if (token.value) b.token = token.value; await api.put('/api/settings', { telegram: b }); reload(); })))));
   };

@@ -47,33 +47,42 @@ Browser: a current Chrome, Firefox or Safari for the web UI.
 ```bash
 docker run -d --name kongming --read-only --cap-drop ALL \
   -p 127.0.0.1:18800:18800 \
-  -e TURSO_DATABASE_URL=libsql://<db>-<org>.turso.io \
-  -e TURSO_AUTH_TOKEN=<token> \
+  -e KONGMING_TURSO_DATABASE_URL=libsql://<db>-<org>.turso.io \
+  -e KONGMING_TURSO_AUTH_TOKEN=<token> \
   -e KONGMING_PASSWORD=<ui password> \
   -e KONGMING_SECRET=<random string> \
-  -e LLM_PROVIDER=openai -e LLM_BASE_URL=https://api.openai.com/v1 -e LLM_API_KEY=sk-... -e LLM_MODEL=gpt-4o-mini \
-  -e TELEGRAM_BOT_TOKEN=... -e TELEGRAM_ALLOWED_USERS=123456789 \
   --memory 96m --cpus 1 sudtanj/kongming:latest
 ```
 
-Open `http://127.0.0.1:18800`. Everything except the Turso credentials, port and UI password can also be configured in the UI (Settings) and is stored in Turso; environment values are defaults.
+Open `http://127.0.0.1:18800`, log in and set up the rest in the dashboard; it is stored in Turso:
+
+- **Settings → Models**: LLM provider (OpenAI-compatible or Anthropic), base URL, API key and model.
+- **Settings → Channels**: Telegram bot token from @BotFather and the allowed user ids. Saving the token checks it with Telegram and connects the bot right away (see below).
+
+Only the Turso credentials and the process settings come from the environment:
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` | Turso database (required) | |
+| `KONGMING_TURSO_DATABASE_URL`, `KONGMING_TURSO_AUTH_TOKEN` | Turso database (required) | |
 | `PORT`, `KONGMING_HOST` | listen address | `18800`, `0.0.0.0` |
 | `KONGMING_PASSWORD` | UI password (empty = no auth; only on a private network) | empty |
 | `KONGMING_SECRET` | cookie signing secret (random per boot if unset) | |
-| `KONGMING_PUBLIC_URL` | public HTTPS base URL; only set it if OAuth providers can reach kongming (otherwise the paste flow below is used) | empty |
-| `LLM_PROVIDER` | `openai` or `anthropic` | `openai` |
-| `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` | provider settings | |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USERS` | Telegram bot and comma-separated user ids | |
+| `KONGMING_PUBLIC_URL` | public HTTPS base URL; only set it if kongming is reachable from the internet (MCP OAuth redirects, Telegram webhook). Can also be set in Settings | empty |
 | `KONGMING_WORKERS` | tokio workers | `1` |
 | `KONGMING_MAX_ITERATIONS` | tool-call rounds per turn | `24` |
 | `KONGMING_CONTEXT_TOKENS` | compaction threshold | `48000` |
 | `LOG_LEVEL` | tracing filter | `info` |
 
 The Orange Pi deployment script lives in [`sudtanj/infrastructure-tools`](https://github.com/sudtanj/infrastructure-tools) (`bash-scripts/init-kongming.sh`, image from `builder-tools/kongming`).
+
+### Telegram
+
+Paste the bot token in Settings → Channels and press Save. kongming checks the token with `getMe` (a wrong token is refused and not stored), registers the bot commands and picks how updates arrive:
+
+- **No public URL (behind a firewall, the default):** long polling. kongming removes any webhook left on the bot and fetches updates itself, so nothing has to reach the machine.
+- **Public HTTPS URL set:** webhook. kongming calls `setWebhook` with `<public URL>/api/telegram/webhook` and a random secret, and only accepts deliveries that carry that secret.
+
+The page shows the bot name, the mode in use, or the error Telegram returned. Turning Telegram off or clearing the token removes the webhook. Only the user ids in the allowlist can talk to the bot; anyone else is told their id so you can add them.
 
 ### MCP OAuth behind a firewall
 

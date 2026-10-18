@@ -96,7 +96,7 @@ run_smoke() {
     # Production conditions: read-only root, no tmpfs, no volumes but the binary.
     docker run -d --name kongming --network orangepi -p 18800:18800 \
         $BOARD --memory="$mem" --memory-swap="$mem" \
-        -e TURSO_DATABASE_URL=http://turso:8080 -e TURSO_AUTH_TOKEN=unused \
+        -e KONGMING_TURSO_DATABASE_URL=http://turso:8080 -e KONGMING_TURSO_AUTH_TOKEN=unused \
         -e KONGMING_PASSWORD=orangepi -e KONGMING_SECRET=orangepi-simulation-secret \
         -v "$bin:/kongming:ro" --entrypoint /kongming $IMAGE > /dev/null
     started=$(date +%s)

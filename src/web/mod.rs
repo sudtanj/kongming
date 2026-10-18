@@ -92,7 +92,9 @@ pub fn router(state: Shared) -> Router {
         .route("/auth/status", get(api::auth_status))
         .route("/auth/login", post(api::login))
         .route("/auth/logout", post(api::logout))
-        .route("/mcp/oauth/callback", get(api::mcp_oauth_callback));
+        .route("/mcp/oauth/callback", get(api::mcp_oauth_callback))
+        // Authenticated by the secret header Telegram sends (see telegram::webhook).
+        .route("/telegram/webhook", post(crate::telegram::webhook));
 
     Router::new()
         .route("/", get(index))

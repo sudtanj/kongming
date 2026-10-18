@@ -431,22 +431,19 @@ pub struct TestApp {
 pub const PASSWORD: &str = "pw";
 
 pub async fn spawn_app(replies: Vec<ScriptedReply>) -> TestApp {
+    spawn_app_with(replies, &[]).await
+}
+
+/// `spawn_app` with extra command-line flags, e.g. `--telegram-api`.
+pub async fn spawn_app_with(replies: Vec<ScriptedReply>, extra_args: &[&str]) -> TestApp {
     let hrana = HranaMock::start().await;
     let llm = LlmMock::start(replies).await;
-    let args: Vec<String> = vec![
+    let mut args: Vec<String> = vec![
         "kongming".into(),
         "--turso-url".into(),
         hrana.url.clone(),
         "--turso-token".into(),
         "test-token".into(),
-        "--llm-provider".into(),
-        "openai".into(),
-        "--llm-base-url".into(),
-        format!("{}/v1", llm.url),
-        "--llm-api-key".into(),
-        "test".into(),
-        "--llm-model".into(),
-        "test-model".into(),
         "--password".into(),
         PASSWORD.into(),
         "--secret".into(),
@@ -454,10 +451,14 @@ pub async fn spawn_app(replies: Vec<ScriptedReply>) -> TestApp {
         "--host".into(),
         "127.0.0.1".into(),
     ];
+    args.extend(extra_args.iter().map(|a| a.to_string()));
     let cfg = Config::from_args(args).expect("config");
     let turso = Turso::new(&cfg.turso_url, &cfg.turso_token).expect("turso");
     let db = Db::new(turso);
     db.migrate().await.expect("migrate");
+    // The LLM is configured from the dashboard, i.e. a saved setting.
+    let llm_setting = json!({"kind": "openai", "baseUrl": format!("{}/v1", llm.url), "apiKey": "test", "model": "test-model"});
+    db.set_setting("llm", &llm_setting).await.expect("llm setting");
     let state = AppState::new(cfg, db);
     kongming::agent::ensure_default_agent(&state).await.expect("default agent");
     let base_url = serve(kongming::web::router(state.clone())).await;

@@ -210,7 +210,7 @@ impl Turso {
         let url = url.trim();
         let token = token.trim();
         if url.is_empty() || token.is_empty() {
-            bail!("TURSO_DATABASE_URL and TURSO_AUTH_TOKEN are required (kongming keeps no local data)");
+            bail!("KONGMING_TURSO_DATABASE_URL and KONGMING_TURSO_AUTH_TOKEN are required (kongming keeps no local data)");
         }
         let base = match url.strip_prefix("libsql://") {
             Some(rest) => format!("https://{rest}"),

@@ -709,6 +709,8 @@ pub async fn get_settings(State(state): State<Shared>) -> R {
         o.remove("token");
         o.insert("tokenSet".into(), json!(has_token));
         o.insert("allowedUsers".into(), json!(state.telegram_allowed().await));
+        o.insert("status".into(), state.telegram_status.lock().clone());
+        o.insert("webhookUrl".into(), json!(crate::telegram::webhook_url(&state).await));
     }
     Ok(Json(json!({
         "llm": llm.redacted(),
@@ -716,14 +718,12 @@ pub async fn get_settings(State(state): State<Shared>) -> R {
         "reflection": all.get("reflection").cloned().unwrap_or(json!({"enabled": true})),
         "publicUrl": state.public_url().await,
         "ui": all.get("ui").cloned().unwrap_or(json!({})),
-        "env": {
-            "llmFromEnv": state.cfg.llm_api_key.is_some(),
-            "telegramFromEnv": state.cfg.telegram_token.is_some(),
-        }
     })))
 }
 
 pub async fn put_settings(State(state): State<Shared>, Json(body): Json<Value>) -> R {
+    let telegram_before = crate::telegram::active_token(&state).await;
+    let public_before = state.public_url().await;
     if let Some(llm) = body.get("llm") {
         let mut cfg: ProviderConfig = state.provider_config().await.unwrap_or_default();
         if let Some(k) = s(llm, "kind") {
@@ -761,6 +761,11 @@ pub async fn put_settings(State(state): State<Shared>, Json(body): Json<Value>) 
             cur = json!({});
         }
         if let Some(t) = s(tg, "token") {
+            let t = t.trim();
+            crate::telegram::client(&state, t.to_string())
+                .call("getMe", json!({}))
+                .await
+                .map_err(|e| bad(format!("Telegram did not accept this bot token: {e:#}")))?;
             cur["token"] = json!(t);
         }
         if tg.get("clearToken").and_then(Value::as_bool) == Some(true) {
@@ -790,6 +795,19 @@ pub async fn put_settings(State(state): State<Shared>, Json(body): Json<Value>) 
     }
     if let Some(u) = body.get("ui") {
         state.db.set_setting("ui", u).await?;
+    }
+    // Telegram changes apply at once, so the dashboard shows whether they worked.
+    let telegram_after = crate::telegram::active_token(&state).await;
+    let public_changed = state.public_url().await != public_before;
+    let token_saved = body.pointer("/telegram/token").is_some();
+    if telegram_after != telegram_before || (telegram_after.is_some() && (public_changed || token_saved)) {
+        if let Some(old) = telegram_before.filter(|old| Some(old) != telegram_after.as_ref()) {
+            crate::telegram::disconnect(&state, old).await;
+        }
+        if let Some(token) = telegram_after {
+            let _ = crate::telegram::connect(&state, &crate::telegram::client(&state, token)).await;
+        }
+        state.telegram_reload.notify_one();
     }
     get_settings(State(state)).await
 }

@@ -1,10 +1,14 @@
-//! Telegram bot over long polling. Each chat maps to a session; `@handle`
-//! switches agents; `/agent`, `/new`, `/agents`, `/skills`, `/status` are the
-//! commands. Replies stream by editing one message at a throttled rate.
+//! Telegram bot, over long polling or, when kongming has a public HTTPS URL, a
+//! webhook. Each chat maps to a session; `@handle` switches agents; `/agent`,
+//! `/new`, `/agents`, `/skills`, `/status` are the commands. Replies stream by
+//! editing one message at a throttled rate.
 
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::Json;
 use serde_json::{json, Value};
 
 use crate::agent::{self, TurnOptions};
@@ -16,16 +20,18 @@ const MAX_MESSAGE: usize = 4000;
 #[derive(Clone)]
 pub struct Telegram {
     http: reqwest::Client,
+    api: String,
     token: String,
 }
 
 impl Telegram {
-    pub fn new(http: reqwest::Client, token: String) -> Telegram {
-        Telegram { http, token }
+    /// `api` is the Bot API base URL, normally `https://api.telegram.org`.
+    pub fn new(http: reqwest::Client, api: &str, token: String) -> Telegram {
+        Telegram { http, api: api.trim_end_matches('/').to_string(), token }
     }
 
     fn url(&self, method: &str) -> String {
-        format!("https://api.telegram.org/bot{}/{method}", self.token)
+        format!("{}/bot{}/{method}", self.api, self.token)
     }
 
     pub async fn call(&self, method: &str, body: Value) -> Result<Value> {
@@ -36,8 +42,10 @@ impl Telegram {
             .timeout(Duration::from_secs(70))
             .send()
             .await
-            .context("telegram request failed")?;
-        let v: Value = r.json().await.context("telegram reply was not JSON")?;
+            // The URL carries the bot token: keep it out of errors and logs.
+            .map_err(|e| anyhow!("telegram {method} request failed: {}", e.without_url()))?;
+        let v: Value =
+            r.json().await.map_err(|e| anyhow!("telegram {method}: reply was not JSON: {}", e.without_url()))?;
         if v.get("ok").and_then(Value::as_bool) != Some(true) {
             return Err(anyhow!(
                 "telegram {method}: {}",
@@ -256,66 +264,157 @@ fn replace_pairs(s: &str, marker: &str, open: &str, close: &str) -> String {
     out
 }
 
-/// Run the polling loop until the process stops. Reconnects on errors.
+/// Where Telegram posts updates in webhook mode, under the public URL.
+pub const WEBHOOK_PATH: &str = "/api/telegram/webhook";
+
+fn commands() -> Value {
+    json!({"commands": [
+        {"command": "new", "description": "Start a new conversation"},
+        {"command": "agents", "description": "List agents"},
+        {"command": "agent", "description": "Switch agent: /agent <handle>"},
+        {"command": "skills", "description": "List skills"},
+        {"command": "status", "description": "Show status"},
+        {"command": "stop", "description": "Stop the current reply"},
+        {"command": "help", "description": "Help"}
+    ]})
+}
+
+pub fn client(state: &Shared, token: String) -> Telegram {
+    Telegram::new(state.http.clone(), &state.cfg.telegram_api, token)
+}
+
+/// The bot token, when Telegram is enabled.
+pub async fn active_token(state: &Shared) -> Option<String> {
+    let enabled = state
+        .db
+        .setting("telegram")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.get("enabled").and_then(Value::as_bool))
+        .unwrap_or(true);
+    if enabled {
+        state.telegram_token().await
+    } else {
+        None
+    }
+}
+
+/// The webhook URL, when the public URL is HTTPS (Telegram accepts nothing else).
+pub async fn webhook_url(state: &Shared) -> Option<String> {
+    state.public_url().await.filter(|u| u.starts_with("https://")).map(|u| format!("{u}{WEBHOOK_PATH}"))
+}
+
+async fn webhook_secret(state: &Shared) -> Result<String> {
+    let saved = state.db.setting("telegram.webhookSecret").await?;
+    if let Some(s) = saved.as_ref().and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        return Ok(s.to_string());
+    }
+    let s = crate::mcp::oauth::random_token(32);
+    state.db.set_setting("telegram.webhookSecret", &json!(s)).await?;
+    Ok(s)
+}
+
+/// Check the token, register the bot commands and tell Telegram where to send
+/// updates: the webhook when kongming has a public HTTPS URL, otherwise no
+/// webhook so long polling works (the usual case behind a firewall). The
+/// outcome is kept for the dashboard.
+pub async fn connect(state: &Shared, tg: &Telegram) -> Result<Value> {
+    let res = setup(state, tg).await;
+    *state.telegram_status.lock() = match &res {
+        Ok(v) => v.clone(),
+        Err(e) => json!({"ok": false, "error": format!("{e:#}")}),
+    };
+    res
+}
+
+async fn setup(state: &Shared, tg: &Telegram) -> Result<Value> {
+    let me = tg.call("getMe", json!({})).await?;
+    let bot = me.get("username").and_then(Value::as_str).unwrap_or("").to_string();
+    if let Err(e) = tg.call("setMyCommands", commands()).await {
+        tracing::warn!("telegram setMyCommands failed: {e:#}");
+    }
+    let webhook = webhook_url(state).await;
+    match &webhook {
+        Some(url) => {
+            let secret = webhook_secret(state).await?;
+            tg.call("setWebhook", json!({"url": url, "secret_token": secret, "allowed_updates": ["message"]})).await?;
+        }
+        None => {
+            tg.call("deleteWebhook", json!({})).await?;
+        }
+    }
+    let mode = if webhook.is_some() { "webhook" } else { "polling" };
+    tracing::info!(bot = %bot, mode, "telegram connected");
+    Ok(json!({"ok": true, "bot": bot, "mode": mode, "webhookUrl": webhook}))
+}
+
+/// Remove the webhook when Telegram is switched off or the token cleared.
+pub async fn disconnect(state: &Shared, token: String) {
+    let _ = client(state, token).call("deleteWebhook", json!({})).await;
+    *state.telegram_status.lock() = Value::Null;
+}
+
+async fn wait(state: &Shared, d: Duration) {
+    tokio::select! {
+        _ = state.telegram_reload.notified() => {}
+        _ = tokio::time::sleep(d) => {}
+    }
+}
+
+async fn unchanged(state: &Shared, token: &str, public: &Option<String>) -> bool {
+    active_token(state).await.as_deref() == Some(token) && state.public_url().await == *public
+}
+
+fn dispatch(state: &Shared, tg: &Telegram, update: &Value) {
+    if let Some(msg) = update.get("message") {
+        let (st, tg, msg) = (state.clone(), tg.clone(), msg.clone());
+        tokio::spawn(async move {
+            if let Err(e) = handle_message(st, tg, msg).await {
+                tracing::warn!("telegram message failed: {e:#}");
+            }
+        });
+    }
+}
+
+/// Keep Telegram connected until the process stops. In polling mode this runs
+/// getUpdates; in webhook mode updates arrive on `webhook` and this only
+/// watches for settings changes. A change in the dashboard wakes it at once.
 pub async fn run(state: Shared) {
     loop {
-        let Some(token) = state.telegram_token().await else {
-            tokio::time::sleep(Duration::from_secs(30)).await;
+        let Some(token) = active_token(&state).await else {
+            wait(&state, Duration::from_secs(60)).await;
             continue;
         };
-        let enabled = state
-            .db
-            .setting("telegram")
-            .await
-            .ok()
-            .flatten()
-            .and_then(|v| v.get("enabled").and_then(Value::as_bool))
-            .unwrap_or(true);
-        if !enabled {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            continue;
-        }
-        let tg = Telegram::new(state.http.clone(), token.clone());
-        {
-            match tg.call("getMe", json!({})).await {
-                Ok(me) => {
-                    tracing::info!(bot = %me.get("username").and_then(serde_json::Value::as_str).unwrap_or("?"), "telegram connected");
-                    let _ = tg
-                        .call(
-                            "setMyCommands",
-                            json!({"commands": [
-                                {"command": "new", "description": "Start a new conversation"},
-                                {"command": "agents", "description": "List agents"},
-                                {"command": "agent", "description": "Switch agent: /agent <handle>"},
-                                {"command": "skills", "description": "List skills"},
-                                {"command": "status", "description": "Show status"},
-                                {"command": "stop", "description": "Stop the current reply"},
-                                {"command": "help", "description": "Help"}
-                            ]}),
-                        )
-                        .await;
-                }
-                Err(e) => {
-                    tracing::warn!("telegram getMe failed: {e:#}");
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                    continue;
-                }
+        let tg = client(&state, token.clone());
+        let public = state.public_url().await;
+        let use_webhook = match connect(&state, &tg).await {
+            Ok(v) => v.get("mode").and_then(Value::as_str) == Some("webhook"),
+            Err(e) => {
+                tracing::warn!("telegram setup failed: {e:#}");
+                wait(&state, Duration::from_secs(30)).await;
+                continue;
             }
+        };
+        if use_webhook {
+            while unchanged(&state, &token, &public).await {
+                wait(&state, Duration::from_secs(60)).await;
+            }
+            continue;
         }
         let mut offset: i64 =
             state.db.setting("telegram.offset").await.ok().flatten().and_then(|v| v.as_i64()).unwrap_or(0);
-        loop {
-            // Token changed in settings: restart the outer loop.
-            if state.telegram_token().await.as_deref() != Some(token.as_str()) {
-                break;
-            }
-            let updates =
-                tg.call("getUpdates", json!({"offset": offset, "timeout": 50, "allowed_updates": ["message"]})).await;
+        while unchanged(&state, &token, &public).await {
+            let poll = tg.call("getUpdates", json!({"offset": offset, "timeout": 50, "allowed_updates": ["message"]}));
+            let updates = tokio::select! {
+                u = poll => u,
+                _ = state.telegram_reload.notified() => continue,
+            };
             let updates = match updates {
                 Ok(u) => u,
                 Err(e) => {
                     tracing::warn!("telegram poll failed: {e:#}");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    wait(&state, Duration::from_secs(5)).await;
                     continue;
                 }
             };
@@ -323,22 +422,34 @@ pub async fn run(state: Shared) {
             for u in list {
                 let id = u.get("update_id").and_then(Value::as_i64).unwrap_or(0);
                 offset = offset.max(id + 1);
-                if let Some(msg) = u.get("message") {
-                    let st = state.clone();
-                    let tg2 = tg.clone();
-                    let msg = msg.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = handle_message(st, tg2, msg).await {
-                            tracing::warn!("telegram message failed: {e:#}");
-                        }
-                    });
-                }
+                dispatch(&state, &tg, u);
             }
             if !list.is_empty() {
                 let _ = state.db.set_setting("telegram.offset", &json!(offset)).await;
             }
         }
     }
+}
+
+/// Webhook delivery from Telegram. The secret header, handed to Telegram in
+/// setWebhook, proves the call is genuine.
+pub async fn webhook(State(state): State<Shared>, headers: HeaderMap, Json(update): Json<Value>) -> StatusCode {
+    let Some(token) = active_token(&state).await else {
+        return StatusCode::NOT_FOUND;
+    };
+    let saved = state.db.setting("telegram.webhookSecret").await.ok().flatten();
+    let expected = saved.as_ref().and_then(Value::as_str).unwrap_or("");
+    let given = headers.get("x-telegram-bot-api-secret-token").and_then(|v| v.to_str().ok()).unwrap_or("");
+    if expected.is_empty() || !same(expected.as_bytes(), given.as_bytes()) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    dispatch(&state, &client(&state, token), &update);
+    StatusCode::OK
+}
+
+/// Constant-time comparison.
+fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 async fn session_for_chat(state: &Shared, chat_id: i64, fresh: bool) -> Result<crate::db::Session> {

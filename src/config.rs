@@ -1,7 +1,6 @@
 //! Process configuration. Only what is needed to reach Turso and to protect the
 //! UI comes from the environment; everything else (LLM provider, Telegram,
 //! agents, skills, MCP servers) lives in the database and is edited in the UI.
-//! Environment values act as defaults until a setting is saved.
 
 use clap::Parser;
 
@@ -16,10 +15,10 @@ pub struct Config {
     pub port: u16,
 
     /// Turso database URL (libsql://... or https://...).
-    #[arg(long, env = "TURSO_DATABASE_URL")]
+    #[arg(long, env = "KONGMING_TURSO_DATABASE_URL")]
     pub turso_url: String,
 
-    #[arg(long, env = "TURSO_AUTH_TOKEN", hide_env_values = true)]
+    #[arg(long, env = "KONGMING_TURSO_AUTH_TOKEN", hide_env_values = true)]
     pub turso_token: String,
 
     /// Password for the web UI. Empty disables authentication (loopback / tailnet only!).
@@ -34,25 +33,9 @@ pub struct Config {
     #[arg(long, env = "KONGMING_PUBLIC_URL")]
     pub public_url: Option<String>,
 
-    /// Default LLM provider: "openai" (any OpenAI-compatible endpoint) or "anthropic".
-    #[arg(long, env = "LLM_PROVIDER", default_value = "openai")]
-    pub llm_provider: String,
-
-    #[arg(long, env = "LLM_BASE_URL")]
-    pub llm_base_url: Option<String>,
-
-    #[arg(long, env = "LLM_API_KEY", hide_env_values = true)]
-    pub llm_api_key: Option<String>,
-
-    #[arg(long, env = "LLM_MODEL")]
-    pub llm_model: Option<String>,
-
-    #[arg(long, env = "TELEGRAM_BOT_TOKEN", hide_env_values = true)]
-    pub telegram_token: Option<String>,
-
-    /// Comma-separated Telegram user ids allowed to talk to the bot. Empty = nobody.
-    #[arg(long, env = "TELEGRAM_ALLOWED_USERS", default_value = "")]
-    pub telegram_allowed_users: String,
+    /// Telegram Bot API base URL (a self-hosted Bot API server, or a mock in tests).
+    #[arg(long, env = "KONGMING_TELEGRAM_API", default_value = "https://api.telegram.org", hide = true)]
+    pub telegram_api: String,
 
     /// Tokio worker threads. 1 is right for a 1 GB board.
     #[arg(long, env = "KONGMING_WORKERS", default_value_t = 1)]
@@ -71,10 +54,6 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn telegram_allowed(&self) -> Vec<i64> {
-        self.telegram_allowed_users.split(',').filter_map(|s| s.trim().parse().ok()).collect()
-    }
-
     /// Parse from an explicit argument list (tests) with no environment lookup
     /// beyond what clap does by itself.
     pub fn from_args<I, T>(args: I) -> Result<Config, clap::Error>
@@ -98,12 +77,10 @@ mod tests {
             "libsql://x.turso.io",
             "--turso-token",
             "t",
-            "--telegram-allowed-users",
-            "1, 22,x",
         ])
         .unwrap();
         assert_eq!(c.port, 18800);
-        assert_eq!(c.telegram_allowed(), vec![1, 22]);
+        assert_eq!(c.telegram_api, "https://api.telegram.org");
         assert_eq!(c.workers, 1);
     }
 }
