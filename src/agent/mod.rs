@@ -383,10 +383,7 @@ pub fn check_args(spec: Option<&ToolSpec>, args: &Value) -> Option<String> {
             ));
         }
     }
-    msg.push_str(&format!(
-        ". Expected arguments (JSON schema): {}",
-        crate::mcp::truncate(&schema.to_string(), 2000)
-    ));
+    msg.push_str(&format!(". Expected arguments (JSON schema): {}", crate::mcp::truncate(&schema.to_string(), 2000)));
     Some(msg)
 }
 
