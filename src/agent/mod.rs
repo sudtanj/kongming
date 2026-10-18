@@ -901,8 +901,8 @@ pub fn can_delegate(agent: &Agent, team: &[Agent]) -> bool {
     team.iter().any(|t| t.manager_id.as_deref() == Some(agent.id.as_str()))
 }
 
-/// Starter skills, inserted once when the skills table is empty. They teach
-/// the agents how to write good skills and how to work as a team.
+/// Starter skills, each inserted once (see `seed_skills`). They teach
+/// the agents how to write good skills, work as a team and use the shell and browser.
 pub const SEED_SKILLS: &[(&str, &str, &str, &[&str])] = &[
     (
         "writing-skills",
@@ -922,18 +922,71 @@ pub const SEED_SKILLS: &[(&str, &str, &str, &[&str])] = &[
         "# Memory hygiene\n\nStore (importance 3-5): who the user is, their timezone and language, systems and accounts they mention by name, standing preferences (format, tone, tools), decisions and corrections (\"never deploy on Fridays\").\n\nStore (importance 1-2): project facts likely to come up again in the next weeks.\n\nDo not store: secrets or tokens, anything already in a skill, one-off numbers, speculation. Prefer `kind: preference` for how the user likes things, `lesson` for what went wrong and the fix, `project` for ongoing work, `fact` for the rest. Keep each memory to one or two sentences and add 2-4 keywords for search.",
         &["meta"],
     ),
+    (
+        "shell-and-browser",
+        "Use when a task needs the local `shell` tool (BusyBox) or the Chrome browser through `cdp`: checking hosts, URLs and ports, quick text or number crunching, reading or operating web pages.",
+        r##"# The local shell (BusyBox) and the browser (cdp)
+
+The `shell` tool runs one `sh -c` script in a read-only BusyBox sandbox on the kongming board. It is for interacting, not for storage.
+
+## Rules of the sandbox
+- Nothing can be written to disk: `> file`, `tee`, `wget -O file`, `mkdir`, `touch`, `rm` fail ("Permission denied", "Read-only file system" or "File too large"). Pass data along with pipes and do everything a step needs in one command; nothing carries over between calls, so keep what matters in your own reply.
+- The environment is empty: no tokens or passwords. Never paste secrets into a command.
+- Time limit 30 s (`timeout_secs` up to 300). Background jobs are killed when the command ends.
+- The output starts with `exit N`; anything but `exit 0` failed, so read the message and fix the command instead of repeating it. Output over ~12,000 characters is cut in the middle: narrow it with `grep`, `sed -n`, `head -c`, `tail`.
+
+## Handy commands
+- Web and network: `wget -qO- URL | head -c 3000`, `wget -S --spider URL 2>&1 | head` (status and headers), `nc -z -w 3 HOST PORT && echo open`, `nslookup HOST`.
+- Text: `grep -E -i`, `sed -n '1,40p'`, `awk -F, '{print $2}'`, `sort | uniq -c | sort -rn`, `wc -l`, `cut`, `tr`.
+- Numbers and dates: `echo $((6*7))`, `awk 'BEGIN{printf "%.2f\n", 10/3}'`, `date -u`, `date -u -d @1700000000`.
+- JSON has no jq: pull fields with `grep -o '"name":"[^"]*"'`, or parse it in the browser with `cdp eval`.
+- `busybox --list` shows every applet.
+
+## Driving Chrome with cdp
+Only when the shell tool's description says a browser is connected. `cdp help` lists everything; page commands act on the first open tab unless you pass `--tab ID`.
+1. `cdp tabs` lists the tabs (id, title, url).
+2. `cdp goto URL` loads a page and waits for it.
+3. Read it: `cdp text | head -c 4000`, or search it: `cdp text | grep -i -n -A2 'price'`.
+4. Act: `cdp click 'CSS selector'`, `cdp type 'CSS selector' 'text'`, `cdp press Enter`, `cdp wait 'CSS selector'`, `cdp scroll`, `cdp back`. Check the result with `cdp url` and `cdp text` afterwards.
+5. Extract precisely with JavaScript: `cdp eval '[...document.querySelectorAll("a")].slice(0,30).map(a => a.innerText.trim() + " " + a.href).join("\n")'`.
+6. Anything else is a raw CDP command: `cdp call Page.reload`, `cdp call Emulation.setGeolocationOverride '{"latitude":1.3,"longitude":103.8,"accuracy":10}'`.
+- Chain steps in one call with `&&`, e.g. `cdp goto https://example.com && cdp click 'a.more' && cdp text | head -c 2000`.
+- Selectors: prefer ids, names and visible attributes (`input[name=q]`, `button[type=submit]`); find them with `cdp eval 'document.querySelector("form").outerHTML.slice(0,2000)'`.
+- The browser is the user's real profile and may be logged in: never buy, post, send, delete or change settings without the user's explicit OK, and never open a URL ending in `#stop-session` (it ends the browser session).
+- If `cdp` says the browser cannot be reached, the chrome-cdp session is not running: tell the user to start it instead of retrying."##,
+        &["tools", "browser"],
+    ),
 ];
 
 pub async fn seed_skills(state: &Shared) -> Result<()> {
-    if !state.db.skills().await?.is_empty() {
-        return Ok(());
-    }
+    // Which starter skills were ever added: a new one reaches existing
+    // databases, one the user deleted stays deleted.
+    let mut seeded: Vec<String> = match state.db.setting(SEEDED_SKILLS_KEY).await? {
+        Some(v) => serde_json::from_value(v).unwrap_or_default(),
+        // Before this was tracked the first three went in with an empty table.
+        None if !state.db.skills().await?.is_empty() => {
+            SEED_SKILLS.iter().take(3).map(|(name, ..)| name.to_string()).collect()
+        }
+        None => vec![],
+    };
+    let before = seeded.len();
     for (name, description, body, tags) in SEED_SKILLS {
-        let tags: Vec<String> = tags.iter().map(|t| t.to_string()).collect();
-        state.db.save_skill(name, description, body, &tags, "seed", None).await?;
+        if seeded.iter().any(|s| s == name) {
+            continue;
+        }
+        if state.db.skill_by_name(name).await?.is_none() {
+            let tags: Vec<String> = tags.iter().map(|t| t.to_string()).collect();
+            state.db.save_skill(name, description, body, &tags, "seed", None).await?;
+        }
+        seeded.push(name.to_string());
+    }
+    if seeded.len() != before || state.db.setting(SEEDED_SKILLS_KEY).await?.is_none() {
+        state.db.set_setting(SEEDED_SKILLS_KEY, &serde_json::json!(seeded)).await?;
     }
     Ok(())
 }
+
+const SEEDED_SKILLS_KEY: &str = "seeded_skills";
 
 #[cfg(test)]
 mod tests {

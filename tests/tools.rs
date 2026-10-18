@@ -371,3 +371,27 @@ async fn the_shell_tool_is_absent_when_turned_off() {
     assert_eq!(part["isError"], json!(true));
     assert!(str_of(part, "content").contains("unknown tool"), "{part}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn new_starter_skills_reach_existing_databases_once() {
+    let app = spawn_app(vec![]).await;
+    let db = &app.state.db;
+    // A database seeded before the shell skill existed: the first three, no record.
+    db.save_skill("writing-skills", "d", "# mine", &[], "seed", None).await.unwrap();
+    db.delete_skill("writing-skills").await.unwrap();
+    db.save_skill("team-delegation", "d", "# b", &[], "seed", None).await.unwrap();
+    kongming::agent::seed_skills(&app.state).await.unwrap();
+    let skill = db.skill_by_name("shell-and-browser").await.unwrap().expect("the shell skill is added");
+    assert!(skill.body.contains("cdp goto URL"), "{}", skill.body);
+    assert!(db.skill_by_name("writing-skills").await.unwrap().is_none(), "a deleted starter stays deleted");
+    assert_eq!(db.skill_by_name("team-delegation").await.unwrap().unwrap().body, "# b");
+
+    db.delete_skill("shell-and-browser").await.unwrap();
+    kongming::agent::seed_skills(&app.state).await.unwrap();
+    assert!(db.skill_by_name("shell-and-browser").await.unwrap().is_none(), "not re-added after deletion");
+
+    // A fresh database gets all of them.
+    let fresh = spawn_app(vec![]).await;
+    kongming::agent::seed_skills(&fresh.state).await.unwrap();
+    assert_eq!(fresh.state.db.skills().await.unwrap().len(), kongming::agent::SEED_SKILLS.len());
+}
