@@ -4,7 +4,7 @@
 mod support;
 
 use serde_json::{json, Value};
-use support::{part_types, poll_until, role, spawn_app, str_of, system_prompt, text, tool_call, tool_names};
+use support::{part_types, poll_until, role, spawn_app, spawn_app_with, str_of, system_prompt, text, tool_call, tool_names};
 
 fn find_tool_message(msgs: &[Value]) -> Option<&Value> {
     msgs.iter().find(|m| m["role"] == json!("tool"))
@@ -306,4 +306,32 @@ async fn an_empty_reply_after_tools_is_reported_not_silent() {
     let reply = app.send_wait(&sid, "what time is it?").await;
     assert_eq!(reply["stopReason"], json!("error"), "{reply}");
     assert!(str_of(&reply, "error").contains("empty reply after the tool results"), "{reply}");
+}
+
+fn search(q: &str) -> support::ScriptedReply {
+    tool_call("memory", json!({"action": "search", "query": q}))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_continues_by_itself_past_the_step_limit() {
+    let replies = vec![search("a"), search("b"), search("c"), text("done")];
+    let app = spawn_app_with(replies, &["--max-iterations", "2", "--auto-continue", "1"]).await;
+    app.disable_reflection().await;
+    let sid = app.create_session().await;
+    let reply = app.send_wait(&sid, "look it up").await;
+    assert_eq!(reply["text"], json!("done"), "{reply}");
+    assert_eq!(reply["stopReason"], json!("stop"), "{reply}");
+    assert_eq!(app.llm.requests().len(), 4);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_that_repeats_itself_stops_at_the_step_limit() {
+    let replies = vec![search("a"), search("a"), search("a"), text("done")];
+    let app = spawn_app_with(replies, &["--max-iterations", "2", "--auto-continue", "3"]).await;
+    app.disable_reflection().await;
+    let sid = app.create_session().await;
+    let reply = app.send_wait(&sid, "look it up").await;
+    assert_eq!(reply["stopReason"], json!("max_iterations"), "{reply}");
+    assert!(str_of(&reply, "text").contains("kept repeating"), "{reply}");
+    assert_eq!(app.llm.requests().len(), 2);
 }

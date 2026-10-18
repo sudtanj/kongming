@@ -44,9 +44,14 @@ pub struct Config {
     #[arg(long, env = "LOG_LEVEL", default_value = "info")]
     pub log_level: String,
 
-    /// Hard cap on agent loop iterations per turn.
+    /// Agent loop iterations (model rounds) per step block of a turn.
     #[arg(long, env = "KONGMING_MAX_ITERATIONS", default_value_t = 24)]
     pub max_iterations: usize,
+
+    /// Step blocks a turn carries on into by itself when it hits
+    /// `max_iterations` (0: stop and wait for "continue").
+    #[arg(long, env = "KONGMING_AUTO_CONTINUE", default_value_t = 4)]
+    pub auto_continue: usize,
 
     /// Approximate context budget in tokens before old turns are compacted.
     #[arg(long, env = "KONGMING_CONTEXT_TOKENS", default_value_t = 48_000)]

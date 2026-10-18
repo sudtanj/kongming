@@ -20,6 +20,8 @@ use crate::state::{Event, Shared};
 use tools::ToolCtx;
 
 const MAX_TOOL_RESULT_CHARS: usize = 16_000;
+/// Tool results from earlier step blocks, once a turn continues past the limit.
+const OLD_TOOL_RESULT_CHARS: usize = 1_500;
 const KEEP_RECENT_MESSAGES: usize = 12;
 const LLM_RETRIES: usize = 3;
 
@@ -387,6 +389,18 @@ pub fn check_args(spec: Option<&ToolSpec>, args: &Value) -> Option<String> {
     Some(msg)
 }
 
+/// Tool output the model has already acted on, cut down before a turn carries
+/// on past its step limit so the context does not keep growing at full size.
+fn shorten_tool_results(chat: &mut [ChatMessage]) {
+    for part in chat.iter_mut().flat_map(|m| m.parts.iter_mut()) {
+        if let Part::ToolResult { content, .. } = part {
+            if content.chars().count() > OLD_TOOL_RESULT_CHARS {
+                *content = crate::mcp::truncate(content, OLD_TOOL_RESULT_CHARS);
+            }
+        }
+    }
+}
+
 /// Run one user turn end to end. The user message is persisted here.
 pub async fn run_turn(state: Shared, mut session: Session, user_text: String, opts: TurnOptions) -> Result<TurnResult> {
     let Some(cancel) = state.begin_turn(&session.id) else {
@@ -465,7 +479,14 @@ async fn run_turn_inner(
     let mut used_tools = false;
     let mut retried_empty = false;
 
-    for iteration in 0..state.cfg.max_iterations {
+    // The step limit is a checkpoint, not the end: a long task carries on by
+    // itself for `auto_continue` more blocks unless it is going in circles.
+    let block = state.cfg.max_iterations.max(1);
+    let limit = block * (1 + state.cfg.auto_continue);
+    let mut seen = std::collections::HashSet::new();
+    let (mut block_calls, mut repeats) = (0usize, 0usize);
+
+    for iteration in 0..limit {
         if cancel.load(Ordering::Relaxed) {
             stop_reason = "cancelled".into();
             break;
@@ -545,6 +566,10 @@ async fn run_turn_inner(
         };
         let mut results = Vec::with_capacity(calls.len());
         for (id, name, args) in &calls {
+            block_calls += 1;
+            if !seen.insert(format!("{name} {args}")) {
+                repeats += 1;
+            }
             state.emit(Event::ToolCall {
                 session_id: session.id.clone(),
                 turn_id: turn_id.clone(),
@@ -584,16 +609,35 @@ async fn run_turn_inner(
         let tool_msg = state.db.append_message(&session.id, "tool", &results, Some(&plan.agent.id)).await?;
         state.emit(Event::Message { session_id: session.id.clone(), message: tool_msg });
         chat.push(ChatMessage { role: "tool".into(), parts: results });
-        if iteration + 1 == state.cfg.max_iterations {
-            stop_reason = "max_iterations".into();
-            let note = "I reached the step limit for one turn. Tell me to continue and I will pick up where I stopped.";
-            let m = state
-                .db
-                .append_message(&session.id, "assistant", &[Part::Text { text: note.into() }], Some(&plan.agent.id))
-                .await?;
-            state.emit(Event::Message { session_id: session.id.clone(), message: m });
-            final_text = note.into();
+        let step = iteration + 1;
+        if step % block != 0 {
+            continue;
         }
+        // Half the calls of the block were exact repeats: the model is stuck.
+        let looping = repeats * 2 >= block_calls;
+        if step < limit && !looping {
+            tracing::info!(session = %session.id, step, "step limit reached; continuing automatically");
+            shorten_tool_results(&mut chat);
+            seen.clear();
+            (block_calls, repeats) = (0, 0);
+            continue;
+        }
+        stop_reason = "max_iterations".into();
+        let note = if looping {
+            format!(
+                "I stopped after {step} steps because I kept repeating the same tool calls. Tell me how to proceed, \
+or to continue."
+            )
+        } else {
+            format!("I used all {step} steps allowed for one turn. Tell me to continue and I will pick up where I stopped.")
+        };
+        let m = state
+            .db
+            .append_message(&session.id, "assistant", &[Part::Text { text: note.clone() }], Some(&plan.agent.id))
+            .await?;
+        state.emit(Event::Message { session_id: session.id.clone(), message: m });
+        final_text = note;
+        break;
     }
 
     state.emit(Event::TurnEnd {

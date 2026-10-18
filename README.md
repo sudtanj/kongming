@@ -69,7 +69,8 @@ Only the Turso credentials and the process settings come from the environment:
 | `KONGMING_SECRET` | cookie signing secret (random per boot if unset) | |
 | `KONGMING_PUBLIC_URL` | public HTTPS base URL; only set it if kongming is reachable from the internet (MCP OAuth redirects, Telegram webhook). Can also be set in Settings | empty |
 | `KONGMING_WORKERS` | tokio workers | `1` |
-| `KONGMING_MAX_ITERATIONS` | tool-call rounds per turn | `24` |
+| `KONGMING_MAX_ITERATIONS` | tool-call rounds per step block of a turn | `24` |
+| `KONGMING_AUTO_CONTINUE` | extra step blocks a long turn runs on its own before asking you to continue (older tool output is shortened; a turn repeating the same calls stops early; `0` = always ask) | `4` |
 | `KONGMING_CONTEXT_TOKENS` | compaction threshold | `48000` |
 | `LOG_LEVEL` | tracing filter | `info` |
 
