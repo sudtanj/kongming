@@ -340,10 +340,7 @@ async fn a_turn_that_repeats_itself_stops_at_the_step_limit() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_shell_tool_runs_commands_without_the_daemon_secrets() {
-    let replies = vec![
-        tool_call("shell", json!({"command": "echo 6x7=$((6*7)); env | grep -c -i turso"})),
-        text("42"),
-    ];
+    let replies = vec![tool_call("shell", json!({"command": "echo 6x7=$((6*7)); env | grep -c -i turso"})), text("42")];
     let app = spawn_app_with(replies, &["--shell", "/bin/sh"]).await;
     app.disable_reflection().await;
     let sid = app.create_session().await;
