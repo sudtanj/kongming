@@ -39,12 +39,15 @@ pub struct Shell {
     pub sh: PathBuf,
     pub workdir: PathBuf,
     path: String,
+    /// Browser for the `cdp` command, passed on as `CDP_URL`.
+    pub cdp_url: Option<String>,
 }
 
 impl Shell {
     /// `shell`: path to a POSIX sh, "off" to disable, empty for the bundled
     /// BusyBox when it exists. `workdir`: empty for `<tmp>/kongming-work`.
-    pub fn from_config(shell: &str, workdir: &str) -> Option<Shell> {
+    /// `cdp_url`: the Chrome DevTools endpoint, empty for none.
+    pub fn from_config(shell: &str, workdir: &str, cdp_url: &str) -> Option<Shell> {
         let sh = match shell.trim() {
             "off" | "none" | "false" | "0" => return None,
             "" if std::path::Path::new(BUSYBOX_SH).exists() => PathBuf::from(BUSYBOX_SH),
@@ -57,15 +60,16 @@ impl Shell {
             "" => std::env::temp_dir().join("kongming-work"),
             w => PathBuf::from(w),
         };
-        Some(Shell { sh, workdir, path })
+        let cdp_url = Some(cdp_url.trim().to_string()).filter(|u| !u.is_empty());
+        Some(Shell { sh, workdir, path, cdp_url })
     }
 
     /// Run `command`; returns the output with its exit status and whether it failed.
     pub async fn run(&self, command: &str, timeout_secs: u64) -> Result<(String, bool)> {
         tokio::fs::create_dir_all(&self.workdir).await.context("creating the shell working directory")?;
         let secs = timeout_secs.clamp(1, MAX_TIMEOUT);
-        let mut child = Command::new(&self.sh)
-            .arg("-c")
+        let mut cmd = Command::new(&self.sh);
+        cmd.arg("-c")
             .arg(format!("{PRELUDE}{command}"))
             .current_dir(&self.workdir)
             .env_clear()
@@ -78,9 +82,11 @@ impl Shell {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .process_group(0)
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| format!("starting {}", self.sh.display()))?;
+            .kill_on_drop(true);
+        if let Some(url) = &self.cdp_url {
+            cmd.env("CDP_URL", url);
+        }
+        let mut child = cmd.spawn().with_context(|| format!("starting {}", self.sh.display()))?;
         let pgid = child.id().map(|p| p as i32);
         let mut out = child.stdout.take().context("shell stdout")?;
 
@@ -155,15 +161,17 @@ mod tests {
 
     fn sh() -> Shell {
         let dir = std::env::temp_dir().join(format!("kongming-shell-test-{}", uuid::Uuid::new_v4()));
-        Shell::from_config("/bin/sh", &dir.display().to_string()).unwrap()
+        Shell::from_config("/bin/sh", &dir.display().to_string(), "").unwrap()
     }
 
     #[test]
     fn config_picks_the_shell() {
-        assert!(Shell::from_config("off", "").is_none());
-        let s = Shell::from_config("/bin/sh", "/work").unwrap();
+        assert!(Shell::from_config("off", "", "").is_none());
+        let s = Shell::from_config("/bin/sh", "/work", " http://100.64.0.9:9222 ").unwrap();
         assert_eq!(s.workdir, PathBuf::from("/work"));
         assert!(s.path.starts_with("/bin:"));
+        assert_eq!(s.cdp_url.as_deref(), Some("http://100.64.0.9:9222"));
+        assert!(Shell::from_config("/bin/sh", "", "").unwrap().cdp_url.is_none());
     }
 
     #[test]

@@ -25,7 +25,7 @@ fn obj(props: Value, required: &[&str]) -> Value {
     json!({"type": "object", "properties": props, "required": required, "additionalProperties": false})
 }
 
-pub fn builtin_specs(agent: &Agent, can_delegate: bool, with_shell: bool) -> Vec<ToolSpec> {
+pub fn builtin_specs(agent: &Agent, can_delegate: bool, sh: Option<&shell::Shell>) -> Vec<ToolSpec> {
     let mut v = vec![
         ToolSpec {
             name: "skill_view".into(),
@@ -58,14 +58,24 @@ pub fn builtin_specs(agent: &Agent, can_delegate: bool, with_shell: bool) -> Vec
             parameters: obj(json!({}), &[]),
         },
     ];
-    if with_shell {
-        v.push(ToolSpec {
-            name: "shell".into(),
-            description: "Run a command in a local, isolated POSIX shell (BusyBox: sh, ls, cat, grep, sed, awk, find, \
+    if let Some(sh) = sh {
+        let mut description = "Run a command in a local, isolated POSIX shell (BusyBox: sh, ls, cat, grep, sed, awk, find, \
 sort, wc, tar, gzip, wget, nc, nslookup, …) and get its output and exit code. The working directory is a small \
 scratch disk in memory; files there stay between calls until kongming restarts. Nothing secret is reachable from it. \
-Use it for calculations, text and file processing, quick scripts and for checking hosts, ports or URLs from this machine."
-                .into(),
+Use it for calculations, text and file processing, quick scripts and for checking hosts, ports or URLs from this machine \
+and the tailnet."
+            .to_string();
+        if sh.cdp_url.is_some() {
+            description.push_str(
+                " A real Chrome browser on the tailnet is connected (the endpoint Playwright's connectOverCDP uses): drive \
+it with the `cdp` command, e.g. `cdp tabs`, `cdp goto URL`, `cdp text | head -c 4000`, `cdp click 'SELECTOR'`, \
+`cdp type 'SELECTOR' 'TEXT'`, `cdp press Enter`, `cdp eval 'JS'`; `cdp help` lists everything. Use it for pages \
+that need JavaScript or a logged-in session.",
+            );
+        }
+        v.push(ToolSpec {
+            name: "shell".into(),
+            description,
             parameters: obj(
                 json!({
                     "command": {"type": "string", "description": "shell script to run with sh -c; stderr is merged into the output"},
@@ -679,7 +689,8 @@ mod tests {
 
     #[test]
     fn specs_follow_agent_permissions() {
-        let names = |a: &Agent, d: bool| builtin_specs(a, d, true).into_iter().map(|t| t.name).collect::<Vec<_>>();
+        let sh = shell::Shell::from_config("/bin/sh", "", "").unwrap();
+        let names = |a: &Agent, d: bool| builtin_specs(a, d, Some(&sh)).into_iter().map(|t| t.name).collect::<Vec<_>>();
         let full = names(&agent(true, None), true);
         assert!(full.contains(&"skill_manage".to_string()));
         assert!(full.contains(&"delegate_task".to_string()));

@@ -1,6 +1,6 @@
 # kongming — notes for coding agents
 
-Single Rust binary (`src/main.rs` + `src/lib.rs`). No local storage: every row is on Turso over its HTTP pipeline API (`src/db/turso.rs`); the Docker image runs read-only. Target is an Orange Pi Zero 3 (1 GB RAM), so: one tokio worker, no C SQLite in the release binary, small dependencies, nothing spawned beside the daemon except the `shell` tool's BusyBox `sh` (`agent/shell.rs`: empty env, tmpfs workdir, process group killed on timeout; the daemon is non-dumpable so `/proc` does not leak its env). Local/stdio MCP servers are still refused on purpose.
+Single Rust binary (`src/main.rs` + `src/lib.rs`). No local storage: every row is on Turso over its HTTP pipeline API (`src/db/turso.rs`); the Docker image runs read-only. Target is an Orange Pi Zero 3 (1 GB RAM), so: one tokio worker, no C SQLite in the release binary, small dependencies, nothing spawned beside the daemon except the `shell` tool's BusyBox `sh` (`agent/shell.rs`: empty env, tmpfs workdir, process group killed on timeout; the daemon is non-dumpable so `/proc` does not leak its env). `cdp.rs` is a tiny CDP/WebSocket client run as `kongming cdp …` (or the `cdp` link) from that shell. Local/stdio MCP servers are still refused on purpose.
 
 Layout:
 - `db/` store + schema (`SCHEMA` is idempotent, re-applied at boot) + row models (camelCase JSON).

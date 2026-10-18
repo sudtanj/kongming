@@ -10,6 +10,15 @@ use kongming::{agent, config, cron, db, state, telegram, web};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
+    // `kongming cdp ...` (or the `cdp` link in the image) is the browser client for the shell tool.
+    let args: Vec<String> = std::env::args().collect();
+    let prog = args.first().map(|a| a.rsplit('/').next().unwrap_or(a).to_string()).unwrap_or_default();
+    if prog == "cdp" {
+        std::process::exit(kongming::cdp::main(args[1..].to_vec()));
+    }
+    if args.get(1).map(String::as_str) == Some("cdp") {
+        std::process::exit(kongming::cdp::main(args[2..].to_vec()));
+    }
     let cfg = config::Config::parse();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_new(&cfg.log_level).unwrap_or_else(|_| EnvFilter::new("info")))

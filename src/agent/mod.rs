@@ -203,7 +203,7 @@ async fn plan(state: &Shared, session: &Session, agent: Agent, mentions: &mentio
     }
 
     // Tools: built-ins + MCP (restricted per agent, plus @mcp: mentions).
-    let mut tool_specs = tools::builtin_specs(&agent, can_delegate, state.shell.is_some());
+    let mut tool_specs = tools::builtin_specs(&agent, can_delegate, state.shell.as_ref());
     let mut allowed = agent.mcp_servers.clone();
     if let Some(a) = &mut allowed {
         a.extend(mentions.mcp.iter().cloned());
@@ -627,7 +627,7 @@ async fn run_turn_inner(
         if hired && !plan.can_delegate {
             plan.can_delegate = true;
             plan.tools.extend(
-                tools::builtin_specs(&plan.agent, true, false).into_iter().filter(|t| t.name == "delegate_task"),
+                tools::builtin_specs(&plan.agent, true, None).into_iter().filter(|t| t.name == "delegate_task"),
             );
         }
         let tool_msg = state.db.append_message(&session.id, "tool", &results, Some(&plan.agent.id)).await?;
@@ -745,7 +745,7 @@ async fn reflect(state: Shared, agent: Agent, session: Session, model: String) -
         }
     }
     let system = prompt::reflection_prompt(&agent, &skills);
-    let specs: Vec<ToolSpec> = tools::builtin_specs(&agent, false, false)
+    let specs: Vec<ToolSpec> = tools::builtin_specs(&agent, false, None)
         .into_iter()
         .filter(|t| t.name == "skill_manage" || t.name == "memory" || t.name == "skill_view")
         .collect();
