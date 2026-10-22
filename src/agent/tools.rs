@@ -94,12 +94,12 @@ how to use it for particular jobs."
         });
         v.push(ToolSpec {
             name: "memory".into(),
-            description: "Long-term memory shared across conversations. add: store a durable fact/preference/lesson. search: find memories. remove: delete one by id.".into(),
+            description: "Long-term memory shared across conversations. add: store a durable fact/preference/lesson. search: find memories. remove: delete one by id. Kind `interest` is a topic, product, person or project the user follows; `watch` is something the user asked to be told about later (check-ins look at both).".into(),
             parameters: obj(
                 json!({
                     "action": {"type": "string", "enum": ["add", "search", "remove"]},
                     "content": {"type": "string", "description": "add: the fact to remember (one or two sentences)"},
-                    "kind": {"type": "string", "enum": ["fact", "preference", "lesson", "project"]},
+                    "kind": {"type": "string", "enum": ["fact", "preference", "lesson", "project", "interest", "watch"]},
                     "keywords": {"type": "array", "items": {"type": "string"}},
                     "importance": {"type": "integer", "minimum": 1, "maximum": 5},
                     "shared": {"type": "boolean", "description": "add: visible to every agent (default true)"},
@@ -132,6 +132,42 @@ is no longer needed (its past conversations stay). Create an agent for a recurri
                     "model": {"type": "string", "description": "model override; omit to use the default model"}
                 }),
                 &["op", "handle"],
+            ),
+        });
+        v.push(ToolSpec {
+            name: "notify_user".into(),
+            description: "Message the user on Telegram when they are not in this conversation: something they asked to be \
+told about, a reminder, a result of work they are waiting for, or something new and clearly relevant to their interests. \
+Never for small talk or what they already know. One topic per message, short, key fact first. The same topic is not sent \
+twice in a row, there is a daily limit, and in quiet hours it arrives silently."
+                .into(),
+            parameters: obj(
+                json!({
+                    "message": {"type": "string", "description": "Markdown, a few lines at most, with a link when there is one"},
+                    "topic": {"type": "string", "description": "short label of what it is about, e.g. 'RTX 5070 price drop'"},
+                    "requested": {"type": "boolean", "description": "true when the user explicitly asked to be told about this"},
+                    "urgent": {"type": "boolean", "description": "time-critical: sound even in quiet hours"}
+                }),
+                &["message", "topic"],
+            ),
+        });
+        v.push(ToolSpec {
+            name: "schedule".into(),
+            description: "Plan work for later; it runs as you in its own conversation. create: a reminder or a recurring \
+check. Use notify `always` to send the result to the user every time (reminders, briefings) and `if_needed` for watches, \
+where the run messages the user with notify_user only when the condition is met. list: scheduled jobs. cancel: remove one \
+by id or name."
+                .into(),
+            parameters: obj(
+                json!({
+                    "op": {"type": "string", "enum": ["create", "list", "cancel"]},
+                    "name": {"type": "string", "description": "create: short title; cancel: the job's name"},
+                    "when": {"type": "string", "description": "create: 'in:<minutes>' or 'at:<RFC 3339 time with offset>' for once, e.g. at:2026-10-23T09:00:00+07:00; 'every:<minutes>' or a 5-field cron expression in UTC for recurring"},
+                    "task": {"type": "string", "description": "create: complete instructions for the run, which cannot see this conversation: what to check or do, the condition worth telling the user about, links"},
+                    "notify": {"type": "string", "enum": ["always", "if_needed"], "description": "create: default if_needed"},
+                    "id": {"type": "string", "description": "cancel: job id"}
+                }),
+                &["op"],
             ),
         });
     }
@@ -178,6 +214,8 @@ pub async fn run_builtin(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Option<
         "current_time" => Ok(current_time()),
         "delegate_task" => delegate(ctx, args).await,
         "agent_manage" => agent_manage(ctx, args).await,
+        "notify_user" => notify_user(ctx, args).await,
+        "schedule" => schedule(ctx, args).await,
         "shell" => return Some(run_shell(ctx, args).await),
         _ => return None,
     };
@@ -650,6 +688,140 @@ async fn agent_manage(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
     ctx.state.db.log_improvement(Some(&ctx.agent.id), Some(&ctx.session.id), kind, Some(&a.id), &note).await?;
     ctx.state.emit(Event::Improvement { kind: kind.into(), note: note.clone(), agent_id: Some(ctx.agent.id.clone()) });
     Ok(format!("{note}. Hand it work with delegate_task (agent: \"{}\").", a.handle))
+}
+
+async fn notify_user(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
+    if !ctx.agent.is_default {
+        bail!("only the lead agent talks to the user; report to your manager instead");
+    }
+    if ctx.session.channel == "telegram" {
+        bail!("you are talking with the user on Telegram right now; just answer here");
+    }
+    let flag = |k: &str| args.get(k).and_then(Value::as_bool).unwrap_or(false);
+    crate::proactive::notify(
+        ctx.state,
+        ctx.agent,
+        Some(ctx.session),
+        s(args, "topic"),
+        s(args, "message"),
+        flag("requested"),
+        flag("urgent"),
+    )
+    .await
+}
+
+/// Added to the task of an `if_needed` job.
+const IF_NEEDED: &str = "\n\n(This is a scheduled check. If the condition above is met or something changed that the \
+user should know, tell them with notify_user (requested: true). Otherwise send nothing and answer `nothing to report`.)";
+
+async fn schedule(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
+    if !ctx.agent.is_default {
+        bail!("only the lead agent schedules work");
+    }
+    let now = crate::db::now_ms();
+    let fmt_time = |ms: i64| {
+        let fmt = time::macros::format_description!("[year]-[month]-[day] [hour]:[minute] UTC");
+        time::OffsetDateTime::from_unix_timestamp(ms / 1000).ok().and_then(|t| t.format(&fmt).ok()).unwrap_or_default()
+    };
+    match s(args, "op") {
+        "list" => {
+            let jobs = ctx.state.db.cron_jobs().await?;
+            if jobs.is_empty() {
+                return Ok("nothing scheduled".into());
+            }
+            Ok(jobs
+                .iter()
+                .map(|j| {
+                    format!(
+                        "- {} `{}` [{}] {}, next: {}, last: {} — {}",
+                        j.id,
+                        j.name,
+                        j.schedule,
+                        if j.enabled { "on" } else { "off" },
+                        j.next_run_at.map(fmt_time).unwrap_or_else(|| "—".into()),
+                        j.last_status.as_deref().unwrap_or("—"),
+                        crate::mcp::truncate(j.prompt.trim(), 160)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n"))
+        }
+        "cancel" => {
+            let (id, name) = (s(args, "id").trim(), s(args, "name").trim());
+            let jobs = ctx.state.db.cron_jobs().await?;
+            let job = jobs
+                .iter()
+                .find(|j| (!id.is_empty() && j.id == id) || (!name.is_empty() && j.name.eq_ignore_ascii_case(name)))
+                .ok_or_else(|| anyhow!("no scheduled job with that id or name; use op list"))?;
+            ctx.state.db.delete_cron_job(&job.id).await?;
+            Ok(format!("cancelled `{}`", job.name))
+        }
+        "create" => {
+            let name = s(args, "name").trim();
+            let task = s(args, "task").trim();
+            if name.is_empty() || task.is_empty() {
+                bail!("name and task are required");
+            }
+            let when = s(args, "when").trim();
+            let schedule = match when.strip_prefix("in:") {
+                Some(m) => {
+                    let mins: i64 = m
+                        .trim()
+                        .parse()
+                        .ok()
+                        .filter(|m| *m >= 1)
+                        .ok_or_else(|| anyhow!("in:<minutes> needs a whole number of minutes"))?;
+                    format!("at:{}", now + mins * 60_000)
+                }
+                None => when.to_string(),
+            };
+            let next = crate::cron::next_run(&schedule, now).ok_or_else(|| {
+                anyhow!("when must be in:<minutes>, at:<future RFC 3339 time with offset, e.g. 2026-10-23T09:00:00+07:00>, every:<minutes> or a 5-field cron expression in UTC")
+            })?;
+            let always = match s(args, "notify") {
+                "always" => true,
+                "" | "if_needed" => false,
+                other => bail!("unknown notify '{other}' (always|if_needed)"),
+            };
+            let deliver_to = if always {
+                let chat = ctx.state.telegram_allowed().await.first().copied();
+                Some(
+                    chat.ok_or_else(|| anyhow!("Telegram is not set up, so results cannot be sent to the user"))?
+                        .to_string(),
+                )
+            } else {
+                None
+            };
+            let job = crate::db::CronJob {
+                id: crate::db::new_id(),
+                name: name.to_string(),
+                agent_id: ctx.agent.id.clone(),
+                schedule,
+                prompt: if always { task.to_string() } else { format!("{task}{IF_NEEDED}") },
+                enabled: true,
+                deliver_to,
+                last_run_at: None,
+                next_run_at: Some(next),
+                last_status: None,
+                created_at: now,
+            };
+            ctx.state.db.upsert_cron_job(&job).await?;
+            let note = format!("Scheduled `{}` ({})", job.name, job.schedule);
+            ctx.state
+                .db
+                .log_improvement(Some(&ctx.agent.id), Some(&ctx.session.id), "scheduled", Some(&job.id), &note)
+                .await?;
+            ctx.state.emit(Event::Improvement { kind: "scheduled".into(), note, agent_id: Some(ctx.agent.id.clone()) });
+            Ok(format!(
+                "scheduled `{}` (id {}), first run {}{}",
+                job.name,
+                job.id,
+                fmt_time(next),
+                if always { ", the result goes to the user on Telegram" } else { "" }
+            ))
+        }
+        other => bail!("unknown op '{other}' (create|list|cancel)"),
+    }
 }
 
 async fn delegate(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {

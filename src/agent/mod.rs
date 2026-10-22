@@ -290,6 +290,11 @@ async fn plan(state: &Shared, session: &Session, agent: Agent, mentions: &mentio
 
     let (pcfg, _) = state.provider().await?;
     let model = agent.model.clone().filter(|m| !m.is_empty()).unwrap_or(pcfg.model.clone());
+    let proactive = crate::proactive::settings(state).await;
+    let local_time = match proactive.utc_offset_minutes {
+        0 => String::new(),
+        _ => proactive.local_time(crate::db::now_ms()),
+    };
     let system = prompt::build(&prompt::PromptInput {
         agent: &agent,
         team: &team,
@@ -301,6 +306,7 @@ async fn plan(state: &Shared, session: &Session, agent: Agent, mentions: &mentio
         can_delegate,
         extra_context: &extra,
         now_utc: &now_utc_string(),
+        local_time: &local_time,
     });
     Ok(TurnPlan { agent, system, tools: tool_specs, mcp_names, model, can_delegate })
 }

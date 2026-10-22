@@ -661,6 +661,7 @@ pub async fn get_settings(State(state): State<Shared>) -> R {
         "llm": llm.redacted(),
         "telegram": telegram,
         "reflection": all.get("reflection").cloned().unwrap_or(json!({"enabled": true})),
+        "proactive": proactive_json(&state).await?,
         "publicUrl": state.public_url().await,
         "ui": all.get("ui").cloned().unwrap_or(json!({})),
     })))
@@ -738,6 +739,10 @@ pub async fn put_settings(State(state): State<Shared>, Json(body): Json<Value>) 
     if let Some(r) = body.get("reflection") {
         state.db.set_setting("reflection", r).await?;
     }
+    if let Some(p) = body.get("proactive") {
+        let merged = crate::proactive::settings(&state).await.merged(p).map_err(bad)?;
+        crate::proactive::save(&state, &merged).await?;
+    }
     if let Some(p) = body.get("publicUrl") {
         state.db.set_setting("publicUrl", &json!(p.as_str().unwrap_or("").trim().trim_end_matches('/'))).await?;
     }
@@ -758,6 +763,28 @@ pub async fn put_settings(State(state): State<Shared>, Json(body): Json<Value>) 
         state.telegram_reload.notify_one();
     }
     get_settings(State(state)).await
+}
+
+/// Proactive settings plus what happened lately, for Settings → Channels.
+async fn proactive_json(state: &Shared) -> Result<Value, ApiError> {
+    let mut v = crate::proactive::settings(state).await.to_json();
+    let recent = state.db.notifications(now_ms() - 7 * 86_400_000, 10).await?;
+    v["lastCheckIn"] = json!(crate::proactive::last_run(state).await);
+    v["recent"] = json!(recent);
+    Ok(v)
+}
+
+/// Run a proactive check-in now; it messages on Telegram if anything is worth it.
+pub async fn run_check_in(State(state): State<Shared>) -> R {
+    if crate::telegram::active_token(&state).await.is_none() {
+        return Err(bad("set up Telegram first: check-ins reach you there"));
+    }
+    tokio::spawn(async move {
+        if let Err(e) = crate::proactive::check_in(&state, true).await {
+            tracing::warn!("manual check-in failed: {e:#}");
+        }
+    });
+    Ok(Json(json!({"ok": true})))
 }
 
 pub async fn test_llm(State(state): State<Shared>) -> R {
@@ -802,8 +829,9 @@ async fn cron_from_body(state: &Shared, existing: Option<CronJob>, body: &Value)
     // Scheduled prompts go to the lead agent like everything else the user says.
     c.agent_id = lead_agent(state, body).await?.id;
     if let Some(sch) = s(body, "schedule") {
-        crate::cron::next_run(sch, now_ms())
-            .ok_or_else(|| bad("schedule must be 'every:<minutes>' or a 5-field cron expression"))?;
+        crate::cron::next_run(sch, now_ms()).ok_or_else(|| {
+            bad("schedule must be 'every:<minutes>', 'at:<time in the future>' or a 5-field cron expression")
+        })?;
         c.schedule = sch.to_string();
     }
     if let Some(p) = s(body, "prompt") {

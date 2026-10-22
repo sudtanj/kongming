@@ -297,12 +297,28 @@ const STRINGS = {
     'channels.enabled': 'Enable Telegram',
     'channels.thinking': 'Show thinking',
     'channels.thinkingDesc': 'Post the model\'s reasoning and the tools it calls in a message above each answer, updated live. The reasoning is in a collapsed quote; tap it to expand.',
+    'proactive.title': 'Proactive messages',
+    'proactive.enabled': 'Message me on my own',
+    'proactive.enabledDesc': 'Kongming checks in now and then and messages you on Telegram when something is new and worth it: things you asked it to watch, upcoming plans, news on your interests, finished work. Reminders and watches you asked for still come when this is off.',
+    'proactive.needsTelegram': 'Needs Telegram above: proactive messages go there.',
+    'proactive.interval': 'Check-in every (minutes)',
+    'proactive.intervalDesc': '15 to 10080, or 0 for no check-ins. Each one is a short agent run. Last: {{when}}.',
+    'proactive.maxPerDay': 'At most per day',
+    'proactive.maxPerDayDesc': 'Messages you did not ask for, in any 24 hours.',
+    'proactive.quiet': 'Quiet hours',
+    'proactive.quietDesc': 'Local hours, e.g. 22-7: no check-ins, and messages arrive silently unless urgent. Empty for none.',
+    'proactive.offset': 'Your time zone',
+    'proactive.offsetDesc': 'UTC offset such as +07:00, for quiet hours and so the agents know your local time.',
+    'proactive.recent': 'Sent lately',
+    'proactive.recentNone': 'Nothing in the last 7 days.',
+    'proactive.checkNow': 'Check in now',
+    'proactive.checking': 'Checking; you get a Telegram message if there is something worth telling.',
     'automations.title': 'Automations',
     'automations.desc': 'Scheduled prompts. Schedules run in UTC.',
     'automations.new': 'New automation',
     'automations.name': 'Name',
     'automations.schedule': 'Schedule',
-    'automations.scheduleDesc': 'every:30 (minutes) or a 5-field cron expression, UTC.',
+    'automations.scheduleDesc': 'every:30 (minutes), at:2026-10-23T09:00:00+07:00 (once) or a 5-field cron expression, UTC.',
     'automations.prompt': 'Prompt',
     'automations.deliverTo': 'Deliver to Telegram chat',
     'automations.deliverToDesc': 'Chat ID, optional.',
@@ -339,6 +355,9 @@ const STRINGS = {
     'activity.kind.agent_created': 'Agent hired',
     'activity.kind.agent_updated': 'Agent updated',
     'activity.kind.agent_retired': 'Agent retired',
+    'activity.kind.notification': 'Messaged you',
+    'activity.kind.check_in': 'Check-in',
+    'activity.kind.scheduled': 'Scheduled',
     'toast.learned': 'Learned: {{note}}',
     'about.title': 'About',
     'about.desc': 'kongming is a small agentic daemon: a team of agents, skills that grow, and tools over MCP. It is named after 孔明 Kongming, the courtesy name of 诸葛亮 Zhuge Liang, the strategist of the Three Kingdoms who planned and directed rather than fought. His feather fan (羽扇) is the logo.',
@@ -1721,8 +1740,25 @@ const settings = (() => {
         row(t('channels.connection'), conn ? (conn.ok ? (conn.mode === 'webhook' ? t('channels.modeWebhook', { url: conn.webhookUrl }) : t('channels.modePolling')) : conn.error) : t('channels.connectionDesc'), connPill),
         row(t('channels.allowed'), t('channels.allowedDesc'), allowed),
         row(t('channels.thinking'), t('channels.thinkingDesc'), switchEl(tg.showThinking !== false, (v) => api.put('/api/settings', { telegram: { showThinking: v } }), t('channels.thinking')), { switch: true }),
-        h('div', { class: 'settings-footer' }, h('span'), h('div', { class: 'acts' }, saveBtn(null, async () => { const b = { allowedUsers: allowed.value }; if (token.value) b.token = token.value; await api.put('/api/settings', { telegram: b }); reload(); })))));
+        h('div', { class: 'settings-footer' }, h('span'), h('div', { class: 'acts' }, saveBtn(null, async () => { const b = { allowedUsers: allowed.value }; if (token.value) b.token = token.value; await api.put('/api/settings', { telegram: b }); reload(); })))),
+      proactiveSection(st.proactive || {}, tg.tokenSet && tg.enabled !== false));
   };
+  function proactiveSection(p, ready) {
+    const interval = input({ value: String(p.intervalMinutes ?? 180), inputmode: 'numeric', placeholder: '180' });
+    const maxPerDay = input({ value: String(p.maxPerDay ?? 5), inputmode: 'numeric', placeholder: '5' });
+    const quiet = input({ value: p.quietHours || '', placeholder: '22-7' });
+    const offset = input({ value: p.utcOffset || '+00:00', placeholder: '+07:00' });
+    const checkBtn = h('button', { class: 'btn outline sm', type: 'button', disabled: !ready, onClick: async () => { checkBtn.disabled = true; try { await api.post('/api/proactive/run'); toast(t('proactive.checking')); } catch (e) { toast(e.message, 'err'); } checkBtn.disabled = false; } }, icon('play'), t('proactive.checkNow'));
+    const recent = (p.recent || []).filter((n) => n.delivered > 0);
+    return section(t('proactive.title'),
+      row(t('proactive.enabled'), ready ? t('proactive.enabledDesc') : t('proactive.needsTelegram'), switchEl(p.enabled !== false, (v) => api.put('/api/settings', { proactive: { enabled: v } }), t('proactive.enabled')), { switch: true }),
+      row(t('proactive.interval'), t('proactive.intervalDesc', { when: p.lastCheckIn ? relTime(p.lastCheckIn) : '—' }), interval),
+      row(t('proactive.maxPerDay'), t('proactive.maxPerDayDesc'), maxPerDay),
+      row(t('proactive.quiet'), t('proactive.quietDesc'), quiet),
+      row(t('proactive.offset'), t('proactive.offsetDesc'), offset),
+      row(t('proactive.recent'), recent.length ? null : t('proactive.recentNone'), recent.length ? h('div', { class: 'lr-sub' }, recent.map((n) => h('div', {}, relTime(n.createdAt) + ' · ' + n.topic))) : h('span')),
+      h('div', { class: 'settings-footer' }, checkBtn, h('div', { class: 'acts' }, saveBtn(null, async () => { await api.put('/api/settings', { proactive: { intervalMinutes: interval.value.trim(), maxPerDay: maxPerDay.value.trim(), quietHours: quiet.value.trim(), utcOffset: offset.value.trim() } }); reload(); }))));
+  }
 
   /* ---- automations ---- */
   pages.automations = async (query) => {

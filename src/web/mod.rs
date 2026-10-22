@@ -80,6 +80,7 @@ pub fn router(state: Shared) -> Router {
         .route("/mcp/:id/oauth/disconnect", post(api::mcp_oauth_disconnect))
         .route("/settings", get(api::get_settings).put(api::put_settings))
         .route("/settings/test-llm", post(api::test_llm))
+        .route("/proactive/run", post(api::run_check_in))
         .route("/cron", get(api::list_cron).post(api::create_cron))
         .route("/cron/:id", axum::routing::put(api::update_cron).delete(api::delete_cron))
         .route("/cron/:id/run", post(api::run_cron))

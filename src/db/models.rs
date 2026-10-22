@@ -230,7 +230,7 @@ pub struct Memory {
     pub id: String,
     /// `None` = shared by every agent.
     pub agent_id: Option<String>,
-    /// "fact" | "preference" | "lesson" | "project"
+    /// "fact" | "preference" | "lesson" | "project" | "interest" | "watch"
     pub kind: String,
     pub content: String,
     pub keywords: Vec<String>,
@@ -375,7 +375,7 @@ pub struct CronJob {
     pub id: String,
     pub name: String,
     pub agent_id: String,
-    /// `every:<minutes>` or a 5-field cron expression (minute hour dom month dow, UTC).
+    /// `every:<minutes>`, `at:<unix ms>` (once) or a 5-field cron expression (minute hour dom month dow, UTC).
     pub schedule: String,
     pub prompt: String,
     pub enabled: bool,
@@ -438,6 +438,36 @@ pub struct UsageTotals {
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
     pub requests: i64,
+}
+
+/// A message an agent sent the user on its own initiative (`notify_user`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Notification {
+    pub id: String,
+    pub agent_id: Option<String>,
+    /// The conversation it came from.
+    pub session_id: Option<String>,
+    /// Short label of what it is about; the same topic is not sent twice in a row.
+    pub topic: String,
+    pub text: String,
+    /// Telegram chats it reached.
+    pub delivered: i64,
+    pub created_at: i64,
+}
+
+impl Notification {
+    pub fn from_row(r: &Row<'_>) -> Notification {
+        Notification {
+            id: r.str("id"),
+            agent_id: r.opt_str("agent_id"),
+            session_id: r.opt_str("session_id"),
+            topic: r.str("topic"),
+            text: r.str("text"),
+            delivered: r.i64("delivered"),
+            created_at: r.i64("created_at"),
+        }
+    }
 }
 
 #[cfg(test)]

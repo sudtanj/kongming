@@ -161,6 +161,16 @@ CREATE TABLE IF NOT EXISTS improvements (
   note TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS notifications (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT,
+  session_id TEXT,
+  topic TEXT NOT NULL,
+  text TEXT NOT NULL,
+  delivered INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS notifications_created ON notifications(created_at DESC);
 "#;
 
 #[derive(Default)]
@@ -861,6 +871,16 @@ impl Db {
         Ok(())
     }
 
+    pub async fn set_cron_enabled(&self, id: &str, enabled: bool) -> Result<()> {
+        self.turso
+            .execute(
+                "UPDATE cron_jobs SET enabled = ?, next_run_at = CASE WHEN ? THEN next_run_at END WHERE id = ?",
+                &[enabled.into(), enabled.into(), id.into()],
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn delete_cron_job(&self, id: &str) -> Result<()> {
         self.turso.execute("DELETE FROM cron_jobs WHERE id = ?", &[id.into()]).await?;
         Ok(())
@@ -922,6 +942,46 @@ impl Db {
         let rows =
             self.turso.query("SELECT * FROM improvements ORDER BY created_at DESC LIMIT ?", &[limit.into()]).await?;
         Ok(rows.iter().map(|r| Improvement::from_row(&r)).collect())
+    }
+
+    // ----------------------------------------------------------- notifications
+
+    pub async fn log_notification(
+        &self,
+        agent_id: Option<&str>,
+        session_id: Option<&str>,
+        topic: &str,
+        text: &str,
+        delivered: i64,
+    ) -> Result<Notification> {
+        let n = Notification {
+            id: new_id(),
+            agent_id: agent_id.map(str::to_string),
+            session_id: session_id.map(str::to_string),
+            topic: topic.to_string(),
+            text: text.to_string(),
+            delivered,
+            created_at: now_ms(),
+        };
+        self.turso
+            .execute(
+                "INSERT INTO notifications(id, agent_id, session_id, topic, text, delivered, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                &[n.id.as_str().into(), n.agent_id.clone().into(), n.session_id.clone().into(), topic.into(), text.into(), delivered.into(), n.created_at.into()],
+            )
+            .await?;
+        Ok(n)
+    }
+
+    /// Newest first, created at or after `since_ms`.
+    pub async fn notifications(&self, since_ms: i64, limit: i64) -> Result<Vec<Notification>> {
+        let rows = self
+            .turso
+            .query(
+                "SELECT * FROM notifications WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?",
+                &[since_ms.into(), limit.into()],
+            )
+            .await?;
+        Ok(rows.iter().map(|r| Notification::from_row(&r)).collect())
     }
 }
 

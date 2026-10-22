@@ -7,7 +7,7 @@ Layout:
 - `llm/` provider trait with OpenAI-compatible and Anthropic streaming implementations; `sse.rs` is the shared SSE parser.
 - `agent/` the loop (`run_turn`), prompt assembly, `@` mentions, built-in tools, reflection pass (self-improvement) and delegation (`run_delegation`).
 - `mcp/` remote MCP client (streamable HTTP + legacy SSE) and OAuth (discovery, dynamic registration, PKCE, refresh).
-- `telegram/` long-polling bot with streamed edits. `cron.rs` scheduled prompts.
+- `telegram/` long-polling bot with streamed edits. `cron.rs` scheduled prompts. `proactive.rs` messages Kongming sends on its own (`notify_user` delivery and limits, the check-in loop).
 - `web/` axum router, cookie auth, REST (`api.rs`), WebSocket (`ws.rs`); the UI in `web/` is embedded with `include_str!`.
 - `tests/` integration tests against mocks (Hrana/Turso over rusqlite, OpenAI-style LLM, MCP).
 

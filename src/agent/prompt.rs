@@ -33,6 +33,8 @@ pub struct PromptInput<'a> {
     pub can_delegate: bool,
     pub extra_context: &'a str,
     pub now_utc: &'a str,
+    /// The user's local time with its offset, when one is set (Settings → Channels).
+    pub local_time: &'a str,
 }
 
 pub fn build(p: &PromptInput<'_>) -> String {
@@ -127,6 +129,20 @@ preferences with `memory`. Fix a skill that misled you instead of working around
     }
     s.push('\n');
 
+    // 4b. Reaching the user between conversations (the lead only)
+    if a.is_default {
+        s.push_str("# Reaching the user\n");
+        s.push_str(
+            "You look out for the user between conversations, not only when spoken to. `notify_user` messages them on \
+Telegram; `schedule` plans work for later. When they ask to be reminded at a time, schedule it with notify `always`. When \
+they ask to be told when something happens (a price, a release, a reply, a page change, an event), schedule a check with \
+notify `if_needed` at a sensible interval and save a `watch` memory saying what and why. When you start long work they \
+are waiting for outside a live chat, tell them the result with `notify_user` when it is done. Save the topics, products, \
+people and projects they keep coming back to as `interest` memories: periodic check-ins use them to spot news worth \
+sending. Message only what is new, timely and clearly useful to them; never small talk, never the same thing twice.\n\n",
+        );
+    }
+
     // 5. Memory
     if !p.memories.is_empty() {
         s.push_str("# Memory\n");
@@ -164,9 +180,17 @@ attempts, then tell the user in plain words what failed and what you need. Never
 first, then key findings, then anything that blocked you. Your final message is all the requester sees.\n",
         ),
         "cron" => s.push_str("This is a scheduled run without a human present. Do the task and report concisely.\n"),
+        "proactive" => s.push_str(
+            "This is a proactive check-in without the user present. The only way to reach them is `notify_user`; your \
+final answer is a one-line log entry nobody is notified about.\n",
+        ),
         _ => s.push_str("This conversation is in the kongming web app. Markdown is rendered, including code blocks and tables.\n"),
     }
-    s.push_str(&format!("Current time: {} (UTC).\n", p.now_utc));
+    s.push_str(&format!("Current time: {} (UTC).", p.now_utc));
+    if !p.local_time.is_empty() {
+        s.push_str(&format!(" The user's local time: {}.", p.local_time));
+    }
+    s.push('\n');
 
     // 8. Inline skills and extra context
     for k in p.inline_skills {
@@ -196,6 +220,9 @@ tools, commands, parameters, ids and urls that worked, how to check the result, 
 skill; never send a skill without one or with the description repeated. Prefer updating an existing skill over creating a \
 near-duplicate: `skill_view` it first and send the merged body.\n\
 Save a MEMORY for durable facts: who the user is, their systems, names, preferences, decisions, and corrections they made.\n\
+Save an INTEREST memory (kind `interest`) for a topic, product, person, place or project the user clearly follows or keeps \
+asking about, and a WATCH memory (kind `watch`) when they asked to be told about something later; check-ins use both to \
+decide what is worth messaging them about.\n\
 Do NOTHING when the conversation was small talk, a one-off question, or already covered by existing skills and memory. \
 Never store secrets (tokens, passwords).\n\n");
     if !skills.is_empty() {
@@ -261,17 +288,20 @@ mod tests {
             can_delegate: true,
             extra_context: "",
             now_utc: "2026-01-01 00:00",
+            local_time: "",
         };
         let s = build(&p);
         assert!(s.contains("@dev"));
         assert!(s.contains("delegate_task"));
         assert!(s.contains(DEFAULT_PERSONA));
         assert!(s.contains("the only one the user talks to"), "the lead answers to the user: {s}");
+        assert!(s.contains("# Reaching the user") && s.contains("notify_user"), "{s}");
         let p2 = PromptInput { agent: &dev, can_delegate: false, ..p };
         let s2 = build(&p2);
         assert!(s2.contains("Your manager is **BOSS**"));
         assert!(!s2.contains("delegate_task"));
         assert!(s2.contains("the user does not talk to you directly"), "{s2}");
+        assert!(!s2.contains("# Reaching the user"), "only the lead reaches the user");
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub mod cron;
 pub mod db;
 pub mod llm;
 pub mod mcp;
+pub mod proactive;
 pub mod state;
 pub mod telegram;
 pub mod web;

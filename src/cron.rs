@@ -1,7 +1,9 @@
-//! Scheduled prompts. Schedules are `every:<minutes>` or a 5-field cron
+//! Scheduled prompts. Schedules are `every:<minutes>`, `at:<time>` (once: unix
+//! ms or RFC 3339, e.g. `at:2026-10-23T09:00:00+07:00`) or a 5-field cron
 //! expression in UTC (`min hour dom month dow`, with `*`, lists, ranges and
 //! `*/n`). A ticker checks every 30 s; each due job runs one turn in its own
-//! session and can deliver the answer to a Telegram chat.
+//! session and can deliver the answer to a Telegram chat. A one-off job is
+//! switched off once it ran.
 
 use std::time::Duration;
 
@@ -42,6 +44,9 @@ fn field_matches(field: &str, value: u32, min: u32, max: u32) -> Option<bool> {
 /// schedule is invalid.
 pub fn next_run(schedule: &str, after_ms: i64) -> Option<i64> {
     let s = schedule.trim();
+    if let Some(at) = s.strip_prefix("at:") {
+        return parse_at(at).filter(|t| *t > after_ms);
+    }
     if let Some(m) = s.strip_prefix("every:") {
         let mins: i64 = m.trim().parse().ok().filter(|m| *m >= 1)?;
         return Some(after_ms + mins * 60_000);
@@ -77,6 +82,21 @@ pub fn next_run(schedule: &str, after_ms: i64) -> Option<i64> {
     None
 }
 
+/// The time of an `at:` schedule as unix ms: digits (unix ms) or RFC 3339.
+pub fn parse_at(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+        return s.parse().ok();
+    }
+    let t = time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()?;
+    Some((t.unix_timestamp_nanos() / 1_000_000) as i64)
+}
+
+/// Runs once (`at:`), then is switched off.
+pub fn is_one_off(schedule: &str) -> bool {
+    schedule.trim().starts_with("at:")
+}
+
 pub async fn run_job(state: Shared, job: CronJob) {
     tracing::info!(job = %job.name, "cron job start");
     // Scheduled prompts come from the user, so they go to the lead agent.
@@ -109,6 +129,9 @@ pub async fn run_job(state: Shared, job: CronJob) {
     };
     let next = if job.enabled { next_run(&job.schedule, crate::db::now_ms()) } else { None };
     let _ = state.db.mark_cron_run(&job.id, next, &status).await;
+    if is_one_off(&job.schedule) {
+        let _ = state.db.set_cron_enabled(&job.id, false).await;
+    }
     if let (Some(chat), Ok(r)) = (job.deliver_to.as_deref(), &res) {
         if let (Ok(chat_id), Some(token)) = (chat.trim().parse::<i64>(), state.telegram_token().await) {
             let tg = crate::telegram::Telegram::new(state.http.clone(), &state.cfg.telegram_api, token);
@@ -137,6 +160,11 @@ pub async fn run(state: Shared) {
         for job in jobs.into_iter().filter(|j| j.enabled) {
             let due = match job.next_run_at {
                 Some(n) => n <= now,
+                None if is_one_off(&job.schedule) => {
+                    // A one-off that already ran (or is running) or whose time has passed.
+                    let _ = state.db.set_cron_enabled(&job.id, false).await;
+                    false
+                }
                 None => {
                     // Never scheduled: compute and store, don't run now.
                     let _ = state
@@ -164,6 +192,19 @@ pub async fn run(state: Shared) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_off_times() {
+        // 2026-01-01 00:00:00 UTC
+        let base = 1_767_225_600_000;
+        assert_eq!(next_run("at:2026-01-01T09:00:00+07:00", base), Some(base + 2 * 3_600_000));
+        assert_eq!(next_run("at:2026-01-01T00:30:00Z", base), Some(base + 30 * 60_000));
+        assert_eq!(next_run(&format!("at:{}", base + 5), base), Some(base + 5));
+        assert_eq!(next_run("at:2025-12-31T23:00:00Z", base), None, "past");
+        assert_eq!(next_run("at:tomorrow", base), None);
+        assert!(is_one_off(" at:1"));
+        assert!(!is_one_off("every:5"));
+    }
 
     #[test]
     fn every_minutes() {

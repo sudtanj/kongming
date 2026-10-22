@@ -58,11 +58,16 @@ impl Telegram {
     }
 
     pub async fn send_message(&self, chat_id: i64, text: &str) -> Result<i64> {
+        self.send(chat_id, text, false).await
+    }
+
+    /// `silent`: delivered without a sound or vibration.
+    pub async fn send(&self, chat_id: i64, text: &str, silent: bool) -> Result<i64> {
         let text = clamp(text);
         let r = match self
             .call(
                 "sendMessage",
-                json!({"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": true}),
+                json!({"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": true, "disable_notification": silent}),
             )
             .await
         {
@@ -71,7 +76,7 @@ impl Telegram {
             Err(_) => {
                 self.call(
                     "sendMessage",
-                    json!({"chat_id": chat_id, "text": strip_html(&text), "disable_web_page_preview": true}),
+                    json!({"chat_id": chat_id, "text": strip_html(&text), "disable_web_page_preview": true, "disable_notification": silent}),
                 )
                 .await?
             }
@@ -276,6 +281,7 @@ fn commands() -> Value {
         {"command": "skills", "description": "List skills"},
         {"command": "status", "description": "Show status"},
         {"command": "stop", "description": "Stop the current reply"},
+        {"command": "proactive", "description": "Messages Kongming sends on its own: on, off, now"},
         {"command": "help", "description": "Help"}
     ]})
 }
@@ -453,7 +459,8 @@ fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-async fn session_for_chat(state: &Shared, chat_id: i64, fresh: bool) -> Result<crate::db::Session> {
+/// The chat's current conversation (a new one when `fresh` or none yet).
+pub async fn session_for_chat(state: &Shared, chat_id: i64, fresh: bool) -> Result<crate::db::Session> {
     if !fresh {
         if let Some((sid, _)) = state.db.telegram_chat(chat_id).await? {
             if let Some(s) = state.db.session(&sid).await? {
@@ -582,7 +589,7 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
         let name = name.split('@').next().unwrap_or(name);
         match name {
             "start" | "help" => {
-                tg.send_message(chat_id, "Hi! Just type to talk to the lead agent; it runs the team and hands work to the others.\n/new – new conversation\n/agents – show the team\n/skills – list skills\n/status – status\n/stop – stop the current reply").await?;
+                tg.send_message(chat_id, "Hi! Just type to talk to the lead agent; it runs the team and hands work to the others.\n/new – new conversation\n/agents – show the team\n/skills – list skills\n/status – status\n/stop – stop the current reply\n/proactive – messages Kongming sends on its own (on, off, now)").await?;
             }
             "new" => {
                 let s = session_for_chat(&state, chat_id, true).await?;
@@ -650,6 +657,30 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
                 let s = session_for_chat(&state, chat_id, false).await?;
                 tg.send_message(chat_id, if state.cancel_turn(&s.id) { "Stopping." } else { "Nothing is running." })
                     .await?;
+            }
+            "proactive" => {
+                let arg = cmd.split_whitespace().nth(1).unwrap_or("").to_ascii_lowercase();
+                match arg.as_str() {
+                    "on" | "off" => {
+                        crate::proactive::set_enabled(&state, arg == "on").await?;
+                        tg.send_message(chat_id, &crate::proactive::status_html(&state).await?).await?;
+                    }
+                    "now" => {
+                        tg.send_message(chat_id, "Checking whether there is anything worth telling you…").await?;
+                        let (st, tg) = (state.clone(), tg.clone());
+                        tokio::spawn(async move {
+                            let reply = match crate::proactive::check_in(&st, true).await {
+                                Ok(0) => "Nothing worth telling you right now.".to_string(),
+                                Ok(_) => return,
+                                Err(e) => format!("⚠️ {}", esc(&format!("{e:#}"))),
+                            };
+                            let _ = tg.send_message(chat_id, &reply).await;
+                        });
+                    }
+                    _ => {
+                        tg.send_message(chat_id, &crate::proactive::status_html(&state).await?).await?;
+                    }
+                }
             }
             _ => {
                 tg.send_message(chat_id, "Unknown command. /help").await?;
