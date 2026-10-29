@@ -470,6 +470,69 @@ impl Notification {
     }
 }
 
+/// Paid work found by an earnings scan, and where it stands.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EarnLead {
+    pub id: String,
+    /// The first characters of the id: what the user types in `take <ref>`.
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub provider: String,
+    /// The provider's id for the job.
+    pub external_id: String,
+    pub title: String,
+    pub description: String,
+    /// Pay in US dollars (stablecoins count as dollars); `None` when unknown.
+    pub budget_usd: Option<f64>,
+    pub currency: String,
+    pub url: String,
+    pub bids: Option<i64>,
+    pub deadline: Option<String>,
+    pub tags: Vec<String>,
+    /// new, shortlisted, passed, approved, skipped, working, submitted, won, lost, paid
+    pub status: String,
+    pub score: Option<i64>,
+    pub note: String,
+    /// The conversation that last worked on it.
+    pub session_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+impl EarnLead {
+    pub fn reference(&self) -> String {
+        self.id.chars().take(6).collect()
+    }
+
+    pub fn from_row(r: &Row<'_>) -> EarnLead {
+        let id = r.str("id");
+        EarnLead {
+            reference: id.chars().take(6).collect(),
+            id,
+            provider: r.str("provider"),
+            external_id: r.str("external_id"),
+            title: r.str("title"),
+            description: r.str("description"),
+            budget_usd: match r.val("budget_usd") {
+                super::turso::Val::Null => None,
+                _ => Some(r.f64("budget_usd")),
+            },
+            currency: r.str("currency"),
+            url: r.str("url"),
+            bids: r.opt_i64("bids"),
+            deadline: r.opt_str("deadline"),
+            tags: json_list(&r.json("tags")).unwrap_or_default(),
+            status: r.str("status"),
+            score: r.opt_i64("score"),
+            note: r.str("note"),
+            session_id: r.opt_str("session_id"),
+            created_at: r.i64("created_at"),
+            updated_at: r.i64("updated_at"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -134,7 +134,7 @@ pub fn split_chunks(text: &str, max: usize) -> Vec<String> {
     out
 }
 
-fn esc(s: &str) -> String {
+pub fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
@@ -282,6 +282,7 @@ fn commands() -> Value {
         {"command": "status", "description": "Show status"},
         {"command": "stop", "description": "Stop the current reply"},
         {"command": "proactive", "description": "Messages Kongming sends on its own: on, off, now"},
+        {"command": "earn", "description": "Paid work Kongming finds for you: on, off, scan"},
         {"command": "help", "description": "Help"}
     ]})
 }
@@ -589,7 +590,7 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
         let name = name.split('@').next().unwrap_or(name);
         match name {
             "start" | "help" => {
-                tg.send_message(chat_id, "Hi! Just type to talk to the lead agent; it runs the team and hands work to the others.\n/new – new conversation\n/agents – show the team\n/skills – list skills\n/status – status\n/stop – stop the current reply\n/proactive – messages Kongming sends on its own (on, off, now)").await?;
+                tg.send_message(chat_id, "Hi! Just type to talk to the lead agent; it runs the team and hands work to the others.\n/new – new conversation\n/agents – show the team\n/skills – list skills\n/status – status\n/stop – stop the current reply\n/proactive – messages Kongming sends on its own (on, off, now)\n/earn – paid work Kongming finds for you (on, off, scan)").await?;
             }
             "new" => {
                 let s = session_for_chat(&state, chat_id, true).await?;
@@ -679,6 +680,39 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
                     }
                     _ => {
                         tg.send_message(chat_id, &crate::proactive::status_html(&state).await?).await?;
+                    }
+                }
+            }
+            "earn" => {
+                let arg = cmd.split_whitespace().nth(1).unwrap_or("").to_ascii_lowercase();
+                match arg.as_str() {
+                    "on" | "off" => {
+                        crate::earn::set_enabled(&state, arg == "on").await?;
+                        tg.send_message(chat_id, &crate::earn::status_html(&state).await?).await?;
+                    }
+                    "scan" | "now" => {
+                        tg.send_message(chat_id, "Looking for paid work…").await?;
+                        let (st, tg) = (state.clone(), tg.clone());
+                        tokio::spawn(async move {
+                            let reply = match crate::earn::scan(&st, true).await {
+                                Ok(r) if r.shortlisted > 0 => return,
+                                Ok(r) => {
+                                    let mut m = format!(
+                                        "Looked at {} open jobs: {} new worth rating, nothing that fits right now.",
+                                        r.listed, r.new
+                                    );
+                                    if !r.errors.is_empty() {
+                                        m.push_str(&format!("\n⚠️ {}", esc(&r.errors.join("; "))));
+                                    }
+                                    m
+                                }
+                                Err(e) => format!("⚠️ {}", esc(&format!("{e:#}"))),
+                            };
+                            let _ = tg.send_message(chat_id, &reply).await;
+                        });
+                    }
+                    _ => {
+                        tg.send_message(chat_id, &crate::earn::status_html(&state).await?).await?;
                     }
                 }
             }

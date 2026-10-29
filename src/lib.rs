@@ -6,6 +6,7 @@ pub mod cdp;
 pub mod config;
 pub mod cron;
 pub mod db;
+pub mod earn;
 pub mod llm;
 pub mod mcp;
 pub mod proactive;

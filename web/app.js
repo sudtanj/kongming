@@ -138,6 +138,7 @@ const STRINGS = {
     'settings.mcp': 'MCP',
     'settings.channels': 'Channels',
     'settings.automations': 'Automations',
+    'settings.earnings': 'Earnings',
     'settings.memory': 'Memory',
     'settings.activity': 'Activity',
     'settings.about': 'About',
@@ -313,6 +314,73 @@ const STRINGS = {
     'proactive.recentNone': 'Nothing in the last 7 days.',
     'proactive.checkNow': 'Check in now',
     'proactive.checking': 'Checking; you get a Telegram message if there is something worth telling.',
+    'earn.title': 'Earnings',
+    'earn.desc': 'Kongming looks for paid work on agent marketplaces and bounty boards, tells you about the best fits on Telegram, and with your go-ahead bids, does the work and delivers. Payouts and withdrawals stay with you.',
+    'earn.scanNow': 'Scan now',
+    'earn.scanning': 'Scanning; the best fits come to you on Telegram.',
+    'earn.shortlisted': 'Shortlisted',
+    'earn.inProgress': 'In progress',
+    'earn.won': 'Won',
+    'earn.paid': 'Paid',
+    'earn.lastScan': 'Last scan {{when}}',
+    'earn.neverScanned': 'No scan yet',
+    'earn.general': 'General',
+    'earn.enabled': 'Look for paid work',
+    'earn.enabledDesc': 'Scans the providers below on a schedule and sends you a digest of the best leads on Telegram. Needs Telegram (Channels).',
+    'earn.profile': 'What to take on',
+    'earn.profileDesc': 'Your skills, the kinds of work you want, and what to avoid. Kongming rates leads against this.',
+    'earn.profilePh': 'TypeScript, Rust and DevOps; writing and research in English or Indonesian. No crypto trading, no calls.',
+    'earn.scanMinutes': 'Scan every (minutes)',
+    'earn.scanMinutesDesc': '30 to 10080, or 0 to scan only when asked. A scan with new leads is one agent run.',
+    'earn.minUsd': 'Minimum pay (USD)',
+    'earn.minUsdDesc': 'Leads paying less are ignored. Stablecoins count as dollars.',
+    'earn.maxAlerts': 'Leads per digest',
+    'earn.maxAlertsDesc': 'At most this many leads in one Telegram message.',
+    'earn.auto': 'Bid without asking',
+    'earn.autoDesc': 'Off: Kongming only bids after you reply take <ref>. On: it bids on shortlisted marketplace jobs up to the limit below by itself. Code bounties always wait for you.',
+    'earn.autoMax': 'Bid without asking up to (USD)',
+    'earn.autoMaxDesc': 'Jobs paying more always wait for your go-ahead.',
+    'earn.providers': 'Providers',
+    'earn.kind.market': 'Marketplace',
+    'earn.kind.bounty': 'Code bounty',
+    'earn.listOnly': 'You take these',
+    'earn.keySet': 'Key saved',
+    'earn.error': 'Error',
+    'earn.providerOk': '{{listed}} open, {{kept}} worth a look ({{when}})',
+    'earn.providerError': 'Last scan failed: {{error}}',
+    'earn.providerNever': 'Not scanned yet',
+    'earn.keyPh': 'API key',
+    'earn.keySaved': 'Key saved (enter to replace)',
+    'earn.keyStored': 'Key saved',
+    'earn.clearKey': 'Remove key',
+    'earn.docs': 'Docs',
+    'earn.leads': 'Leads',
+    'earn.filter.open': 'New and shortlisted',
+    'earn.filter.active': 'In progress',
+    'earn.filter.done': 'Finished',
+    'earn.filter.all': 'All',
+    'earn.noLeads': 'No leads yet. Switch on, then Scan now.',
+    'earn.noneHere': 'Nothing here.',
+    'earn.take': 'Take',
+    'earn.skip': 'Skip',
+    'earn.markAs': 'Mark as…',
+    'earn.bids': '{{n}} bids',
+    'earn.moved.approved': 'Taken: Kongming starts on it now.',
+    'earn.moved.skipped': 'Skipped',
+    'earn.moved.won': 'Marked won',
+    'earn.moved.lost': 'Marked lost',
+    'earn.moved.paid': 'Marked paid',
+    'earn.moved.shortlisted': 'Back on the shortlist',
+    'earn.status.new': 'new',
+    'earn.status.shortlisted': 'shortlisted',
+    'earn.status.passed': 'passed',
+    'earn.status.approved': 'taken',
+    'earn.status.skipped': 'skipped',
+    'earn.status.working': 'working',
+    'earn.status.submitted': 'submitted',
+    'earn.status.won': 'won',
+    'earn.status.lost': 'lost',
+    'earn.status.paid': 'paid',
     'automations.title': 'Automations',
     'automations.desc': 'Scheduled prompts. Schedules run in UTC.',
     'automations.new': 'New automation',
@@ -358,6 +426,8 @@ const STRINGS = {
     'activity.kind.notification': 'Messaged you',
     'activity.kind.check_in': 'Check-in',
     'activity.kind.scheduled': 'Scheduled',
+    'activity.kind.earn_scan': 'Earnings scan',
+    'activity.kind.earn': 'Earned',
     'toast.learned': 'Learned: {{note}}',
     'about.title': 'About',
     'about.desc': 'kongming is a small agentic daemon: a team of agents, skills that grow, and tools over MCP. It is named after 孔明 Kongming, the courtesy name of 诸葛亮 Zhuge Liang, the strategist of the Three Kingdoms who planned and directed rather than fought. His feather fan (羽扇) is the logo.',
@@ -1375,7 +1445,7 @@ function toast(msg, kind) {
 /* ============================================================ views: settings */
 
 const settings = (() => {
-  const PAGES = [['overview', 'home'], ['appearance', 'palette'], ['models', 'cpu'], ['agents', 'users'], ['skills', 'skill'], ['mcp', 'plug'], ['channels', 'channel'], ['automations', 'clock'], ['memory', 'memory'], ['activity', 'pulse'], ['about', 'info']];
+  const PAGES = [['overview', 'home'], ['appearance', 'palette'], ['models', 'cpu'], ['agents', 'users'], ['skills', 'skill'], ['mcp', 'plug'], ['channels', 'channel'], ['automations', 'clock'], ['earnings', 'coin'], ['memory', 'memory'], ['activity', 'pulse'], ['about', 'info']];
   const BUILTIN_TOOLS = ['skill_view', 'skill_manage', 'memory', 'delegate_task', 'agent_manage', 'web_fetch', 'shell', 'list_agents', 'list_sessions', 'read_session', 'current_time'];
   let viewEl, navEl, bodyEl, page = null, token = 0;
 
@@ -1398,7 +1468,7 @@ const settings = (() => {
     renderNav(); renderTopbar(); renderThemeBtn();
     const my = ++token;
     clear(bodyEl);
-    const grid = h('div', { class: 'settings-grid' + (page === 'agents' || page === 'activity' || page === 'automations' ? ' wide' : '') });
+    const grid = h('div', { class: 'settings-grid' + (page === 'agents' || page === 'activity' || page === 'automations' || page === 'earnings' ? ' wide' : '') });
     bodyEl.appendChild(grid); bodyEl.scrollTop = 0;
     const render = pages[page];
     grid.appendChild(h('div', { class: 'status-line' }, icon('spinner', 'spin'), t('common.loading')));
@@ -1759,6 +1829,80 @@ const settings = (() => {
       row(t('proactive.recent'), recent.length ? null : t('proactive.recentNone'), recent.length ? h('div', { class: 'lr-sub' }, recent.map((n) => h('div', {}, relTime(n.createdAt) + ' · ' + n.topic))) : h('span')),
       h('div', { class: 'settings-footer' }, checkBtn, h('div', { class: 'acts' }, saveBtn(null, async () => { await api.put('/api/settings', { proactive: { intervalMinutes: interval.value.trim(), maxPerDay: maxPerDay.value.trim(), quietHours: quiet.value.trim(), utcOffset: offset.value.trim() } }); reload(); }))));
   }
+
+  /* ---- earnings ---- */
+  pages.earnings = async (query) => {
+    const d = await api.get('/api/earn');
+    const st = d.settings || {};
+    const leads = d.leads || [];
+    const usd = (v) => v == null ? '—' : '$' + Number(v).toFixed(2);
+    const count = (...ss) => leads.filter((l) => ss.includes(l.status)).length;
+    const paid = leads.filter((l) => l.status === 'paid').reduce((a, l) => a + (l.budgetUsd || 0), 0);
+    const scanBtn = h('button', { class: 'btn outline', type: 'button', disabled: d.scanning, onClick: async () => { scanBtn.disabled = true; try { await api.post('/api/earn/scan'); toast(t('earn.scanning')); setTimeout(reload, 8000); } catch (e) { toast(e.message, 'err'); scanBtn.disabled = false; } } }, icon(d.scanning ? 'spinner' : 'play', d.scanning ? 'spin' : null), t('earn.scanNow'));
+    const wrap = h('div', { class: 'settings-stack' }, header(t('earn.title'), t('earn.desc'), scanBtn));
+
+    wrap.appendChild(section(null, h('div', { class: 'stat-grid' },
+      stat(t('earn.shortlisted'), count('shortlisted')),
+      stat(t('earn.inProgress'), count('approved', 'working', 'submitted')),
+      stat(t('earn.won'), count('won', 'paid')),
+      stat(t('earn.paid'), usd(paid), d.lastScan ? t('earn.lastScan', { when: relTime(d.lastScan) }) : t('earn.neverScanned')))));
+
+    const scanMinutes = input({ value: String(st.scanMinutes ?? 120), inputmode: 'numeric', placeholder: '120' });
+    const minUsd = input({ value: String(st.minUsd ?? 5), inputmode: 'decimal', placeholder: '5' });
+    const maxAlerts = input({ value: String(st.maxAlerts ?? 3), inputmode: 'numeric', placeholder: '3' });
+    const autoMax = input({ value: String(st.autoMaxUsd ?? 25), inputmode: 'decimal', placeholder: '25' });
+    const profile = textarea({ value: st.profile || '', rows: 4, placeholder: t('earn.profilePh') });
+    wrap.appendChild(section(t('earn.general'),
+      row(t('earn.enabled'), t('earn.enabledDesc'), switchEl(!!st.enabled, (v) => api.put('/api/earn', { enabled: v }), t('earn.enabled')), { switch: true }),
+      row(t('earn.profile'), t('earn.profileDesc'), profile, { stack: true }),
+      row(t('earn.scanMinutes'), t('earn.scanMinutesDesc'), scanMinutes),
+      row(t('earn.minUsd'), t('earn.minUsdDesc'), minUsd),
+      row(t('earn.maxAlerts'), t('earn.maxAlertsDesc'), maxAlerts),
+      row(t('earn.auto'), t('earn.autoDesc'), switchEl(!!st.auto, (v) => api.put('/api/earn', { auto: v }), t('earn.auto')), { switch: true }),
+      row(t('earn.autoMax'), t('earn.autoMaxDesc'), autoMax),
+      h('div', { class: 'settings-footer' }, h('span'), h('div', { class: 'acts' }, saveBtn(null, async () => { await api.put('/api/earn', { profile: profile.value, scanMinutes: scanMinutes.value.trim(), minUsd: minUsd.value.trim(), maxAlerts: maxAlerts.value.trim(), autoMaxUsd: autoMax.value.trim() }); reload(); })))));
+
+    const plist = h('div', {});
+    for (const p of d.providers || []) {
+      const s = p.status || {};
+      const statusText = s.error ? t('earn.providerError', { error: s.error }) : s.at ? t('earn.providerOk', { listed: s.listed ?? 0, kept: s.kept ?? 0, when: relTime(s.at) }) : t('earn.providerNever');
+      const key = input({ type: 'password', autocomplete: 'off', placeholder: p.keySet ? t('earn.keySaved') : t('earn.keyPh'), style: 'max-width:14rem' });
+      const saveKey = h('button', { class: 'btn outline sm', type: 'button', onClick: async () => { if (!key.value.trim()) return; saveKey.disabled = true; try { await api.put('/api/earn', { providers: { [p.id]: { apiKey: key.value.trim() } } }); toast(t('earn.keyStored')); reload(); } catch (e) { toast(e.message, 'err'); saveKey.disabled = false; } } }, t('common.save'));
+      const clearKey = p.keySet ? h('button', { class: 'icon-btn quiet', type: 'button', title: t('earn.clearKey'), 'aria-label': t('earn.clearKey'), onClick: () => modal.confirm({ title: t('earn.clearKey'), confirm: t('common.confirm'), danger: true, onConfirm: async () => { await api.put('/api/earn', { providers: { [p.id]: { clearApiKey: true } } }); reload(); } }) }, icon('x')) : null;
+      plist.appendChild(h('div', { class: 'list-row' },
+        h('div', { class: 'lr-main' },
+          h('div', { class: 'lr-title' }, h('a', { href: p.site, target: '_blank', rel: 'noopener' }, p.name), h('span', { class: 'pill' }, t('earn.kind.' + p.kind)), p.acts ? null : h('span', { class: 'pill warn' }, t('earn.listOnly')), p.keySet ? h('span', { class: 'pill ok' }, t('earn.keySet')) : null, s.error ? h('span', { class: 'pill err' }, t('earn.error')) : null),
+          h('div', { class: 'lr-sub' }, p.payout + ' · ' + statusText),
+          h('div', { class: 'lr-sub' }, p.keyHelp, ' ', h('a', { href: p.docs, target: '_blank', rel: 'noopener' }, t('earn.docs')))),
+        h('div', { class: 'lr-acts' }, p.acts || p.id === 'algora' ? h('div', { class: 'row', style: 'flex-wrap:nowrap' }, key, saveKey, clearKey) : null,
+          switchEl(p.enabled, (v) => api.put('/api/earn', { providers: { [p.id]: { enabled: v } } }), t('common.enabled')))));
+    }
+    wrap.appendChild(section(t('earn.providers'), plist));
+
+    const FILTERS = [['open', t('earn.filter.open')], ['active', t('earn.filter.active')], ['done', t('earn.filter.done')], ['all', t('earn.filter.all')]];
+    const filter = query.filter && FILTERS.some((f) => f[0] === query.filter) ? query.filter : 'open';
+    const match = { open: ['shortlisted', 'new'], active: ['approved', 'working', 'submitted'], done: ['won', 'lost', 'paid'] };
+    const shown = filter === 'all' ? leads : leads.filter((l) => match[filter].includes(l.status));
+    const sel = select(FILTERS, filter, { 'aria-label': t('earn.leads'), onChange: (e) => navigate('#/settings/earnings?filter=' + e.target.value) });
+    const llist = h('div', {});
+    if (!shown.length) llist.appendChild(empty(leads.length ? t('earn.noneHere') : t('earn.noLeads')));
+    const pname = (id) => { const p = (d.providers || []).find((x) => x.id === id); return p ? p.name : id; };
+    const move = async (l, status) => { try { await api.patch('/api/earn/leads/' + l.id, { status }); toast(t('earn.moved.' + status)); reload(); } catch (e) { toast(e.message, 'err'); } };
+    const pillCls = (s) => ['won', 'paid'].includes(s) ? 'ok' : ['lost', 'skipped', 'passed'].includes(s) ? '' : ['approved', 'working', 'submitted'].includes(s) ? 'warn' : '';
+    for (const l of shown) {
+      const acts = [];
+      if (['new', 'shortlisted', 'passed'].includes(l.status)) acts.push(h('button', { class: 'btn primary sm', type: 'button', onClick: () => move(l, 'approved') }, t('earn.take')), h('button', { class: 'btn ghost sm', type: 'button', onClick: () => move(l, 'skipped') }, t('earn.skip')));
+      if (['approved', 'working', 'submitted', 'won'].includes(l.status)) acts.push(select([['', t('earn.markAs')], ['won', t('earn.status.won')], ['lost', t('earn.status.lost')], ['paid', t('earn.status.paid')]], '', { class: 'field sm', 'aria-label': t('earn.markAs'), onChange: (e) => { if (e.target.value) move(l, e.target.value); } }));
+      llist.appendChild(h('div', { class: 'list-row' },
+        h('div', { class: 'lr-main' },
+          h('div', { class: 'lr-title' }, l.url ? h('a', { href: l.url, target: '_blank', rel: 'noopener' }, l.title) : l.title, h('span', { class: 'pill' }, usd(l.budgetUsd)), h('span', { class: 'pill ' + pillCls(l.status) }, t('earn.status.' + l.status)), l.score != null ? h('span', { class: 'pill' }, '★ ' + l.score) : null),
+          h('div', { class: 'lr-sub' }, [pname(l.provider), 'ref ' + l.ref, l.bids != null ? t('earn.bids', { n: l.bids }) : null, relTime(l.updatedAt)].filter(Boolean).join(' · ')),
+          l.note || l.description ? h('div', { class: 'lr-sub' }, l.note || l.description) : null),
+        acts.length ? h('div', { class: 'lr-acts' }, acts) : null));
+    }
+    wrap.appendChild(sectionWith(t('earn.leads'), [sel], llist));
+    return wrap;
+  };
 
   /* ---- automations ---- */
   pages.automations = async (query) => {

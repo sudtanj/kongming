@@ -278,6 +278,13 @@ async fn plan(state: &Shared, session: &Session, agent: Agent, mentions: &mentio
 
     // Tools: built-ins + MCP (restricted per agent, plus @mcp: mentions).
     let mut tool_specs = tools::builtin_specs(&agent, can_delegate, state.shell.as_ref());
+    // Earnings: the lead agent, while switched on.
+    if agent.is_default
+        && agent.tools.as_ref().is_none_or(|t| t.iter().any(|n| n == "earn"))
+        && crate::earn::settings(state).await.enabled
+    {
+        tool_specs.push(crate::earn::tool_spec());
+    }
     let mut allowed = agent.mcp_servers.clone();
     if let Some(a) = &mut allowed {
         a.extend(mentions.mcp.iter().cloned());

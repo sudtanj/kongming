@@ -216,6 +216,7 @@ pub async fn run_builtin(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Option<
         "agent_manage" => agent_manage(ctx, args).await,
         "notify_user" => notify_user(ctx, args).await,
         "schedule" => schedule(ctx, args).await,
+        "earn" => crate::earn::tool(ctx, args).await,
         "shell" => return Some(run_shell(ctx, args).await),
         _ => return None,
     };

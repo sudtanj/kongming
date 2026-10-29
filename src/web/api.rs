@@ -787,6 +787,51 @@ pub async fn run_check_in(State(state): State<Shared>) -> R {
     Ok(Json(json!({"ok": true})))
 }
 
+// -------------------------------------------------------------------- earnings
+
+pub async fn get_earn(State(state): State<Shared>) -> R {
+    Ok(Json(crate::earn::dashboard_json(&state).await?))
+}
+
+pub async fn put_earn(State(state): State<Shared>, Json(body): Json<Value>) -> R {
+    let merged = crate::earn::settings(&state).await.merged(&body).map_err(bad)?;
+    crate::earn::save(&state, &merged).await?;
+    Ok(Json(crate::earn::dashboard_json(&state).await?))
+}
+
+pub async fn run_earn_scan(State(state): State<Shared>) -> R {
+    if crate::earn::scanning() {
+        return Err(bad("a scan is already running"));
+    }
+    tokio::spawn(async move {
+        if let Err(e) = crate::earn::scan(&state, true).await {
+            tracing::warn!("manual earnings scan failed: {e:#}");
+        }
+    });
+    Ok(Json(json!({"ok": true})))
+}
+
+/// The user moves a lead from the dashboard: take it, skip it, or record the outcome.
+pub async fn patch_earn_lead(State(state): State<Shared>, Path(id): Path<String>, Json(body): Json<Value>) -> R {
+    let lead = state.db.earn_lead(&id).await?.ok_or_else(|| not_found("lead not found"))?;
+    let status = s(&body, "status").unwrap_or("");
+    if !["approved", "skipped", "shortlisted", "won", "lost", "paid"].contains(&status) {
+        return Err(bad("status must be approved, skipped, shortlisted, won, lost or paid"));
+    }
+    state.db.update_lead(&lead.id, Some(status), None, None, None).await?;
+    // A taken lead is worked on now, not at the next scheduled scan.
+    if status == "approved" && !crate::earn::scanning() {
+        let st = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::earn::scan(&st, true).await {
+                tracing::warn!("earnings scan after a take failed: {e:#}");
+            }
+        });
+    }
+    let lead = state.db.earn_lead(&lead.id).await?.ok_or_else(|| not_found("lead not found"))?;
+    Ok(Json(serde_json::to_value(lead).unwrap_or_default()))
+}
+
 pub async fn test_llm(State(state): State<Shared>) -> R {
     let (cfg, provider) = state.provider().await?;
     let req = crate::llm::ChatRequest {

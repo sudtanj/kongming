@@ -171,6 +171,27 @@ CREATE TABLE IF NOT EXISTS notifications (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS notifications_created ON notifications(created_at DESC);
+CREATE TABLE IF NOT EXISTS earn_leads (
+  id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  budget_usd REAL,
+  currency TEXT NOT NULL DEFAULT '',
+  url TEXT NOT NULL DEFAULT '',
+  bids INTEGER,
+  deadline TEXT,
+  tags TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'new',
+  score INTEGER,
+  note TEXT NOT NULL DEFAULT '',
+  session_id TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS earn_leads_ext ON earn_leads(provider, external_id);
+CREATE INDEX IF NOT EXISTS earn_leads_updated ON earn_leads(updated_at DESC);
 "#;
 
 #[derive(Default)]
@@ -982,6 +1003,114 @@ impl Db {
             )
             .await?;
         Ok(rows.iter().map(|r| Notification::from_row(&r)).collect())
+    }
+
+    // ------------------------------------------------------------ earn leads
+
+    /// Store a lead once per provider listing; `None` when it was already there.
+    pub async fn insert_lead(&self, provider: &str, f: &crate::earn::Found) -> Result<Option<EarnLead>> {
+        let now = now_ms();
+        let id = new_id();
+        let tags = json!(f.tags);
+        let r = self
+            .turso
+            .execute(
+                "INSERT OR IGNORE INTO earn_leads(id, provider, external_id, title, description, budget_usd, currency, url, bids, deadline, tags, status, note, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', '', ?, ?)",
+                &[
+                    id.as_str().into(),
+                    provider.into(),
+                    f.external_id.as_str().into(),
+                    crate::mcp::truncate(&f.title, 300).into(),
+                    crate::mcp::truncate(&f.description, 8000).into(),
+                    f.budget_usd.into(),
+                    f.currency.as_str().into(),
+                    f.url.as_str().into(),
+                    f.bids.into(),
+                    f.deadline.clone().into(),
+                    (&tags).into(),
+                    now.into(),
+                    now.into(),
+                ],
+            )
+            .await?;
+        if r.affected == 0 {
+            return Ok(None);
+        }
+        self.earn_lead(&id).await
+    }
+
+    pub async fn lead_exists(&self, provider: &str, external_id: &str) -> Result<bool> {
+        let rows = self
+            .turso
+            .query(
+                "SELECT id FROM earn_leads WHERE provider = ? AND external_id = ? LIMIT 1",
+                &[provider.into(), external_id.into()],
+            )
+            .await?;
+        Ok(!rows.is_empty())
+    }
+
+    /// Leads in any of `statuses` (all when empty): most recently changed
+    /// first, or best paid first with `by_budget`.
+    pub async fn earn_leads(&self, statuses: &[&str], limit: i64, by_budget: bool) -> Result<Vec<EarnLead>> {
+        let mut sql = "SELECT * FROM earn_leads".to_string();
+        let mut args: Vec<Val> = statuses.iter().map(|s| (*s).into()).collect();
+        if !statuses.is_empty() {
+            sql.push_str(&format!(" WHERE status IN ({})", vec!["?"; statuses.len()].join(", ")));
+        }
+        sql.push_str(if by_budget {
+            " ORDER BY COALESCE(budget_usd, 0) DESC, created_at DESC LIMIT ?"
+        } else {
+            " ORDER BY updated_at DESC LIMIT ?"
+        });
+        args.push(limit.into());
+        let rows = self.turso.query(&sql, &args).await?;
+        Ok(rows.iter().map(|r| EarnLead::from_row(&r)).collect())
+    }
+
+    /// By id or the start of it (a lead's ref); errors when the ref is ambiguous.
+    pub async fn earn_lead(&self, reference: &str) -> Result<Option<EarnLead>> {
+        let r: String =
+            reference.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
+        if r.is_empty() {
+            return Ok(None);
+        }
+        let rows =
+            self.turso.query("SELECT * FROM earn_leads WHERE id LIKE ? LIMIT 2", &[format!("{r}%").into()]).await?;
+        if rows.len() > 1 {
+            return Err(anyhow!("ref {r} matches more than one lead; use more characters"));
+        }
+        Ok(rows.first().map(|r| EarnLead::from_row(&r)))
+    }
+
+    pub async fn update_lead(
+        &self,
+        id: &str,
+        status: Option<&str>,
+        score: Option<i64>,
+        note: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<()> {
+        self.turso
+            .execute(
+                "UPDATE earn_leads SET status = COALESCE(?, status), score = COALESCE(?, score), note = COALESCE(?, note), \
+                 session_id = COALESCE(?, session_id), updated_at = ? WHERE id = ?",
+                &[status.into(), score.into(), note.into(), session_id.into(), now_ms().into(), id.into()],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Forget leads nobody took that have not changed since `before_ms`.
+    pub async fn prune_leads(&self, before_ms: i64) -> Result<()> {
+        self.turso
+            .execute(
+                "DELETE FROM earn_leads WHERE status IN ('new', 'passed', 'skipped', 'shortlisted', 'lost') AND updated_at < ?",
+                &[before_ms.into()],
+            )
+            .await?;
+        Ok(())
     }
 }
 

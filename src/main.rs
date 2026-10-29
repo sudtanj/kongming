@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use kongming::{agent, config, cron, db, proactive, state, telegram, web};
+use kongming::{agent, config, cron, db, earn, proactive, state, telegram, web};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
@@ -61,7 +61,7 @@ async fn run(cfg: config::Config) -> Result<()> {
         tracing::warn!("seeding skills failed: {e:#}");
     }
 
-    // Background work: MCP tool discovery, Telegram, cron, proactive check-ins.
+    // Background work: MCP tool discovery, Telegram, cron, proactive check-ins, earnings scans.
     {
         let st = state.clone();
         tokio::spawn(async move {
@@ -77,6 +77,7 @@ async fn run(cfg: config::Config) -> Result<()> {
     tokio::spawn(telegram::run(state.clone()));
     tokio::spawn(cron::run(state.clone()));
     tokio::spawn(proactive::run(state.clone()));
+    tokio::spawn(earn::run(state.clone()));
 
     let addr: SocketAddr = format!("{}:{}", cfg.host, cfg.port).parse().context("invalid host/port")?;
     let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
