@@ -562,3 +562,5 @@ details.disclosure[open] > summary .chev { transform: rotate(90deg); }
 .topbar .title .tg-badge { display: inline-flex; flex: none; align-items: center; gap: 0.25rem; margin-left: 0.5rem; height: 1.25rem; padding: 0 0.45rem; border-radius: var(--radius-pill); font-size: 11px; background: rgb(34 158 217 / 0.12); color: #229ed9; overflow: visible; }
 .topbar .title .tg-badge .i { width: 0.75rem; height: 0.75rem; }
 .topbar .title .tg-badge.delegated { background: hsl(var(--muted)); color: hsl(var(--muted-foreground)); }
+.secret-chip { display: inline-flex; align-items: center; gap: 0.25rem; padding: 0 0.4rem; border-radius: var(--radius-mark); background: hsl(var(--foreground) / 0.07); color: hsl(var(--muted-foreground)); font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.85em; white-space: nowrap; }
+.secret-chip .i { width: 0.85em; height: 0.85em; }

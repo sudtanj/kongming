@@ -428,6 +428,8 @@ const STRINGS = {
     'activity.kind.scheduled': 'Scheduled',
     'activity.kind.earn_scan': 'Earnings scan',
     'activity.kind.earn': 'Earned',
+    'activity.kind.setup': 'Set up',
+    'secret.title': 'Pasted key, kept out of the conversation: the agent sees only this reference',
     'toast.learned': 'Learned: {{note}}',
     'about.title': 'About',
     'about.desc': 'kongming is a small agentic daemon: a team of agents, skills that grow, and tools over MCP. It is named after 孔明 Kongming, the courtesy name of 诸葛亮 Zhuge Liang, the strategist of the Three Kingdoms who planned and directed rather than fought. His feather fan (羽扇) is the logo.',
@@ -575,6 +577,7 @@ const md = (() => {
     const hold = [];
     const keep = (html) => { hold.push(html); return `\u0000${hold.length - 1}\u0000`; };
     s = s.replace(/`([^`\n]+)`/g, (_, c) => keep(`<code>${c}</code>`));
+    s = s.replace(/\[secret:([A-Za-z0-9]+) ([\w-]+) …([^\]\s]{0,12})\]/g, (_, id, kind, end) => keep(`<span class="secret-chip" title="${esc(t('secret.title'))}"><svg class="i" aria-hidden="true"><use href="#i-lock"></use></svg>${kind} …${end}</span>`));
     s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)/g, (_, alt, src) => SAFE_IMG.test(src) ? keep(`<img src="${esc(src)}" alt="${alt}" loading="lazy">`) : alt);
     s = s.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)/g, (_, txt, url) => keep(`<a href="${safeUrl(url)}" target="_blank" rel="noopener noreferrer">${txt}</a>`));
     s = s.replace(/(^|[\s(])(https?:\/\/[^\s<]+?)(?=[.,;:!?)]*(?:\s|$))/g, (_, pre, url) => pre + keep(`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${url}</a>`));

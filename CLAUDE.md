@@ -5,7 +5,7 @@ Single Rust binary (`src/main.rs` + `src/lib.rs`). No local storage: every row i
 Layout:
 - `db/` store + schema (`SCHEMA` is idempotent, re-applied at boot) + row models (camelCase JSON).
 - `llm/` provider trait with OpenAI-compatible and Anthropic streaming implementations; `sse.rs` is the shared SSE parser.
-- `agent/` the loop (`run_turn`), prompt assembly, `@` mentions, built-in tools, reflection pass (self-improvement) and delegation (`run_delegation`).
+- `agent/` the loop (`run_turn`), prompt assembly, `@` mentions, built-in tools, reflection pass (self-improvement) and delegation (`run_delegation`). `paste.rs` moves keys a person pastes into the `vault` setting before the message is stored or sent (the text keeps `[secret:<id> …]`); `setup.rs` is the lead agent's `setup` tool, which resolves those references and goes through the dashboard's functions in `web/api.rs` (`apply_settings`, `add_mcp`, `save_earn`, `import_skill_md`).
 - `mcp/` remote MCP client (streamable HTTP + legacy SSE) and OAuth (discovery, dynamic registration, PKCE, refresh).
 - `telegram/` long-polling bot with streamed edits. `cron.rs` scheduled prompts. `proactive.rs` messages Kongming sends on its own (`notify_user` delivery and limits, the check-in loop). `earn.rs` paid-work scans: provider catalog and listing parsers, the scan loop, the `earn` tool (provider API calls with the saved key; writes only for approved leads).
 - `web/` axum router, cookie auth, REST (`api.rs`), WebSocket (`ws.rs`); the UI in `web/` is embedded with `include_str!`.

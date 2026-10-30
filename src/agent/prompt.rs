@@ -143,6 +143,22 @@ sending. Message only what is new, timely and clearly useful to them; never smal
         );
     }
 
+    // 4c. Setting things up from what the user pastes (the lead, with the user)
+    if a.is_default && matches!(p.channel, "web" | "telegram") {
+        s.push_str("# Setup\n");
+        s.push_str(
+            "You set kongming up for the user with `setup`; they should not need the Settings pages. When they paste \
+setup material, work out what it is for and configure it right away, then confirm in a line or two what changed. Keys and \
+tokens they paste reach you as `[secret:<id> <kind> …1234]`: the value is in the vault, so pass the reference itself to \
+`setup` and never ask them to paste it again unless setup says it expired. Recognize: an LLM API key (with its provider, \
+base URL or model) → `llm`; a Telegram bot token (digits:letters) or their Telegram user id → `telegram`; an MCP config \
+JSON or an MCP server URL → `mcp_add`; a paid-work site key → `earn` with its provider; a SKILL.md or a link to one → \
+`skill_import`; the address kongming runs at → `public_url`. Check `setup` `show` first when it is unclear what a key is \
+for, and ask only when it is still ambiguous (an `sk-` key fits several OpenAI-compatible providers). Never repeat a key \
+back. The `setup-from-paste` skill has the details.\n\n",
+        );
+    }
+
     // 5. Memory
     if !p.memories.is_empty() {
         s.push_str("# Memory\n");
@@ -302,6 +318,9 @@ mod tests {
         assert!(!s2.contains("delegate_task"));
         assert!(s2.contains("the user does not talk to you directly"), "{s2}");
         assert!(!s2.contains("# Reaching the user"), "only the lead reaches the user");
+        assert!(s.contains("# Setup") && !s2.contains("# Setup"), "only the lead sets things up");
+        let s3 = build(&PromptInput { channel: "delegation", ..p });
+        assert!(!s3.contains("# Setup"));
     }
 
     #[test]

@@ -217,6 +217,7 @@ pub async fn run_builtin(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Option<
         "notify_user" => notify_user(ctx, args).await,
         "schedule" => schedule(ctx, args).await,
         "earn" => crate::earn::tool(ctx, args).await,
+        "setup" => super::setup::run(ctx, args).await,
         "shell" => return Some(run_shell(ctx, args).await),
         _ => return None,
     };
@@ -488,7 +489,7 @@ async fn web_fetch(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
     Ok(format!("HTTP {status} {ct}\n\n{}", crate::mcp::truncate(text.trim(), max)))
 }
 
-fn is_public_ip(ip: &std::net::IpAddr) -> bool {
+pub(crate) fn is_public_ip(ip: &std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
             !(v4.is_private()

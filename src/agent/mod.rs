@@ -4,7 +4,9 @@
 //! may save skills and memories. Events go to the bus for whoever is listening.
 
 pub mod mention;
+pub mod paste;
 pub mod prompt;
+pub mod setup;
 pub mod shell;
 pub mod tools;
 
@@ -285,6 +287,10 @@ async fn plan(state: &Shared, session: &Session, agent: Agent, mentions: &mentio
     {
         tool_specs.push(crate::earn::tool_spec());
     }
+    // Setup: the lead agent, in a conversation with the user.
+    if setup::offered(&agent, &session.channel) {
+        tool_specs.push(setup::spec());
+    }
     let mut allowed = agent.mcp_servers.clone();
     if let Some(a) = &mut allowed {
         a.extend(mentions.mcp.iter().cloned());
@@ -513,11 +519,16 @@ async fn run_turn_inner(
     cancel: &AtomicBool,
 ) -> Result<TurnResult> {
     let turn_id = new_id();
-    let mentions = mention::parse(&user_text);
     let agent = match &opts.agent_override {
         Some(a) => a.clone(),
         None => user_agent(state, session).await?,
     };
+    // A person's message: pasted keys go to the vault before anything sees them.
+    let user_text = match &opts.agent_override {
+        None => paste::stash(state, &user_text).await,
+        Some(_) => user_text,
+    };
+    let mentions = mention::parse(&user_text);
     if agent.id != session.agent_id {
         state.db.set_session_agent(&session.id, &agent.id).await?;
         session.agent_id = agent.id.clone();
@@ -1066,6 +1077,44 @@ The browser address (`http://<ip>:9222`) comes from another skill or from the us
 - The browser is the user's real profile and may be logged in: never buy, post, send, delete or change settings without the user's explicit OK, and never open a URL ending in `#stop-session` (it ends the browser session).
 - If `cdp` says the browser cannot be reached, the chrome-cdp session is probably not running, or the address is wrong: tell the user instead of retrying."##,
         &["tools", "browser"],
+    ),
+    (
+        "setup-from-paste",
+        "Use when the user pastes a key, token, config, URL or skill file: recognize what it is and configure it with setup.",
+        r##"# Setting kongming up from a paste
+
+The user should never need the Settings pages: what they paste, you configure with `setup`, then confirm in one or two lines.
+
+## Keys never pass through you
+Pasted keys are cut out of the message before you see it and replaced by `[secret:<id> <kind> …1234]`. Pass that reference (or `secret:<id>`) as the value; `setup` fills it in. A reference expires after a day: only then ask for the key again. Never write a key into memory, a skill or a reply.
+
+## What it is → what to call
+| Pasted | Looks like | Call |
+|---|---|---|
+| Anthropic key | `[secret:… anthropic …]` (sk-ant-…) | `setup` op `llm`, api_key (kind is set to anthropic) |
+| OpenRouter key | `[secret:… openrouter …]` (sk-or-…) | op `llm`, api_key; base_url is set to OpenRouter; give a model like `anthropic/claude-sonnet-4.5` |
+| OpenAI-style key | `[secret:… openai …]` (sk-…) | op `llm`, api_key, plus kind/base_url/model when the user named the provider (DeepSeek, Moonshot, Groq…); ask which provider if nothing says |
+| Google AI key | `[secret:… google …]` (AIza…) | op `llm`, api_key (Gemini's OpenAI-compatible address is set), model e.g. `gemini-2.5-flash` |
+| Telegram bot token | `[secret:… telegram …]` (digits:letters) | op `telegram`, token; add their numeric user id with allowed_users when known |
+| Telegram user id | a bare 6–12 digit number after setting up the bot | op `telegram`, allowed_users |
+| MCP config | JSON with `mcpServers` / `servers`, or one server with `url` | op `mcp_add`, config = the pasted JSON as it is |
+| MCP server URL | https://…/mcp or …/sse, maybe with a token | op `mcp_add`, url (+ name, token) |
+| Earnings key | a key named for toku, dealwork, OpenTask, MoltJobs, HYRVE or Claw Earn | op `earn`, provider, api_key |
+| Skill | a SKILL.md (frontmatter with name and description) or a link to one | op `skill_import`, markdown or url |
+| Public address | "kongming is at https://…" | op `public_url` |
+
+## Steps
+1. If it is unclear what a key is for, call `setup` op `show` and look at what is missing or broken.
+2. Make the call. For several items in one paste, one call each.
+3. Read the result and tell the user what changed. When `llm` fails the old settings stay: say why (wrong model id, wrong address, bad key).
+4. An MCP server that needs sign-in: pass on the link setup gives, or point to Settings → MCP → Sign in.
+
+## Pitfalls
+- Local MCP servers (`command`, stdio) are refused on purpose: say so, and suggest the server's hosted (http) version if it has one.
+- A key with no hint of its provider: ask, do not guess between providers.
+- Earnings needs to be switched on separately (`/earn on`, or `setup` op `earn` enabled true when the user asks for it).
+"##,
+        &["setup", "settings"],
     ),
 ];
 

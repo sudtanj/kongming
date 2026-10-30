@@ -22,6 +22,16 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// The message, so code outside the API (the `setup` tool) can use these
+/// functions with `anyhow`.
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+
+impl std::error::Error for ApiError {}
+
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
         let msg = format!("{e:#}");
@@ -394,10 +404,14 @@ pub async fn delete_skill(State(state): State<Shared>, Path(name): Path<String>)
 /// Import a SKILL.md document (frontmatter `name`, `description`, `tags`).
 pub async fn import_skill(State(state): State<Shared>, Json(body): Json<Value>) -> R {
     let md = s(&body, "markdown").ok_or_else(|| bad("markdown is required"))?;
+    Ok(Json(json!(import_skill_md(&state, md).await?)))
+}
+
+/// Save a SKILL.md document as a skill (the dashboard, and the `setup` tool).
+pub async fn import_skill_md(state: &Shared, md: &str) -> Result<crate::db::Skill, ApiError> {
     let (name, description, tags, skill_body) =
         parse_skill_markdown(md).ok_or_else(|| bad("expected YAML frontmatter with name and description"))?;
-    let saved = state.db.save_skill(&name, &description, &skill_body, &tags, "user", None).await?;
-    Ok(Json(json!(saved)))
+    state.db.save_skill(&name, &description, &skill_body, &tags, "user", None).await.map_err(ApiError::from)
 }
 
 pub fn parse_skill_markdown(md: &str) -> Option<(String, String, Vec<String>, String)> {
@@ -534,11 +548,7 @@ async fn mcp_from_body(existing: Option<McpServer>, body: &Value) -> Result<McpS
 }
 
 pub async fn create_mcp(State(state): State<Shared>, Json(body): Json<Value>) -> R {
-    let m = mcp_from_body(None, &body).await?;
-    if state.db.mcp_servers().await?.iter().any(|x| x.name == m.name) {
-        return Err(bad("an MCP server with that name exists"));
-    }
-    state.db.upsert_mcp_server(&m).await?;
+    let m = add_mcp(&state, &body).await?;
     let st = state.clone();
     let id = m.id.clone();
     tokio::spawn(async move {
@@ -547,16 +557,33 @@ pub async fn create_mcp(State(state): State<Shared>, Json(body): Json<Value>) ->
     Ok(Json(crate::mcp::server_public(&m)))
 }
 
+/// Save a new remote MCP server (the dashboard, and the `setup` tool); the
+/// caller connects it.
+pub async fn add_mcp(state: &Shared, body: &Value) -> Result<McpServer, ApiError> {
+    let m = mcp_from_body(None, body).await?;
+    if state.db.mcp_servers().await?.iter().any(|x| x.name == m.name) {
+        return Err(bad("an MCP server with that name exists"));
+    }
+    state.db.upsert_mcp_server(&m).await?;
+    Ok(m)
+}
+
 pub async fn update_mcp(State(state): State<Shared>, Path(id): Path<String>, Json(body): Json<Value>) -> R {
     let existing = state.db.mcp_server(&id).await?.ok_or_else(|| not_found("server not found"))?;
-    let m = mcp_from_body(Some(existing), &body).await?;
-    state.db.upsert_mcp_server(&m).await?;
-    state.mcp.forget(&id);
+    let m = change_mcp(&state, existing, &body).await?;
     let st = state.clone();
     tokio::spawn(async move {
         let _ = st.mcp.refresh(&id).await;
     });
     Ok(Json(crate::mcp::server_public(&m)))
+}
+
+/// Save a change to an MCP server; the caller reconnects it.
+pub async fn change_mcp(state: &Shared, existing: McpServer, body: &Value) -> Result<McpServer, ApiError> {
+    let m = mcp_from_body(Some(existing), body).await?;
+    state.db.upsert_mcp_server(&m).await?;
+    state.mcp.forget(&m.id);
+    Ok(m)
 }
 
 pub async fn delete_mcp(State(state): State<Shared>, Path(id): Path<String>) -> R {
@@ -587,7 +614,7 @@ pub async fn call_mcp_tool(State(state): State<Shared>, Path(id): Path<String>, 
 /// its own. Otherwise (behind a firewall) it is the loopback address, as
 /// for native apps (RFC 8252): the page usually fails to load and the user
 /// pastes the address-bar URL back into kongming. Returns (uri, manual).
-async fn redirect_uri(state: &Shared) -> (String, bool) {
+pub(crate) async fn redirect_uri(state: &Shared) -> (String, bool) {
     match state.public_url().await {
         Some(base) => (format!("{base}/api/mcp/oauth/callback"), false),
         None => (format!("http://localhost:{}/api/mcp/oauth/callback", state.cfg.port), true),
@@ -668,37 +695,50 @@ pub async fn get_settings(State(state): State<Shared>) -> R {
 }
 
 pub async fn put_settings(State(state): State<Shared>, Json(body): Json<Value>) -> R {
+    apply_settings(&state, &body).await?;
+    get_settings(State(state)).await
+}
+
+/// The LLM configuration with a change from the dashboard (or `setup`) applied.
+pub async fn merge_llm(state: &Shared, llm: &Value) -> Result<ProviderConfig, ApiError> {
+    let mut cfg: ProviderConfig = state.provider_config().await.unwrap_or_default();
+    if let Some(k) = s(llm, "kind") {
+        cfg.kind = k.to_string();
+    }
+    if llm.get("baseUrl").is_some() {
+        cfg.base_url = s(llm, "baseUrl").map(str::to_string);
+    }
+    if let Some(k) = s(llm, "apiKey") {
+        cfg.api_key = Some(k.to_string());
+    }
+    if llm.get("clearApiKey").and_then(Value::as_bool) == Some(true) {
+        cfg.api_key = None;
+    }
+    if let Some(m) = s(llm, "model") {
+        cfg.model = m.to_string();
+    }
+    if llm.get("maxTokens").is_some() {
+        cfg.max_tokens = llm.get("maxTokens").and_then(Value::as_u64).map(|v| v as u32);
+    }
+    if llm.get("temperature").is_some() {
+        cfg.temperature = llm.get("temperature").and_then(Value::as_f64).map(|v| v as f32);
+    }
+    if llm.get("effort").is_some() {
+        cfg.effort = s(llm, "effort").map(str::to_string);
+    }
+    if !matches!(cfg.kind.as_str(), "openai" | "anthropic") {
+        return Err(bad("llm.kind must be openai or anthropic"));
+    }
+    Ok(cfg)
+}
+
+/// Save a settings change (Settings in the dashboard, and the `setup` tool).
+pub async fn apply_settings(state: &Shared, body: &Value) -> Result<(), ApiError> {
+    let state = state.clone();
     let telegram_before = crate::telegram::active_token(&state).await;
     let public_before = state.public_url().await;
     if let Some(llm) = body.get("llm") {
-        let mut cfg: ProviderConfig = state.provider_config().await.unwrap_or_default();
-        if let Some(k) = s(llm, "kind") {
-            cfg.kind = k.to_string();
-        }
-        if llm.get("baseUrl").is_some() {
-            cfg.base_url = s(llm, "baseUrl").map(str::to_string);
-        }
-        if let Some(k) = s(llm, "apiKey") {
-            cfg.api_key = Some(k.to_string());
-        }
-        if llm.get("clearApiKey").and_then(Value::as_bool) == Some(true) {
-            cfg.api_key = None;
-        }
-        if let Some(m) = s(llm, "model") {
-            cfg.model = m.to_string();
-        }
-        if llm.get("maxTokens").is_some() {
-            cfg.max_tokens = llm.get("maxTokens").and_then(Value::as_u64).map(|v| v as u32);
-        }
-        if llm.get("temperature").is_some() {
-            cfg.temperature = llm.get("temperature").and_then(Value::as_f64).map(|v| v as f32);
-        }
-        if llm.get("effort").is_some() {
-            cfg.effort = s(llm, "effort").map(str::to_string);
-        }
-        if !matches!(cfg.kind.as_str(), "openai" | "anthropic") {
-            return Err(bad("llm.kind must be openai or anthropic"));
-        }
+        let cfg = merge_llm(&state, llm).await?;
         state.db.set_setting("llm", &serde_json::to_value(&cfg).unwrap()).await?;
     }
     if let Some(tg) = body.get("telegram") {
@@ -762,7 +802,7 @@ pub async fn put_settings(State(state): State<Shared>, Json(body): Json<Value>) 
         }
         state.telegram_reload.notify_one();
     }
-    get_settings(State(state)).await
+    Ok(())
 }
 
 /// Proactive settings plus what happened lately, for Settings → Channels.
@@ -794,9 +834,15 @@ pub async fn get_earn(State(state): State<Shared>) -> R {
 }
 
 pub async fn put_earn(State(state): State<Shared>, Json(body): Json<Value>) -> R {
-    let merged = crate::earn::settings(&state).await.merged(&body).map_err(bad)?;
-    crate::earn::save(&state, &merged).await?;
+    save_earn(&state, &body).await?;
     Ok(Json(crate::earn::dashboard_json(&state).await?))
+}
+
+/// Save a change to Settings → Earnings (the dashboard, and the `setup` tool).
+pub async fn save_earn(state: &Shared, body: &Value) -> Result<(), ApiError> {
+    let merged = crate::earn::settings(state).await.merged(body).map_err(bad)?;
+    crate::earn::save(state, &merged).await?;
+    Ok(())
 }
 
 pub async fn run_earn_scan(State(state): State<Shared>) -> R {

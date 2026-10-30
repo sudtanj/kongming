@@ -590,7 +590,7 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
         let name = name.split('@').next().unwrap_or(name);
         match name {
             "start" | "help" => {
-                tg.send_message(chat_id, "Hi! Just type to talk to the lead agent; it runs the team and hands work to the others.\n/new – new conversation\n/agents – show the team\n/skills – list skills\n/status – status\n/stop – stop the current reply\n/proactive – messages Kongming sends on its own (on, off, now)\n/earn – paid work Kongming finds for you (on, off, scan)").await?;
+                tg.send_message(chat_id, "Hi! Just type to talk to the lead agent; it runs the team and hands work to the others. Paste a key, token, MCP config or skill and it sets it up for you (keys are taken out of the chat).\n/new – new conversation\n/agents – show the team\n/skills – list skills\n/status – status\n/stop – stop the current reply\n/proactive – messages Kongming sends on its own (on, off, now)\n/earn – paid work Kongming finds for you (on, off, scan)").await?;
             }
             "new" => {
                 let s = session_for_chat(&state, chat_id, true).await?;
@@ -729,6 +729,12 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
         return Ok(());
     }
     tg.typing(chat_id).await;
+    // A pasted key should not stay in the chat: the vault keeps it for `setup`.
+    if !agent::paste::detect(&text).is_empty() {
+        if let Some(mid) = msg.get("message_id").and_then(Value::as_i64) {
+            let _ = tg.call("deleteMessage", json!({"chat_id": chat_id, "message_id": mid})).await;
+        }
+    }
     let session_id = session.id.clone();
     let mut events = state.subscribe();
     let thinking = show_thinking(&state).await;
