@@ -213,7 +213,10 @@ enum HttpErrors {
 enum Data {
     Raw(String),
     /// Read from a file (`-` is stdin); line breaks are dropped unless `binary`, as curl -d does.
-    File { path: String, binary: bool },
+    File {
+        path: String,
+        binary: bool,
+    },
     /// `--data-urlencode`: `name=value` with the value percent-encoded.
     Encode(String),
 }
