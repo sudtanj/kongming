@@ -1052,13 +1052,14 @@ pub const SEED_SKILLS: &[(&str, &str, &str, &[&str])] = &[
 The `shell` tool runs one `sh -c` script in a read-only BusyBox sandbox on the kongming board. It is for interacting, not for storage.
 
 ## Rules of the sandbox
-- Nothing can be written to disk: `> file`, `tee`, `wget -O file`, `mkdir`, `touch`, `rm` fail ("Permission denied", "Read-only file system" or "File too large"). Pass data along with pipes and do everything a step needs in one command; nothing carries over between calls, so keep what matters in your own reply.
+- Nothing can be written to disk: `> file`, `tee`, `curl -o file`, `wget -O file`, `mkdir`, `touch`, `rm` fail ("Permission denied", "Read-only file system" or "File too large"). Pass data along with pipes and do everything a step needs in one command; nothing carries over between calls, so keep what matters in your own reply.
 - The environment is empty: no tokens or passwords. Never paste secrets into a command.
 - Time limit 30 s (`timeout_secs` up to 300). Background jobs are killed when the command ends.
 - The output starts with `exit N`; anything but `exit 0` failed, so read the message and fix the command instead of repeating it. Output over ~12,000 characters is cut in the middle: narrow it with `grep`, `sed -n`, `head -c`, `tail`.
 
 ## Handy commands
-- Web and network: `wget -qO- URL | head -c 3000`, `wget -S --spider URL 2>&1 | head` (status and headers), `nc -z -w 3 HOST PORT && echo open`, `nslookup HOST`.
+- Web: `curl` and `wget` use real TLS and always write to stdout. `curl -sS URL | head -c 3000`, `curl -sSI URL` (status and headers), `curl -sS -o /dev/null -w '%{http_code}\n' URL`, `curl -sS -X POST -H 'Content-Type: application/json' -d '{"k":"v"}' URL`, `curl -sSL` to follow redirects, `-f` to fail on HTTP errors; `wget -qO- URL` works too.
+- Network: `nc -z -w 3 HOST PORT && echo open`, `nslookup HOST`.
 - Text: `grep -E -i`, `sed -n '1,40p'`, `awk -F, '{print $2}'`, `sort | uniq -c | sort -rn`, `wc -l`, `cut`, `tr`.
 - Numbers and dates: `echo $((6*7))`, `awk 'BEGIN{printf "%.2f\n", 10/3}'`, `date -u`, `date -u -d @1700000000`.
 - JSON has no jq: pull fields with `grep -o '"name":"[^"]*"'`, or parse it in the browser with `cdp eval`.

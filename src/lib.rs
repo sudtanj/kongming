@@ -7,6 +7,7 @@ pub mod config;
 pub mod cron;
 pub mod db;
 pub mod earn;
+pub mod fetch;
 pub mod llm;
 pub mod mcp;
 pub mod proactive;

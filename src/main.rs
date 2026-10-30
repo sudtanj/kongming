@@ -10,14 +10,19 @@ use kongming::{agent, config, cron, db, earn, proactive, state, telegram, web};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
-    // `kongming cdp ...` (or the `cdp` link in the image) is the browser client for the shell tool.
+    // Commands for the shell tool, run as `kongming cdp|curl|wget ...` or through the links
+    // of those names in the image: `cdp` is the browser client, `curl` and `wget` fetch URLs
+    // with rustls instead of BusyBox's TLS and always write to stdout.
     let args: Vec<String> = std::env::args().collect();
     let prog = args.first().map(|a| a.rsplit('/').next().unwrap_or(a).to_string()).unwrap_or_default();
-    if prog == "cdp" {
-        std::process::exit(kongming::cdp::main(args[1..].to_vec()));
-    }
-    if args.get(1).map(String::as_str) == Some("cdp") {
-        std::process::exit(kongming::cdp::main(args[2..].to_vec()));
+    let (tool, rest) = match prog.as_str() {
+        p @ ("cdp" | "curl" | "wget") => (p, 1),
+        _ => (args.get(1).map(String::as_str).unwrap_or_default(), 2),
+    };
+    match tool {
+        "cdp" => std::process::exit(kongming::cdp::main(args[rest..].to_vec())),
+        "curl" | "wget" => std::process::exit(kongming::fetch::main(tool, args[rest..].to_vec())),
+        _ => {}
     }
     let cfg = config::Config::parse();
     tracing_subscriber::fmt()

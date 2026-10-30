@@ -3,10 +3,12 @@
 //! commands such as `cdp`, quick text processing), not for keeping files.
 //!
 //! The Docker image ships a static BusyBox (`/opt/busybox`), so the agent gets
-//! `sh` plus the usual applets without a distro. Isolation comes from the
-//! container (read-only root, no capabilities, pid and memory caps) plus what
-//! is set here: an empty environment (no secrets), `/` as the working
-//! directory, a process group killed on timeout, and no file writes: a
+//! `sh` plus the usual applets without a distro; `cdp`, `curl` and `wget` are
+//! links to the kongming binary (`curl`/`wget` in `fetch.rs`: rustls, output
+//! always to stdout). Isolation comes from the container (read-only root, no
+//! capabilities, pid and memory caps) plus what is set here: an empty
+//! environment (no secrets), `/` as the working directory, a process group
+//! killed on timeout, and no file writes: a
 //! Landlock ruleset (when the kernel has it) refuses creating, changing or
 //! deleting anything except writing to /dev/null, and a zero file-size limit
 //! keeps any file that can still be created empty. The kernel's OOM killer
