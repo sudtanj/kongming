@@ -46,7 +46,7 @@ kongming runs no model locally; it is a small HTTP client and server, so the dev
 | OS | Linux with Docker 20.10+, or any Linux for the static release binary | Armbian / Debian 12 |
 | Clock | NTP-synced (TLS, OAuth token expiry and cron need correct time) | |
 
-32-bit ARM (armv7, e.g. the original Orange Pi Zero) is not built. <!-- bench:summary -->Not measured yet: the Benchmark workflow fills this in.<!-- /bench:summary --> Measure on your device with `docker stats kongming`.
+32-bit ARM (armv7, e.g. the original Orange Pi Zero) is not built. <!-- bench:summary -->Measured: a 4.7 MiB binary that is ready 14 ms after start and idles at 6.1 MiB RSS; 50 concurrent chats peak at 22.1 MiB (1 worker thread(s); see [Benchmark](#benchmark)).<!-- /bench:summary --> Measure on your device with `docker stats kongming`.
 
 External services:
 
@@ -140,7 +140,25 @@ work, and a real Turso adds its round trips to every turn. Expect the Orange Pi'
 cores to add latency under load; memory carries over.
 
 <!-- bench:report -->
-Not measured yet.
+Measured 2026-10-30 on aarch64 at commit `2581af9`. Binary 4.7 MiB. Each chat is a new session and one message answered in full by the default agent (system prompt, skills index and tool schemas included). The mock model streams 8 chunks 25 ms apart (about 200 ms per reply); the Turso mock runs on the same machine, so a real Turso adds its round trips to every turn.
+
+### 1 worker thread(s)
+
+Ready 14 ms after spawn (schema and starter skills applied).
+
+| State | RSS | Threads |
+|---|---:|---:|
+| Idle, 2 s after start | 6.1 MiB | 2 |
+| Idle after 10 sequential chats | 6.5 MiB | 2 |
+| Idle, 5 s after the load runs | 22.1 MiB | 2 |
+| Peak for the whole run (VmHWM) | 22.1 MiB | |
+
+| Concurrent chats | Chats | Errors | Chats/s | p50 | p99 | Peak RSS |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 10 | 0 | 5 | 212 ms | 214 ms | 6.5 MiB |
+| 5 | 300 | 0 | 23 | 212 ms | 215 ms | 7.9 MiB |
+| 20 | 300 | 0 | 92 | 213 ms | 241 ms | 12.6 MiB |
+| 50 | 300 | 0 | 203 | 221 ms | 283 ms | 22.1 MiB |
 <!-- /bench:report -->
 
 ## License
