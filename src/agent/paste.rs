@@ -264,27 +264,33 @@ mod tests {
         detect(t).into_iter().map(|s| (s.kind, t[s.start..s.end].to_string())).collect()
     }
 
-    const ANT: &str = "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
-    const TG: &str = "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+    /// Key-shaped test values are put together at run time so no credential-looking
+    /// literal sits in this public repository (secret scanners flag those).
+    fn fake(prefix: &[&str], len: usize) -> String {
+        let body: String = "AbCdEf0123456789GhIjKl".chars().cycle().take(len).collect();
+        format!("{}{body}", prefix.concat())
+    }
 
     #[test]
     fn known_shapes_are_found() {
-        assert_eq!(kinds(&format!("here is my key {ANT} thanks")), vec![("anthropic", ANT.to_string())]);
-        assert_eq!(kinds(&format!("bot token: {TG}.")), vec![("telegram", TG.to_string())]);
-        let or = "sk-or-v1-0123456789abcdef0123456789abcdef";
-        assert_eq!(kinds(or), vec![("openrouter", or.to_string())]);
-        let oa = "sk-proj-AbCdEf0123456789GhIjKl";
-        assert_eq!(kinds(&format!("`{oa}`")), vec![("openai", oa.to_string())]);
-        let gh = "ghp_0123456789abcdefABCDEF0123456789abcd";
-        assert_eq!(kinds(&format!("GITHUB_TOKEN={gh}")), vec![("github", gh.to_string())]);
-        let g = "AIzaSyA-0123456789abcdefghijklmnopqrstu";
+        let ant = fake(&["sk-", "ant-", "api03-"], 40);
+        assert_eq!(kinds(&format!("here is my key {ant} thanks")), vec![("anthropic", ant.clone())]);
+        let tg = format!("{}:{}", "123456789", fake(&["A", "A"], 33));
+        assert_eq!(kinds(&format!("bot token: {tg}.")), vec![("telegram", tg.clone())]);
+        let or = fake(&["sk-", "or-", "v1-"], 32);
+        assert_eq!(kinds(&or), vec![("openrouter", or.clone())]);
+        let oa = fake(&["sk-", "proj-"], 22);
+        assert_eq!(kinds(&format!("`{oa}`")), vec![("openai", oa.clone())]);
+        let gh = fake(&["gh", "p_"], 36);
+        assert_eq!(kinds(&format!("GITHUB_TOKEN={gh}")), vec![("github", gh.clone())]);
+        let g = fake(&["AI", "za"], 35);
         assert_eq!(g.len(), 39);
-        assert_eq!(kinds(g), vec![("google", g.to_string())]);
+        assert_eq!(kinds(&g), vec![("google", g.clone())]);
     }
 
     #[test]
     fn announced_values_are_found() {
-        assert_eq!(kinds("toku api key: tk_live_8f3a9c2e1b7d"), vec![("key", "tk_live_8f3a9c2e1b7d".to_string())]);
+        assert_eq!(kinds("toku api key: tk_example_12345678"), vec![("key", "tk_example_12345678".to_string())]);
         assert_eq!(kinds("API_KEY=abc123def456ghi789"), vec![("key", "abc123def456ghi789".to_string())]);
         assert_eq!(kinds(r#"{"apiKey": "abc123def456ghi789"}"#), vec![("key", "abc123def456ghi789".to_string())]);
         assert_eq!(

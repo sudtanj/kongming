@@ -9,7 +9,7 @@ use kongming::agent::TurnOptions;
 use serde_json::{json, Value};
 use support::{role, spawn_app, str_of, text, tool_call, tool_names, McpMock, TestApp};
 
-const KEY: &str = "tk_live_8f3a9c2e1b7d4a6f";
+const KEY: &str = "tk_example_not_a_real_key_42";
 
 fn user_text(msgs: &[Value]) -> String {
     let m = msgs.iter().find(|m| role(m) == "user").expect("a user message");
@@ -32,7 +32,7 @@ async fn a_pasted_key_never_reaches_the_model_and_is_configured_by_reference() {
     app.send_wait(&sid, &format!("here is my toku api key: {KEY} please use it")).await;
     let stored = user_text(&app.messages(&sid).await);
     assert!(!stored.contains(KEY), "{stored}");
-    assert!(stored.contains("[secret:") && stored.contains("…4a6f]"), "{stored}");
+    assert!(stored.contains("[secret:") && stored.contains("…y_42]"), "{stored}");
     let req = app.llm.requests().last().cloned().unwrap();
     assert!(!req.to_string().contains(KEY), "the model never sees the key");
     assert!(tool_names(&req).iter().any(|n| n == "setup"), "the lead can set things up with the user");
