@@ -181,10 +181,8 @@ pub async fn stash(state: &Shared, text: &str) -> String {
     }
     out.push_str(&text[last..]);
     while v.len() > VAULT_MAX {
-        let oldest = v
-            .iter()
-            .min_by_key(|(_, e)| e.get("at").and_then(Value::as_i64).unwrap_or(0))
-            .map(|(k, _)| k.clone());
+        let oldest =
+            v.iter().min_by_key(|(_, e)| e.get("at").and_then(Value::as_i64).unwrap_or(0)).map(|(k, _)| k.clone());
         let Some(k) = oldest else { break };
         v.remove(&k);
     }

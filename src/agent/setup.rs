@@ -103,7 +103,8 @@ pub async fn run(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
         Ok(text) => {
             let text = paste::scrub(state, &text, &also).await;
             if op != "show" {
-                let _ = state.db.log_improvement(Some(&ctx.agent.id), Some(&ctx.session.id), "setup", None, &text).await;
+                let _ =
+                    state.db.log_improvement(Some(&ctx.agent.id), Some(&ctx.session.id), "setup", None, &text).await;
                 state.emit(Event::Improvement {
                     kind: "setup".into(),
                     note: text.clone(),
@@ -278,19 +279,19 @@ async fn telegram(state: &Shared, args: &Value) -> Result<String> {
         out.push_str("bot token accepted and saved. ");
     }
     if allowed.is_empty() {
-        out.push_str("No one is allowed to talk to the bot yet: the bot tells a new user their id, which goes in allowed_users.");
+        out.push_str(
+            "No one is allowed to talk to the bot yet: the bot tells a new user their id, which goes in allowed_users.",
+        );
     } else {
-        out.push_str(&format!(
-            "allowed users: {}.",
-            allowed.iter().map(i64::to_string).collect::<Vec<_>>().join(", ")
-        ));
+        out.push_str(&format!("allowed users: {}.", allowed.iter().map(i64::to_string).collect::<Vec<_>>().join(", ")));
     }
     Ok(out)
 }
 
 async fn public_url(state: &Shared, args: &Value) -> Result<String> {
     let u = opt(args, "url").ok_or_else(|| anyhow!("url is required"))?;
-    let parsed = url::Url::parse(u).map_err(|_| anyhow!("url must be a full address, e.g. https://kongming.example.com"))?;
+    let parsed =
+        url::Url::parse(u).map_err(|_| anyhow!("url must be a full address, e.g. https://kongming.example.com"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         bail!("url must start with http:// or https://");
     }
@@ -359,7 +360,7 @@ fn unfence(s: &str) -> &str {
     match t.strip_prefix("```") {
         Some(rest) => {
             let rest = rest.split_once('\n').map_or("", |(_, r)| r);
-            rest.trim_end().trim_end_matches("```")
+            rest.trim_end().trim_end_matches("```").trim()
         }
         None => t,
     }
@@ -391,7 +392,8 @@ async fn mcp_bodies(state: &Shared, args: &Value) -> Result<Vec<Result<Value>>> 
         }
         return Ok(out);
     }
-    let url = paste::resolve(state, opt(args, "url").ok_or_else(|| anyhow!("give url (or the pasted config)"))?).await?;
+    let url =
+        paste::resolve(state, opt(args, "url").ok_or_else(|| anyhow!("give url (or the pasted config)"))?).await?;
     let name = opt(args, "name").map(str::to_string).unwrap_or_else(|| name_from_url(&url));
     let mut body = json!({"name": name, "url": url, "transport": transport_for(opt(args, "transport"), &url)});
     if let Some(t) = secret(state, args, "token").await? {
@@ -435,8 +437,14 @@ async fn mcp_add(state: &Shared, args: &Value) -> Result<String> {
         let verb = if replaced { "updated" } else { "added" };
         match tokio::time::timeout(Duration::from_secs(45), state.mcp.refresh(&m.id)).await {
             Ok(Ok(tools)) => {
-                let names: Vec<&str> = tools.iter().filter_map(|t| t.get("name").and_then(Value::as_str)).take(12).collect();
-                lines.push(format!("- {name} ({}) {verb} and connected: {} tools ({})", host(&m.url), tools.len(), names.join(", ")));
+                let names: Vec<&str> =
+                    tools.iter().filter_map(|t| t.get("name").and_then(Value::as_str)).take(12).collect();
+                lines.push(format!(
+                    "- {name} ({}) {verb} and connected: {} tools ({})",
+                    host(&m.url),
+                    tools.len(),
+                    names.join(", ")
+                ));
             }
             Ok(Err(e)) if format!("{e:#}").contains("authorized") && m.token.is_none() => {
                 lines.push(sign_in(state, &m, verb).await);
@@ -456,17 +464,11 @@ async fn sign_in(state: &Shared, m: &crate::db::McpServer, verb: &str) -> String
         let oauth = json!({"authType": "oauth"});
         if let Ok(m) = api::change_mcp(state, m.clone(), &oauth).await {
             if let Ok(url) = state.mcp.start_oauth(&m.id, &redirect).await {
-                return format!(
-                    "- {} {verb}; it needs the user to sign in: send them this link: {url}",
-                    m.name
-                );
+                return format!("- {} {verb}; it needs the user to sign in: send them this link: {url}", m.name);
             }
         }
     }
-    format!(
-        "- {} {verb}; it needs the user to sign in (or a token): Settings → MCP → {} → Sign in",
-        m.name, m.name
-    )
+    format!("- {} {verb}; it needs the user to sign in (or a token): Settings → MCP → {} → Sign in", m.name, m.name)
 }
 
 // ----------------------------------------------------------------------- earn
@@ -499,9 +501,13 @@ async fn earn(state: &Shared, args: &Value) -> Result<String> {
     } else if opt(args, "api_key").is_some() {
         bail!("say which provider the key is for (provider)");
     }
-    for (arg, field) in
-        [("auto", "auto"), ("auto_max_usd", "autoMaxUsd"), ("min_usd", "minUsd"), ("scan_minutes", "scanMinutes"), ("profile", "profile")]
-    {
+    for (arg, field) in [
+        ("auto", "auto"),
+        ("auto_max_usd", "autoMaxUsd"),
+        ("min_usd", "minUsd"),
+        ("scan_minutes", "scanMinutes"),
+        ("profile", "profile"),
+    ] {
         if let Some(v) = args.get(arg) {
             body.insert(field.into(), v.clone());
         }
