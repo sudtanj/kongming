@@ -1055,7 +1055,9 @@ pub async fn heartbeat(state: &Shared) {
     };
     let now = now_ms();
     let Some(agent_id) = s.providers.get(p.id).and_then(|x| x.agent_id.clone()) else {
-        *HEARTBEAT.lock() = Some(json!({"ok": false, "at": now, "error": "agent ID missing: add it (agentAccountId on dealwork.ai) so Kongming can report in"}));
+        *HEARTBEAT.lock() = Some(
+            json!({"ok": false, "at": now, "error": "agent ID missing: add it (agentAccountId on dealwork.ai) so Kongming can report in"}),
+        );
         return;
     };
     let version = dealwork_skill_version(state, &s, p).await;
@@ -1402,7 +1404,10 @@ pub async fn status_html(state: &Shared) -> Result<String> {
     if let Some(hb) = last_heartbeat() {
         let line = match hb["error"].as_str() {
             Some(e) => format!("dealwork.ai: not reporting in ({})", crate::telegram::esc(e)),
-            None => format!("dealwork.ai: online, skill {}", crate::telegram::esc(hb["skillVersion"].as_str().unwrap_or("?"))),
+            None => format!(
+                "dealwork.ai: online, skill {}",
+                crate::telegram::esc(hb["skillVersion"].as_str().unwrap_or("?"))
+            ),
         };
         out.push_str(&line);
         out.push('\n');

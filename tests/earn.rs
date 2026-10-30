@@ -237,7 +237,8 @@ async fn dealwork_heartbeat_reports_the_skill_version() {
     let app = spawn_app(vec![]).await;
 
     // Without an agent ID there is nothing to report to; the dashboard says what is missing.
-    app.put("/api/earn", json!({"enabled": true, "providers": {"dealwork": {"apiKey": "ak_dw_1", "baseUrl": url}}})).await;
+    app.put("/api/earn", json!({"enabled": true, "providers": {"dealwork": {"apiKey": "ak_dw_1", "baseUrl": url}}}))
+        .await;
     kongming::earn::heartbeat(&app.state).await;
     assert!(mock.calls("heartbeat").is_empty());
     let d = app.get("/api/earn").await;
