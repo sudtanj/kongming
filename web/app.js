@@ -352,6 +352,12 @@ const STRINGS = {
     'earn.keyPh': 'API key',
     'earn.keySaved': 'Key saved (enter to replace)',
     'earn.keyStored': 'Key saved',
+    'earn.agentIdPh': 'Agent ID',
+    'earn.agentIdSaved': 'Agent ID saved',
+    'earn.online': 'Online',
+    'earn.offline': 'Not reporting in',
+    'earn.heartbeatOk': 'Reporting in as skill {{version}} ({{when}})',
+    'earn.heartbeatErr': 'Not reporting in: {{error}}',
     'earn.clearKey': 'Remove key',
     'earn.docs': 'Docs',
     'earn.leads': 'Leads',
@@ -1872,12 +1878,17 @@ const settings = (() => {
       const key = input({ type: 'password', autocomplete: 'off', placeholder: p.keySet ? t('earn.keySaved') : t('earn.keyPh'), style: 'max-width:14rem' });
       const saveKey = h('button', { class: 'btn outline sm', type: 'button', onClick: async () => { if (!key.value.trim()) return; saveKey.disabled = true; try { await api.put('/api/earn', { providers: { [p.id]: { apiKey: key.value.trim() } } }); toast(t('earn.keyStored')); reload(); } catch (e) { toast(e.message, 'err'); saveKey.disabled = false; } } }, t('common.save'));
       const clearKey = p.keySet ? h('button', { class: 'icon-btn quiet', type: 'button', title: t('earn.clearKey'), 'aria-label': t('earn.clearKey'), onClick: () => modal.confirm({ title: t('earn.clearKey'), confirm: t('common.confirm'), danger: true, onConfirm: async () => { await api.put('/api/earn', { providers: { [p.id]: { clearApiKey: true } } }); reload(); } }) }, icon('x')) : null;
+      // dealwork.ai lists the agent as pending until Kongming reports in with its agent ID.
+      const hb = p.heartbeat;
+      const agentId = p.id === 'dealwork' ? input({ value: p.agentId || '', autocomplete: 'off', placeholder: t('earn.agentIdPh'), style: 'max-width:10rem' }) : null;
+      if (agentId) agentId.addEventListener('change', async () => { try { await api.put('/api/earn', { providers: { [p.id]: { agentId: agentId.value.trim() } } }); toast(t('earn.agentIdSaved')); reload(); } catch (e) { toast(e.message, 'err'); } });
       plist.appendChild(h('div', { class: 'list-row' },
         h('div', { class: 'lr-main' },
-          h('div', { class: 'lr-title' }, h('a', { href: p.site, target: '_blank', rel: 'noopener' }, p.name), h('span', { class: 'pill' }, t('earn.kind.' + p.kind)), p.acts ? null : h('span', { class: 'pill warn' }, t('earn.listOnly')), p.keySet ? h('span', { class: 'pill ok' }, t('earn.keySet')) : null, s.error ? h('span', { class: 'pill err' }, t('earn.error')) : null),
+          h('div', { class: 'lr-title' }, h('a', { href: p.site, target: '_blank', rel: 'noopener' }, p.name), h('span', { class: 'pill' }, t('earn.kind.' + p.kind)), p.acts ? null : h('span', { class: 'pill warn' }, t('earn.listOnly')), p.keySet ? h('span', { class: 'pill ok' }, t('earn.keySet')) : null, s.error ? h('span', { class: 'pill err' }, t('earn.error')) : null, hb ? h('span', { class: 'pill ' + (hb.ok ? 'ok' : 'warn') }, hb.ok ? t('earn.online') : t('earn.offline')) : null),
           h('div', { class: 'lr-sub' }, p.payout + ' · ' + statusText),
+          hb ? h('div', { class: 'lr-sub' }, hb.ok ? t('earn.heartbeatOk', { version: hb.skillVersion || '?', when: relTime(hb.at) }) : t('earn.heartbeatErr', { error: hb.error || '' })) : null,
           h('div', { class: 'lr-sub' }, p.keyHelp, ' ', h('a', { href: p.docs, target: '_blank', rel: 'noopener' }, t('earn.docs')))),
-        h('div', { class: 'lr-acts' }, p.acts || p.id === 'algora' ? h('div', { class: 'row', style: 'flex-wrap:nowrap' }, key, saveKey, clearKey) : null,
+        h('div', { class: 'lr-acts' }, p.acts || p.id === 'algora' ? h('div', { class: 'row', style: 'flex-wrap:nowrap' }, agentId, key, saveKey, clearKey) : null,
           switchEl(p.enabled, (v) => api.put('/api/earn', { providers: { [p.id]: { enabled: v } } }), t('common.enabled')))));
     }
     wrap.appendChild(section(t('earn.providers'), plist));

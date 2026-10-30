@@ -94,7 +94,7 @@ pub const PROVIDERS: &[Provider] = &[
         base: "https://dealwork.ai/api/v1",
         site: "https://dealwork.ai",
         docs: "https://dealwork.ai/skill.md",
-        key_help: "Connect an agent on dealwork.ai (owner link) and copy its ak_… key.",
+        key_help: "Connect an agent on dealwork.ai (owner link), copy its ak_… key and its agent ID (agentAccountId); the agent ID lets Kongming report in so the agent shows as online.",
         payout: "USD wallet, withdraw via Stripe or crypto",
         auth: Auth::Bearer,
         acts: true,
@@ -185,11 +185,13 @@ pub struct ProviderSettings {
     pub api_key: Option<String>,
     /// Another API base (tests, mirrors).
     pub base_url: Option<String>,
+    /// The agent account on the provider (dealwork.ai heartbeats).
+    pub agent_id: Option<String>,
 }
 
 impl Default for ProviderSettings {
     fn default() -> Self {
-        ProviderSettings { enabled: true, api_key: None, base_url: None }
+        ProviderSettings { enabled: true, api_key: None, base_url: None, agent_id: None }
     }
 }
 
@@ -257,6 +259,7 @@ impl Settings {
                 cur.enabled = p.get("enabled").and_then(Value::as_bool).unwrap_or(true);
                 cur.api_key = opt_text(p, "apiKey");
                 cur.base_url = opt_text(p, "baseUrl");
+                cur.agent_id = opt_text(p, "agentId");
             }
         }
         s
@@ -276,6 +279,9 @@ impl Settings {
                 }
                 if let Some(b) = &p.base_url {
                     o["baseUrl"] = json!(b);
+                }
+                if let Some(a) = &p.agent_id {
+                    o["agentId"] = json!(a);
                 }
                 (id.clone(), o)
             })
@@ -346,6 +352,13 @@ impl Settings {
                         return Err(format!("providers.{id}.baseUrl is not a URL"));
                     }
                     cur.base_url = Some(b.to_string()).filter(|b| !b.is_empty());
+                }
+                if let Some(a) = p.get("agentId") {
+                    let a = a.as_str().ok_or_else(|| format!("providers.{id}.agentId must be text"))?.trim();
+                    if a.len() > 100 || !a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                        return Err(format!("providers.{id}.agentId does not look like an agent ID"));
+                    }
+                    cur.agent_id = Some(a.to_string()).filter(|a| !a.is_empty());
                 }
             }
         }
@@ -969,6 +982,7 @@ async fn due(state: &Shared) -> bool {
 
 /// The scan loop; runs until the process stops.
 pub async fn run(state: Shared) {
+    tokio::spawn(heartbeat_loop(state.clone()));
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     loop {
         tick.tick().await;
@@ -977,6 +991,125 @@ pub async fn run(state: Shared) {
                 tracing::warn!("earn scan failed: {e:#}");
             }
         }
+    }
+}
+
+// ------------------------------------------------------------------ heartbeat
+
+/// dealwork.ai shows an agent as pending, with an unknown skill version, until
+/// the agent reports in: `POST /agents/{id}/heartbeat` with the `version` of
+/// the skill.md it follows. Kongming reads that file live, so it reports the
+/// file's current version.
+const HEARTBEAT_SECS: u64 = 60;
+const DEALWORK_SKILL_VERSION: &str = "1.6.5";
+/// Last heartbeat outcome, for the dashboard.
+static HEARTBEAT: parking_lot::Mutex<Option<Value>> = parking_lot::const_mutex(None);
+/// skill.md version and when it was read.
+static SKILL_VERSION: parking_lot::Mutex<Option<(String, i64)>> = parking_lot::const_mutex(None);
+
+/// `version:` from a skill.md YAML frontmatter.
+pub fn skill_version(md: &str) -> Option<String> {
+    let rest = md.trim_start().strip_prefix("---")?;
+    let front = &rest[..rest.find("\n---")?];
+    front
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("version:"))
+        .map(|v| v.trim().trim_matches(['"', '\'']).to_string())
+        .filter(|v| !v.is_empty())
+}
+
+pub fn heartbeat_path(agent_id: &str) -> String {
+    format!("/agents/{}/heartbeat", urlenc(agent_id))
+}
+
+async fn dealwork_skill_version(state: &Shared, s: &Settings, p: &Provider) -> String {
+    let now = now_ms();
+    let cached = SKILL_VERSION.lock().clone();
+    if let Some((v, at)) = &cached {
+        if now - at < 6 * 3_600_000 {
+            return v.clone();
+        }
+    }
+    // A test or mirror base has no skill.md of ours to read.
+    let fetched = if s.base(p) == p.base {
+        let get = async {
+            let resp = state.http.get(p.docs).timeout(Duration::from_secs(30)).send().await?.error_for_status()?;
+            anyhow::Ok(resp.text().await?)
+        };
+        get.await.ok().and_then(|md| skill_version(&md))
+    } else {
+        None
+    };
+    let v = fetched.or(cached.map(|(v, _)| v)).unwrap_or_else(|| DEALWORK_SKILL_VERSION.to_string());
+    *SKILL_VERSION.lock() = Some((v.clone(), now));
+    v
+}
+
+/// One heartbeat to dealwork.ai when it is on with a key; the outcome lands in `HEARTBEAT`.
+pub async fn heartbeat(state: &Shared) {
+    let s = settings(state).await;
+    let Some(p) = provider("dealwork") else { return };
+    let Some(key) = s.key(p).filter(|_| s.enabled && s.on(p)) else {
+        *HEARTBEAT.lock() = None;
+        return;
+    };
+    let now = now_ms();
+    let Some(agent_id) = s.providers.get(p.id).and_then(|x| x.agent_id.clone()) else {
+        *HEARTBEAT.lock() = Some(json!({"ok": false, "at": now, "error": "agent ID missing: add it (agentAccountId on dealwork.ai) so Kongming can report in"}));
+        return;
+    };
+    let version = dealwork_skill_version(state, &s, p).await;
+    let url = format!("{}{}", s.base(p), heartbeat_path(&agent_id));
+    let req = authorize(state.http.post(&url).timeout(Duration::from_secs(30)), p, key)
+        .header("accept", "application/json")
+        .json(&json!({ "skillVersion": version }));
+    let outcome = match req.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            if status.is_success() {
+                let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                let v = v.get("data").filter(|d| d.is_object()).unwrap_or(&v);
+                let current = v.get("currentSkillVersion").and_then(Value::as_str).map(str::to_string);
+                if current.as_deref().is_some_and(|c| c != version) {
+                    // skill.md moved on: read it again next time.
+                    *SKILL_VERSION.lock() = None;
+                }
+                json!({
+                    "ok": true,
+                    "at": now,
+                    "healthy": v.get("healthy").cloned().unwrap_or(Value::Null),
+                    "skillVersion": version,
+                    "currentSkillVersion": current,
+                    "pendingBids": v.pointer("/summary/pendingBidsCount").cloned().unwrap_or(Value::Null),
+                    "activeContracts": v.pointer("/summary/activeContractsCount").cloned().unwrap_or(Value::Null),
+                })
+            } else {
+                json!({"ok": false, "at": now, "error": format!("HTTP {status}: {}", crate::mcp::truncate(body.trim(), 200))})
+            }
+        }
+        Err(e) => json!({"ok": false, "at": now, "error": format!("{e}")}),
+    };
+    let mut last = HEARTBEAT.lock();
+    let was_ok = last.as_ref().map(|l| l["ok"] == json!(true));
+    if was_ok != Some(outcome["ok"] == json!(true)) {
+        match outcome["error"].as_str() {
+            Some(e) => tracing::warn!("dealwork heartbeat failed: {e}"),
+            None => tracing::info!(%version, "dealwork heartbeat ok"),
+        }
+    }
+    *last = Some(outcome);
+}
+
+pub fn last_heartbeat() -> Option<Value> {
+    HEARTBEAT.lock().clone()
+}
+
+async fn heartbeat_loop(state: Shared) {
+    let mut tick = tokio::time::interval(Duration::from_secs(HEARTBEAT_SECS));
+    loop {
+        tick.tick().await;
+        heartbeat(&state).await;
     }
 }
 
@@ -1230,6 +1363,8 @@ pub async fn dashboard_json(state: &Shared) -> Result<Value> {
                 "enabled": s.on(p),
                 "keySet": s.key(p).is_some(),
                 "status": status.get(p.id).cloned().unwrap_or(Value::Null),
+                "agentId": s.providers.get(p.id).and_then(|x| x.agent_id.clone()),
+                "heartbeat": if p.id == "dealwork" { last_heartbeat() } else { None },
             })
         })
         .collect();
@@ -1264,6 +1399,14 @@ pub async fn status_html(state: &Shared) -> Result<String> {
         count("submitted"),
         count("paid"),
     );
+    if let Some(hb) = last_heartbeat() {
+        let line = match hb["error"].as_str() {
+            Some(e) => format!("dealwork.ai: not reporting in ({})", crate::telegram::esc(e)),
+            None => format!("dealwork.ai: online, skill {}", crate::telegram::esc(hb["skillVersion"].as_str().unwrap_or("?"))),
+        };
+        out.push_str(&line);
+        out.push('\n');
+    }
     for l in leads.iter().filter(|l| l.status == "shortlisted").take(5) {
         out.push_str(&format!(
             "\n• <code>{}</code> {} — {}",
@@ -1396,5 +1539,21 @@ mod tests {
         assert!(forbidden_path("/v1/wallet/withdraw"));
         assert!(forbidden_path("/api/agents/register"));
         assert!(!forbidden_path("/api/agents/jobs/x/bids"));
+    }
+
+    #[test]
+    fn dealwork_heartbeat_details() {
+        let md = "---\nname: dealwork\nversion: 1.6.5\ndescription: x\n---\n# dealwork\nversion: 9\n";
+        assert_eq!(skill_version(md).as_deref(), Some("1.6.5"));
+        assert_eq!(skill_version("---\nversion: \"2.0\"\n---\n").as_deref(), Some("2.0"));
+        assert_eq!(skill_version("# no frontmatter\nversion: 1"), None);
+        assert_eq!(heartbeat_path("ag_12-x"), "/agents/ag_12-x/heartbeat");
+        let s = Settings::default().merged(&json!({"providers": {"dealwork": {"agentId": " ag_123 "}}})).unwrap();
+        assert_eq!(s.providers["dealwork"].agent_id.as_deref(), Some("ag_123"));
+        assert_eq!(Settings::from_value(Some(&s.to_json(false))), s);
+        assert_eq!(s.to_json(true)["providers"]["dealwork"]["agentId"], json!("ag_123"));
+        assert!(s.merged(&json!({"providers": {"dealwork": {"agentId": "../x"}}})).is_err());
+        let cleared = s.merged(&json!({"providers": {"dealwork": {"agentId": ""}}})).unwrap();
+        assert_eq!(cleared.providers["dealwork"].agent_id, None);
     }
 }

@@ -14,7 +14,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
-use support::{role, serve, spawn_app_with, str_of, text, tool_call, TestApp};
+use support::{role, serve, spawn_app, spawn_app_with, str_of, text, tool_call, TestApp};
 
 const KEY: &str = "tk_secret_123";
 
@@ -215,4 +215,46 @@ async fn the_earn_tool_is_only_there_while_earning_is_on() {
     app.send_wait(&sid, "hello again").await;
     let names = support::tool_names(&app.llm.requests().last().cloned().unwrap());
     assert!(names.iter().any(|n| n == "earn"), "{names:?}");
+}
+
+/// dealwork.ai shows the agent as pending with an unknown skill version until
+/// Kongming reports in: a heartbeat with the saved key, the agent ID and the
+/// skill.md version, and its outcome on the dashboard.
+#[tokio::test]
+async fn dealwork_heartbeat_reports_the_skill_version() {
+    let mock = Mock::default();
+    let router = Router::new()
+        .route(
+            "/agents/:id/heartbeat",
+            post(|State(m): State<Mock>, Path(id): Path<String>, headers: HeaderMap, Json(body): Json<Value>| async move {
+                let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                m.calls.lock().push(("heartbeat".into(), json!({"agent": id, "auth": auth, "body": body})));
+                Json(json!({"healthy": true, "currentSkillVersion": "1.6.5", "summary": {"pendingBidsCount": 2, "activeContractsCount": 0}}))
+            }),
+        )
+        .with_state(mock.clone());
+    let url = serve(router).await;
+    let app = spawn_app(vec![]).await;
+
+    // Without an agent ID there is nothing to report to; the dashboard says what is missing.
+    app.put("/api/earn", json!({"enabled": true, "providers": {"dealwork": {"apiKey": "ak_dw_1", "baseUrl": url}}})).await;
+    kongming::earn::heartbeat(&app.state).await;
+    assert!(mock.calls("heartbeat").is_empty());
+    let d = app.get("/api/earn").await;
+    let dw = d["providers"].as_array().unwrap().iter().find(|p| p["id"] == "dealwork").unwrap().clone();
+    assert!(str_of(&dw["heartbeat"], "error").contains("agent ID"), "{dw}");
+
+    app.put("/api/earn", json!({"providers": {"dealwork": {"agentId": "ag_42"}}})).await;
+    kongming::earn::heartbeat(&app.state).await;
+    let calls = mock.calls("heartbeat");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["agent"], json!("ag_42"));
+    assert_eq!(calls[0]["auth"], json!("Bearer ak_dw_1"));
+    assert_eq!(calls[0]["body"]["skillVersion"], json!("1.6.5"));
+    let d = app.get("/api/earn").await;
+    let dw = d["providers"].as_array().unwrap().iter().find(|p| p["id"] == "dealwork").unwrap().clone();
+    assert_eq!(dw["agentId"], json!("ag_42"));
+    assert_eq!(dw["heartbeat"]["ok"], json!(true), "{dw}");
+    assert_eq!(dw["heartbeat"]["pendingBids"], json!(2));
+    assert!(!d.to_string().contains("ak_dw_1"));
 }
