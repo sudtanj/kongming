@@ -46,7 +46,7 @@ kongming runs no model locally; it is a small HTTP client and server, so the dev
 | OS | Linux with Docker 20.10+, or any Linux for the static release binary | Armbian / Debian 12 |
 | Clock | NTP-synced (TLS, OAuth token expiry and cron need correct time) | |
 
-32-bit ARM (armv7, e.g. the original Orange Pi Zero) is not built. Memory figures are estimates for one worker thread with a few concurrent chats; measure on your device with `docker stats kongming`.
+32-bit ARM (armv7, e.g. the original Orange Pi Zero) is not built. <!-- bench:summary -->Not measured yet: the Benchmark workflow fills this in.<!-- /bench:summary --> Measure on your device with `docker stats kongming`.
 
 External services:
 
@@ -129,6 +129,19 @@ cross build --release --target aarch64-unknown-linux-musl
 CI builds static musl binaries for `aarch64` and `x86_64` and attaches them to GitHub releases on `v*` tags. The Docker image is a glibc build on `distroless/cc`; see `builder-tools/kongming` in infrastructure-tools.
 
 Every push also runs an Orange Pi Zero 3 simulation (`ci/orangepi-sim.sh`). The aarch64 test binaries and the release binary run in an arm64 container cut to the board: 4 CPUs, 1 GB RAM with no swap, and a read-only root filesystem. One run is on an x86 runner under QEMU pinned to the board's Cortex-A53. This catches CPU features the H618 lacks, and the slowdown shakes out timing bugs. The other runs natively on an arm64 runner with the daemon held to 128 MB. Both boot the daemon against a real libSQL server, push a burst of API traffic, restart it and check that everything comes back from the database. Memory figures land in the job summary. A release is only published when the simulation passes.
+
+## Benchmark
+
+The Benchmark workflow (`.github/workflows/bench.yml`) runs `tests/memory_bench.rs` on a
+native arm64 GitHub runner after every code change on `main` and rewrites this section
+and the summary line under System requirements. The daemon is the release binary; Turso
+and the model are local mocks, so latency is the mock model's ~200 ms plus kongming's own
+work, and a real Turso adds its round trips to every turn. Expect the Orange Pi's slower
+cores to add latency under load; memory carries over.
+
+<!-- bench:report -->
+Not measured yet.
+<!-- /bench:report -->
 
 ## License
 
