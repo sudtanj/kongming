@@ -1100,6 +1100,7 @@ Pasted keys are cut out of the message before you see it and replaced by `[secre
 | MCP config | JSON with `mcpServers` / `servers`, or one server with `url` | op `mcp_add`, config = the pasted JSON as it is |
 | MCP server URL | https://…/mcp or …/sse, maybe with a token | op `mcp_add`, url (+ name, token) |
 | Earnings key | a key named for toku, dealwork, OpenTask, MoltJobs, HYRVE or Claw Earn | op `earn`, provider, api_key |
+| dealwork.ai agent | `agentAccountId` (often with an `ak_…` apiKey, e.g. its onboarding JSON) | op `earn`, provider `dealwork`, agent_id (+ api_key); without it dealwork shows the agent as pending |
 | Skill | a SKILL.md (frontmatter with name and description) or a link to one | op `skill_import`, markdown or url |
 | Public address | "kongming is at https://…" | op `public_url` |
 

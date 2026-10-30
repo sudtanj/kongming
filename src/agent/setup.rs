@@ -34,7 +34,8 @@ when saving and never shown to you. show: the current configuration (keys only a
 kind `openai` for OpenAI and any OpenAI-compatible API (with base_url) or `anthropic`, plus model and api_key; it is tested \
 before it is saved. telegram: the bot token and allowed_users (added to the allowed list). public_url: the address \
 kongming is reached at. mcp_add: a remote MCP server from url (with name, transport, token, headers) or from a pasted MCP \
-config JSON in `config`; a server with the same name is replaced. earn: a paid-work provider's api_key (with provider), \
+config JSON in `config`; a server with the same name is replaced. earn: a paid-work provider's api_key and agent_id (with \
+provider; dealwork.ai needs its agentAccountId as agent_id to show the agent online), \
 and the earnings options. skill_import: a SKILL.md from a url or pasted as markdown."
             .into(),
         parameters: json!({
@@ -53,6 +54,7 @@ and the earnings options. skill_import: a SKILL.md from a url or pasted as markd
                 "headers": {"type": "object", "description": "mcp_add: extra HTTP headers; values may hold secret references"},
                 "config": {"type": "string", "description": "mcp_add: the pasted MCP config JSON, e.g. {\"mcpServers\": {...}}"},
                 "provider": {"type": "string", "description": "earn: provider id (toku, dealwork, opentask, moltjobs, hyrve, clawearn, opire, algora)"},
+                "agent_id": {"type": "string", "description": "earn: the agent account id on the provider (dealwork.ai agentAccountId); not a secret"},
                 "enabled": {"type": "boolean", "description": "earn: switch earnings on or off, or with provider that provider"},
                 "auto": {"type": "boolean", "description": "earn: bid on small marketplace jobs without asking"},
                 "auto_max_usd": {"type": "number", "description": "earn: the auto mode limit"},
@@ -492,14 +494,17 @@ async fn earn(state: &Shared, args: &Value) -> Result<String> {
         if let Some(e) = enabled {
             pv.insert("enabled".into(), json!(e));
         }
+        if let Some(a) = opt(args, "agent_id") {
+            pv.insert("agentId".into(), json!(a.trim()));
+        }
         let mut providers = Map::new();
         providers.insert(prov.id.to_string(), Value::Object(pv));
         body.insert("providers".into(), Value::Object(providers));
         provider_name = Some(prov);
     } else if let Some(e) = enabled {
         body.insert("enabled".into(), json!(e));
-    } else if opt(args, "api_key").is_some() {
-        bail!("say which provider the key is for (provider)");
+    } else if opt(args, "api_key").is_some() || opt(args, "agent_id").is_some() {
+        bail!("say which provider the key or agent ID is for (provider)");
     }
     for (arg, field) in [
         ("auto", "auto"),
@@ -526,6 +531,11 @@ async fn earn(state: &Shared, args: &Value) -> Result<String> {
             if on["keySet"] == json!(true) { "set" } else { "not set" },
             if on["enabled"] == json!(true) { "on" } else { "off" }
         ));
+        if let Some(a) = on["agentId"].as_str() {
+            out.push_str(&format!("Agent ID {a}. "));
+        } else if p.id == "dealwork" {
+            out.push_str("No agent ID yet: dealwork.ai shows the agent as pending until it is set (agentAccountId). ");
+        }
     }
     out.push_str(if s.enabled {
         "Earnings is on."

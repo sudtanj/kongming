@@ -55,6 +55,17 @@ async fn a_pasted_key_never_reaches_the_model_and_is_configured_by_reference() {
     assert_eq!(saved.providers["toku"].api_key.as_deref(), Some(KEY));
     assert!(saved.providers["toku"].enabled);
 
+    // dealwork.ai's agent ID is not a secret; it goes straight to the provider settings.
+    app.llm.push(vec![
+        tool_call("setup", json!({"op": "earn", "provider": "dealwork", "agent_id": "ag_example_7"})),
+        text("dealwork.ai can report in now."),
+    ]);
+    app.send_wait(&sid, "my dealwork agentAccountId is ag_example_7").await;
+    let (result, err) = last_tool_result(&app, &sid).await;
+    assert!(!err && result.contains("Agent ID ag_example_7"), "{result}");
+    let saved = kongming::earn::settings(&app.state).await;
+    assert_eq!(saved.providers["dealwork"].agent_id.as_deref(), Some("ag_example_7"));
+
     // Nothing the dashboard or the model reads carries the value.
     assert!(app.llm.requests().iter().all(|r| !r.to_string().contains(KEY)));
     assert!(!app.get("/api/settings").await.to_string().contains(KEY));
