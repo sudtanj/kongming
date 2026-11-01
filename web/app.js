@@ -170,7 +170,7 @@ const STRINGS = {
     'models.providerDesc': 'OpenAI-compatible or Anthropic Messages API.',
     'models.gatewayOpenai': 'Gateway (OpenAI-compatible)',
     'models.gatewayAnthropic': 'Gateway (Anthropic-compatible)',
-    'models.gatewayDesc': 'The built-in model gateway: no key needed. Model auto picks a free OpenCode model, or a provider you added.',
+    'models.gatewayDesc': 'The built-in model gateway: no key needed. Model auto picks a free OpenCode model; for your own provider, choose OpenAI-compatible or Anthropic and add its key.',
     'models.baseUrl': 'Base URL',
     'models.baseUrlDesc': 'Leave empty for the provider default.',
     'models.apiKey': 'API key',
