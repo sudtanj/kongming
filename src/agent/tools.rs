@@ -592,7 +592,7 @@ fn utf8_len(first: u8) -> usize {
 }
 
 fn current_time() -> String {
-    let now = time::OffsetDateTime::now_utc();
+    let now = crate::platform::now_utc();
     let fmt = time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
     format!("{} UTC (unix {})", now.format(&fmt).unwrap_or_default(), now.unix_timestamp())
 }
@@ -827,7 +827,15 @@ async fn schedule(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
     }
 }
 
-async fn delegate(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
+/// A checked `delegate_task` call.
+pub(crate) struct DelegateCall {
+    pub to: Agent,
+    pub task: String,
+    pub context: String,
+}
+
+/// Check a `delegate_task` call and announce it; the caller runs the task.
+pub(crate) async fn check_delegate(ctx: &ToolCtx<'_>, args: &Value) -> Result<DelegateCall> {
     if !ctx.can_delegate {
         bail!("this agent has no reports to delegate to");
     }
@@ -849,13 +857,18 @@ async fn delegate(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
         turn_id: ctx.turn_id.to_string(),
         text: format!("Delegating to @{}", target.handle),
     });
+    Ok(DelegateCall { to: target, task, context })
+}
+
+async fn delegate(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
+    let d = check_delegate(ctx, args).await?;
     crate::agent::run_delegation(
         ctx.state.clone(),
         ctx.agent.clone(),
-        target,
+        d.to,
         ctx.session.clone(),
-        task,
-        context,
+        d.task,
+        d.context,
         ctx.depth + 1,
     )
     .await

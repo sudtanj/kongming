@@ -3,10 +3,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::turso::Row;
+use super::sql::Row;
 
 pub fn now_ms() -> i64 {
-    (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
+    crate::platform::now_ms()
 }
 
 pub fn new_id() -> String {
@@ -515,7 +515,7 @@ impl EarnLead {
             title: r.str("title"),
             description: r.str("description"),
             budget_usd: match r.val("budget_usd") {
-                super::turso::Val::Null => None,
+                super::sql::Val::Null => None,
                 _ => Some(r.f64("budget_usd")),
             },
             currency: r.str("currency"),

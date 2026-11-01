@@ -10,13 +10,13 @@ use super::{sse, ChatRequest, EventStream, LlmEvent, Provider};
 use crate::db::Part;
 
 pub struct Anthropic {
-    http: reqwest::Client,
+    http: crate::net::Client,
     base: String,
     key: Option<String>,
 }
 
 impl Anthropic {
-    pub fn new(http: reqwest::Client, base: Option<String>, key: Option<String>) -> Anthropic {
+    pub fn new(http: crate::net::Client, base: Option<String>, key: Option<String>) -> Anthropic {
         let base = base.filter(|b| !b.trim().is_empty()).unwrap_or_else(|| "https://api.anthropic.com".into());
         Anthropic {
             http,
@@ -328,7 +328,11 @@ mod tests {
 
     #[test]
     fn base_url_strips_v1() {
-        let a = Anthropic::new(reqwest::Client::new(), Some("https://proxy.example/v1/".into()), None);
+        let a = Anthropic::new(
+            crate::net::Client::new(crate::net::Reqwest(reqwest::Client::new())),
+            Some("https://proxy.example/v1/".into()),
+            None,
+        );
         assert_eq!(a.base, "https://proxy.example");
     }
 }

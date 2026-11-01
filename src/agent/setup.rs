@@ -238,7 +238,7 @@ async fn llm(state: &Shared, args: &Value) -> Result<String> {
         effort: Some("low".into()),
     };
     let ping = async { super::collect_text(provider.stream(req).await?).await };
-    match tokio::time::timeout(Duration::from_secs(60), ping).await {
+    match crate::platform::timeout(Duration::from_secs(60), ping).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => bail!("the new model settings did not work, so nothing was changed: {e:#}"),
         Err(_) => bail!("the new model settings did not answer within a minute, so nothing was changed"),
@@ -437,7 +437,7 @@ async fn mcp_add(state: &Shared, args: &Value) -> Result<String> {
             }
         };
         let verb = if replaced { "updated" } else { "added" };
-        match tokio::time::timeout(Duration::from_secs(45), state.mcp.refresh(&m.id)).await {
+        match crate::platform::timeout(Duration::from_secs(45), state.mcp.refresh(&m.id)).await {
             Ok(Ok(tools)) => {
                 let names: Vec<&str> =
                     tools.iter().filter_map(|t| t.get("name").and_then(Value::as_str)).take(12).collect();

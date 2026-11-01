@@ -108,7 +108,7 @@ pub async fn login(
 ) -> Result<Response, ApiError> {
     let pw = body.get("password").and_then(Value::as_str).unwrap_or("");
     if !super::auth::password_ok(&state, pw) {
-        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        crate::platform::sleep(std::time::Duration::from_millis(800)).await;
         return Err(ApiError(StatusCode::UNAUTHORIZED, "wrong password".into()));
     }
     let token = super::auth::issue(&state.secret);
@@ -128,13 +128,13 @@ pub async fn info(State(state): State<Shared>) -> R {
     let agents = state.db.agents().await?;
     let day = now_ms() - 24 * 3600 * 1000;
     let usage = state.db.usage_since(day).await.unwrap_or_default();
-    let turso_ms = state.db.turso.ping().await.ok();
+    let turso_ms = state.db.sql.ping().await.ok();
     Ok(Json(json!({
         "name": "kongming",
         "version": env!("CARGO_PKG_VERSION"),
         "startedAt": state.started_at,
         "uptimeMs": now_ms() - state.started_at,
-        "turso": {"host": state.db.turso.host(), "pingMs": turso_ms},
+        "turso": {"host": state.db.sql.host(), "pingMs": turso_ms},
         "llm": pcfg.redacted(),
         "telegram": {"enabled": state.telegram_token().await.is_some()},
         "agents": agents.len(),
@@ -238,12 +238,7 @@ pub async fn send_message(
         let r = agent::run_turn(state.clone(), sess, text, TurnOptions::default()).await?;
         return Ok(Json(json!({"text": r.text, "stopReason": r.stop_reason, "error": r.error, "agent": r.agent})));
     }
-    let st = state.clone();
-    tokio::spawn(async move {
-        if let Err(e) = agent::run_turn(st, sess, text, TurnOptions::default()).await {
-            tracing::warn!("turn failed: {e:#}");
-        }
-    });
+    state.host.start_turn(state.clone(), sess, text, TurnOptions::default());
     Ok(Json(json!({"accepted": true})))
 }
 
@@ -551,7 +546,7 @@ pub async fn create_mcp(State(state): State<Shared>, Json(body): Json<Value>) ->
     let m = add_mcp(&state, &body).await?;
     let st = state.clone();
     let id = m.id.clone();
-    tokio::spawn(async move {
+    state.spawn(async move {
         let _ = st.mcp.refresh(&id).await;
     });
     Ok(Json(crate::mcp::server_public(&m)))
@@ -572,7 +567,7 @@ pub async fn update_mcp(State(state): State<Shared>, Path(id): Path<String>, Jso
     let existing = state.db.mcp_server(&id).await?.ok_or_else(|| not_found("server not found"))?;
     let m = change_mcp(&state, existing, &body).await?;
     let st = state.clone();
-    tokio::spawn(async move {
+    state.spawn(async move {
         let _ = st.mcp.refresh(&id).await;
     });
     Ok(Json(crate::mcp::server_public(&m)))
@@ -819,7 +814,7 @@ pub async fn run_check_in(State(state): State<Shared>) -> R {
     if crate::telegram::active_token(&state).await.is_none() {
         return Err(bad("set up Telegram first: check-ins reach you there"));
     }
-    tokio::spawn(async move {
+    state.clone().spawn(async move {
         if let Err(e) = crate::proactive::check_in(&state, true).await {
             tracing::warn!("manual check-in failed: {e:#}");
         }
@@ -846,10 +841,10 @@ pub async fn save_earn(state: &Shared, body: &Value) -> Result<(), ApiError> {
 }
 
 pub async fn run_earn_scan(State(state): State<Shared>) -> R {
-    if crate::earn::scanning() {
+    if crate::earn::scanning(&state) {
         return Err(bad("a scan is already running"));
     }
-    tokio::spawn(async move {
+    state.clone().spawn(async move {
         if let Err(e) = crate::earn::scan(&state, true).await {
             tracing::warn!("manual earnings scan failed: {e:#}");
         }
@@ -866,9 +861,9 @@ pub async fn patch_earn_lead(State(state): State<Shared>, Path(id): Path<String>
     }
     state.db.update_lead(&lead.id, Some(status), None, None, None).await?;
     // A taken lead is worked on now, not at the next scheduled scan.
-    if status == "approved" && !crate::earn::scanning() {
+    if status == "approved" && !crate::earn::scanning(&state) {
         let st = state.clone();
-        tokio::spawn(async move {
+        state.spawn(async move {
             if let Err(e) = crate::earn::scan(&st, true).await {
                 tracing::warn!("earnings scan after a take failed: {e:#}");
             }
@@ -889,9 +884,9 @@ pub async fn test_llm(State(state): State<Shared>) -> R {
         temperature: Some(0.0),
         effort: Some("low".into()),
     };
-    let started = std::time::Instant::now();
+    let started = now_ms();
     let text = agent::collect_text(provider.stream(req).await?).await?;
-    Ok(Json(json!({"ok": true, "reply": text.trim(), "ms": started.elapsed().as_millis() as u64, "model": cfg.model})))
+    Ok(Json(json!({"ok": true, "reply": text.trim(), "ms": (now_ms() - started).max(0) as u64, "model": cfg.model})))
 }
 
 // ------------------------------------------------------------------------ cron
@@ -963,7 +958,7 @@ pub async fn delete_cron(State(state): State<Shared>, Path(id): Path<String>) ->
 pub async fn run_cron(State(state): State<Shared>, Path(id): Path<String>) -> R {
     let job = state.db.cron_jobs().await?.into_iter().find(|c| c.id == id).ok_or_else(|| not_found("job not found"))?;
     let st = state.clone();
-    tokio::spawn(async move {
+    state.spawn(async move {
         crate::cron::run_job(st, job).await;
     });
     Ok(Json(json!({"started": true})))

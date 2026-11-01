@@ -109,7 +109,7 @@ impl ProviderConfig {
     }
 }
 
-pub fn build(cfg: &ProviderConfig, http: reqwest::Client) -> Result<Box<dyn Provider>> {
+pub fn build(cfg: &ProviderConfig, http: crate::net::Client) -> Result<Box<dyn Provider>> {
     match cfg.kind.as_str() {
         "openai" | "" => Ok(Box::new(openai::OpenAi::new(http, cfg.base_url.clone(), cfg.api_key.clone()))),
         "anthropic" => Ok(Box::new(anthropic::Anthropic::new(http, cfg.base_url.clone(), cfg.api_key.clone()))),
@@ -162,9 +162,12 @@ mod tests {
     #[test]
     fn build_rejects_unknown_kind() {
         let cfg = ProviderConfig { kind: "nope".into(), ..Default::default() };
-        assert!(build(&cfg, reqwest::Client::new()).is_err());
+        assert!(build(&cfg, crate::net::Client::new(crate::net::Reqwest(reqwest::Client::new()))).is_err());
         let cfg = ProviderConfig { kind: "openai".into(), ..Default::default() };
-        assert_eq!(build(&cfg, reqwest::Client::new()).unwrap().name(), "openai");
+        assert_eq!(
+            build(&cfg, crate::net::Client::new(crate::net::Reqwest(reqwest::Client::new()))).unwrap().name(),
+            "openai"
+        );
     }
 
     #[test]

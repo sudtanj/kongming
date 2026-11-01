@@ -17,6 +17,18 @@ const APP_JS: &str = include_str!("../../web/app.js");
 const STYLE_CSS: &str = include_str!("../../web/style.css");
 const LOGO_SVG: &str = include_str!("../../web/logo.svg");
 
+/// The embedded UI files by path, with their content type, for a host that
+/// serves them itself (a Worker answers them without its Durable Object).
+pub fn static_asset(path: &str) -> Option<(&'static str, &'static str)> {
+    match path {
+        "/" | "/index.html" => Some((INDEX_HTML, "text/html; charset=utf-8")),
+        "/app.js" => Some((APP_JS, "application/javascript; charset=utf-8")),
+        "/style.css" => Some((STYLE_CSS, "text/css; charset=utf-8")),
+        "/logo.svg" => Some((LOGO_SVG, "image/svg+xml")),
+        _ => None,
+    }
+}
+
 fn asset(body: &'static str, content_type: &'static str, cache: bool) -> Response {
     let mut r = (StatusCode::OK, body).into_response();
     r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
@@ -47,7 +59,7 @@ async fn manifest() -> Response {
     )
 }
 async fn health(axum::extract::State(state): axum::extract::State<Shared>) -> Response {
-    match state.db.turso.ping().await {
+    match state.db.sql.ping().await {
         Ok(ms) => axum::Json(serde_json::json!({"ok": true, "tursoMs": ms})).into_response(),
         Err(e) => {
             (StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({"ok": false, "error": format!("{e:#}")})))
@@ -56,6 +68,8 @@ async fn health(axum::extract::State(state): axum::extract::State<Shared>) -> Re
     }
 }
 
+/// The UI, the REST API and (natively) the WebSocket and Telegram webhook.
+/// A Worker calls it as a tower `Service` with each `http::Request`.
 pub fn router(state: Shared) -> Router {
     let protected = Router::new()
         .route("/info", get(api::info))
@@ -96,20 +110,33 @@ pub fn router(state: Shared) -> Router {
         .route("/auth/status", get(api::auth_status))
         .route("/auth/login", post(api::login))
         .route("/auth/logout", post(api::logout))
-        .route("/mcp/oauth/callback", get(api::mcp_oauth_callback))
-        // Authenticated by the secret header Telegram sends (see telegram::webhook).
-        .route("/telegram/webhook", post(crate::telegram::webhook));
+        .route("/mcp/oauth/callback", get(api::mcp_oauth_callback));
+    // Authenticated by the secret header Telegram sends (see telegram::webhook).
+    #[cfg(feature = "native")]
+    let public = public.route("/telegram/webhook", post(crate::telegram::webhook));
 
-    Router::new()
+    let app = Router::new()
         .route("/", get(index))
         .route("/index.html", get(index))
         .route("/app.js", get(app_js))
         .route("/style.css", get(style_css))
         .route("/logo.svg", get(logo_svg))
         .route("/manifest.webmanifest", get(manifest))
-        .route("/health", get(health))
-        .route("/ws", get(ws::handler))
-        .nest("/api", public.merge(protected))
+        .route("/health", get(health));
+    // A Worker serves `/ws` itself and hands client frames to `ws::handle_frame`.
+    #[cfg(feature = "native")]
+    let app = app.route("/ws", get(ws::handler));
+    app.nest("/api", public.merge(protected))
         .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn static_assets_by_path() {
+        assert!(super::static_asset("/").is_some_and(|(b, t)| b.contains("<html") && t.starts_with("text/html")));
+        assert!(super::static_asset("/app.js").is_some());
+        assert!(super::static_asset("/api/info").is_none());
+    }
 }

@@ -86,10 +86,10 @@ impl SseParser {
     }
 }
 
-/// Turn a reqwest byte stream into a stream of SSE events.
+/// Turn a response body into a stream of SSE events.
 pub fn events<S>(bytes: S) -> impl Stream<Item = anyhow::Result<SseEvent>> + Send
 where
-    S: Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
+    S: Stream<Item = anyhow::Result<Bytes>> + Send + 'static,
 {
     let parser = SseParser::new();
     futures_util::stream::unfold(
@@ -106,10 +106,7 @@ where
                     Some(Ok(chunk)) => pending.extend(parser.feed(&chunk)),
                     Some(Err(e)) => {
                         done = true;
-                        return Some((
-                            Err(anyhow::anyhow!(e).context("stream read failed")),
-                            (src, parser, pending, done),
-                        ));
+                        return Some((Err(e.context("stream read failed")), (src, parser, pending, done)));
                     }
                     None => {
                         done = true;

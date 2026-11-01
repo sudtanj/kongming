@@ -45,7 +45,7 @@ async fn run(cfg: config::Config) -> Result<()> {
     let turso = db::Turso::new(&cfg.turso_url, &cfg.turso_token)?;
     let database = db::Db::new(turso);
     database.migrate().await.context("applying schema on Turso")?;
-    tracing::info!(host = %database.turso.host(), "turso ready");
+    tracing::info!(host = %database.sql.host(), "turso ready");
 
     if cfg.password.is_empty() {
         tracing::warn!("KONGMING_PASSWORD is empty: the web UI is open to anyone who can reach the port");

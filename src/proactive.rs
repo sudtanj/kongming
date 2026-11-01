@@ -14,9 +14,11 @@
 //! `maxPerDay`, `quietHours` ("22-7", local), `utcOffset` ("+07:00").
 
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "native")]
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::agent::{self, TurnOptions};
@@ -263,12 +265,11 @@ pub async fn notify(
     Ok(format!("Sent to {delivered} Telegram chat(s){}.", if silent { " silently (quiet hours)" } else { "" }))
 }
 
-static CHECKING: AtomicBool = AtomicBool::new(false);
-
-struct Running;
-impl Drop for Running {
+/// Clears the check-in flag when the check-in ends.
+struct Running<'a>(&'a AtomicBool);
+impl Drop for Running<'_> {
     fn drop(&mut self) {
-        CHECKING.store(false, Ordering::SeqCst);
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -276,10 +277,45 @@ impl Drop for Running {
 /// Telegram or the dashboard) runs even with nothing obvious to look at and
 /// keeps its conversation when it sent nothing.
 pub async fn check_in(state: &Shared, manual: bool) -> Result<usize> {
-    if CHECKING.swap(true, Ordering::SeqCst) {
+    if state.jobs.checking.swap(true, Ordering::SeqCst) {
         bail!("a check-in is already running");
     }
-    let _running = Running;
+    let _running = Running(&state.jobs.checking);
+    let Some(t) = prepare_check_in(state, manual).await? else {
+        return Ok(0);
+    };
+    let res = agent::run_turn(state.clone(), t.session.clone(), t.prompt.clone(), t.turn_options()).await;
+    finish_check_in(state, t, res).await
+}
+
+/// A check-in's turn, with what `finish_check_in` needs afterwards.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckInTurn {
+    pub manual: bool,
+    pub started: i64,
+    pub agent: Agent,
+    pub session: Session,
+    pub prompt: String,
+}
+
+impl CheckInTurn {
+    pub fn turn_options(&self) -> TurnOptions {
+        TurnOptions { depth: 1, no_reflect: true, agent_override: Some(self.agent.clone()) }
+    }
+}
+
+/// Claim the check-in slot; false when one is already running.
+pub(crate) fn claim_check_in(state: &Shared) -> bool {
+    !state.jobs.checking.swap(true, Ordering::SeqCst)
+}
+
+pub(crate) fn release_check_in(state: &Shared) {
+    state.jobs.checking.store(false, Ordering::SeqCst);
+}
+
+/// Everything before the check-in's turn. `None`: nothing to do this time.
+pub async fn prepare_check_in(state: &Shared, manual: bool) -> Result<Option<CheckInTurn>> {
     let s = settings(state).await;
     let started = now_ms();
     let _ = state.db.set_setting(LAST_RUN, &json!(started)).await;
@@ -290,20 +326,20 @@ pub async fn check_in(state: &Shared, manual: bool) -> Result<usize> {
         state.db.notifications(started - 24 * HOUR_MS, 200).await?.iter().filter(|n| n.delivered > 0).count();
     let left = (s.max_per_day - sent_today as i64).max(0);
     if left == 0 && !manual {
-        return Ok(0);
+        return Ok(None);
     }
     let Some(prompt) = check_in_prompt(state, &s, started, left.max(1), manual).await? else {
-        return Ok(0);
+        return Ok(None);
     };
     let agent = agent::ensure_default_agent(state).await?;
     let session = state.db.create_session(&agent.id, "proactive", None, None, "💡 Check-in").await?;
-    let res = agent::run_turn(
-        state.clone(),
-        session.clone(),
-        prompt,
-        TurnOptions { depth: 1, no_reflect: true, agent_override: Some(agent.clone()) },
-    )
-    .await;
+    Ok(Some(CheckInTurn { manual, started, agent, session, prompt }))
+}
+
+/// After the check-in's turn: count what was sent, drop an empty
+/// conversation, log the outcome.
+pub async fn finish_check_in(state: &Shared, t: CheckInTurn, res: Result<agent::TurnResult>) -> Result<usize> {
+    let CheckInTurn { manual, started, agent, session, .. } = t;
     let sent = state
         .db
         .notifications(started, 50)
@@ -393,12 +429,13 @@ Finish with one line for the log: what you sent, or `nothing to report`.\n\n",
     Ok(Some(p))
 }
 
-async fn due(state: &Shared) -> bool {
+/// Whether a check-in is due at `now` (enabled, outside quiet hours, the
+/// interval passed). The first call after setup only starts the clock.
+pub async fn tick(state: &Shared, now: i64) -> bool {
     let s = settings(state).await;
-    if !s.enabled || s.interval_minutes == 0 || CHECKING.load(Ordering::SeqCst) {
+    if !s.enabled || s.interval_minutes == 0 || state.jobs.checking.load(Ordering::SeqCst) {
         return false;
     }
-    let now = now_ms();
     if s.is_quiet(now) || crate::telegram::active_token(state).await.is_none() {
         return false;
     }
@@ -413,11 +450,12 @@ async fn due(state: &Shared) -> bool {
 }
 
 /// The check-in loop; runs until the process stops.
+#[cfg(feature = "native")]
 pub async fn run(state: Shared) {
-    let mut tick = tokio::time::interval(Duration::from_secs(60));
+    let mut timer = tokio::time::interval(Duration::from_secs(60));
     loop {
-        tick.tick().await;
-        if due(&state).await {
+        timer.tick().await;
+        if tick(&state, now_ms()).await {
             if let Err(e) = check_in(&state, false).await {
                 tracing::warn!("proactive check-in failed: {e:#}");
             }

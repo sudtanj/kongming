@@ -1,16 +1,23 @@
 //! WebSocket: one connection receives every bus event (the client filters by
-//! session) and can send `send` / `stop` frames.
+//! session) and can send `send` / `stop` frames. The socket itself is native;
+//! a Worker keeps its own sockets and passes client frames to `handle_frame`.
 
+#[cfg(feature = "native")]
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{Request, State};
+#[cfg(feature = "native")]
+use axum::extract::{FromRequestParts, Request, State};
+#[cfg(feature = "native")]
 use axum::response::{IntoResponse, Response};
+#[cfg(feature = "native")]
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+#[cfg(feature = "native")]
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::agent::{self, TurnOptions};
 use crate::state::Shared;
 
+#[cfg(feature = "native")]
 pub async fn handler(State(state): State<Shared>, req: Request) -> Response {
     if !super::auth::is_authenticated(&state, &req) {
         return (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response();
@@ -24,8 +31,7 @@ pub async fn handler(State(state): State<Shared>, req: Request) -> Response {
     ws.on_upgrade(move |socket| run(state, socket))
 }
 
-use axum::extract::FromRequestParts;
-
+#[cfg(feature = "native")]
 async fn run(state: Shared, socket: WebSocket) {
     let (mut tx, mut rx) = socket.split();
     let mut events = state.subscribe();
@@ -94,12 +100,7 @@ pub async fn handle_frame(state: &Shared, text: &str) -> Option<Value> {
                     json!({"type": "error", "requestId": request_id, "sessionId": session_id, "message": "a reply is already in progress"}),
                 );
             }
-            let st = state.clone();
-            tokio::spawn(async move {
-                if let Err(e) = agent::run_turn(st, sess, text, TurnOptions::default()).await {
-                    tracing::warn!("turn failed: {e:#}");
-                }
-            });
+            state.host.start_turn(state.clone(), sess, text, TurnOptions::default());
             Some(json!({"type": "accepted", "requestId": request_id, "sessionId": session_id}))
         }
         "stop" => {
