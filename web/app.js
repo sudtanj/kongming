@@ -168,6 +168,9 @@ const STRINGS = {
     'overview.auth': 'Password protected',
     'models.provider': 'Provider',
     'models.providerDesc': 'OpenAI-compatible or Anthropic Messages API.',
+    'models.gatewayOpenai': 'Gateway (OpenAI-compatible)',
+    'models.gatewayAnthropic': 'Gateway (Anthropic-compatible)',
+    'models.gatewayDesc': 'The built-in model gateway: no key needed. Model auto picks a free OpenCode model, or a provider you added.',
     'models.baseUrl': 'Base URL',
     'models.baseUrlDesc': 'Leave empty for the provider default.',
     'models.apiKey': 'API key',
@@ -1558,7 +1561,12 @@ const settings = (() => {
   /* ---- models ---- */
   pages.models = async () => {
     const st = await api.get('/api/settings'); const llm = st.llm || {};
-    const kind = select([['openai', 'OpenAI-compatible'], ['anthropic', 'Anthropic']], llm.kind || 'openai');
+    // The host's own gateway (kongming cloud): the same openai / anthropic kinds, its base URL filled in.
+    const gw = st.gateway && st.gateway.baseUrl;
+    const kinds = [['openai', 'OpenAI-compatible'], ['anthropic', 'Anthropic']];
+    if (gw) kinds.unshift(['gateway-openai', t('models.gatewayOpenai')], ['gateway-anthropic', t('models.gatewayAnthropic')]);
+    const onGw = gw && llm.baseUrl === gw;
+    const kind = select(kinds, (onGw ? 'gateway-' : '') + (llm.kind || 'openai'));
     const baseUrl = input({ value: llm.baseUrl || '', placeholder: 'https://api.openai.com/v1' });
     const apiKey = input({ type: 'password', autocomplete: 'off', placeholder: llm.apiKeySet ? '••••••••' : 'sk-…' });
     const model = input({ value: llm.model || '', placeholder: 'gpt-4o-mini' });
@@ -1567,9 +1575,20 @@ const settings = (() => {
     const effort = select([['', t('common.none')], ['low', 'low'], ['medium', 'medium'], ['high', 'high']], llm.effort || '');
     const keyState = h('span', { class: 'pill ' + (llm.apiKeySet ? 'ok' : 'warn') }, llm.apiKeySet ? t('models.apiKeySet') : t('models.apiKeyNone'));
     const testOut = h('div', { class: 'hint', style: 'margin-top:0.4rem' });
+    const gwKind = () => (gw && kind.value.startsWith('gateway-') ? kind.value.slice(8) : null);
+    const gwHint = h('div', { class: 'hint', style: 'margin-top:0.4rem' }, t('models.gatewayDesc'));
+    let wasGw = !!onGw;
+    const syncGw = () => {
+      const g = gwKind();
+      baseUrl.disabled = !!g; apiKey.disabled = !!g; gwHint.hidden = !g;
+      if (g) { baseUrl.value = gw; if (!wasGw) model.value = 'auto'; } else if (wasGw) baseUrl.value = '';
+      wasGw = !!g;
+    };
+    kind.addEventListener('change', syncGw); syncGw();
     const save = saveBtn(null, async () => {
-      const body = { kind: kind.value, baseUrl: baseUrl.value.trim(), model: model.value.trim(), maxTokens: maxTokens.value ? Number(maxTokens.value) : null, temperature: temperature.value !== '' ? Number(temperature.value) : null, effort: effort.value || null };
-      if (apiKey.value) body.apiKey = apiKey.value;
+      const g = gwKind();
+      const body = { kind: g || kind.value, baseUrl: g ? gw : baseUrl.value.trim(), model: model.value.trim(), maxTokens: maxTokens.value ? Number(maxTokens.value) : null, temperature: temperature.value !== '' ? Number(temperature.value) : null, effort: effort.value || null };
+      if (apiKey.value && !g) body.apiKey = apiKey.value;
       const res = await api.put('/api/settings', { llm: body }); apiKey.value = '';
       keyState.textContent = res.llm.apiKeySet ? t('models.apiKeySet') : t('models.apiKeyNone'); keyState.className = 'pill ' + (res.llm.apiKeySet ? 'ok' : 'warn');
     });
@@ -1577,7 +1596,7 @@ const settings = (() => {
     const publicUrl = input({ value: st.publicUrl || '', placeholder: 'https://kongming.example.com' });
     return h('div', { class: 'settings-stack' }, header(t('settings.models')),
       section(t('overview.llm'),
-        row(t('models.provider'), t('models.providerDesc'), kind),
+        row(t('models.provider'), t('models.providerDesc'), gw ? h('div', { style: 'width:100%' }, kind, gwHint) : kind),
         row(t('models.baseUrl'), t('models.baseUrlDesc'), baseUrl),
         row(t('models.apiKey'), t('models.apiKeyDesc'), h('div', { class: 'row', style: 'flex-wrap:nowrap;width:100%' }, keyState, apiKey, h('button', { class: 'btn ghost sm', type: 'button', title: t('models.clearKey'), onClick: () => modal.confirm({ title: t('models.clearKey'), confirm: t('common.confirm'), danger: true, onConfirm: async () => { await api.put('/api/settings', { llm: { clearApiKey: true } }); reload(); } }) }, icon('x')))),
         row(t('models.model'), null, model),

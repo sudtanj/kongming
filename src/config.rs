@@ -71,6 +71,13 @@ pub struct Config {
     /// BusyBox bundled in the Docker image (/opt/busybox/bin/sh) when present.
     #[cfg_attr(feature = "native", arg(long, env = "KONGMING_SHELL", default_value = ""))]
     pub shell: String,
+
+    /// An LLM gateway the host runs itself (kongming-cloud: its in-process router at
+    /// `http://zilong.internal/v1`, speaking both the OpenAI and Anthropic formats).
+    /// When set, Settings → Models offers it as a "Gateway" provider choice. Not on the
+    /// command line: the daemon has none.
+    #[cfg_attr(feature = "native", arg(skip))]
+    pub gateway_url: Option<String>,
 }
 
 /// The same defaults as the command line, for hosts without one (a Worker
@@ -92,6 +99,7 @@ impl Default for Config {
             auto_continue: 4,
             context_tokens: 48_000,
             shell: "off".into(),
+            gateway_url: None,
         }
     }
 }

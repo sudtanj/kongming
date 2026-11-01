@@ -679,14 +679,19 @@ pub async fn get_settings(State(state): State<Shared>) -> R {
         o.insert("status".into(), state.telegram_status.lock().clone());
         o.insert("webhookUrl".into(), json!(crate::telegram::webhook_url(&state).await));
     }
-    Ok(Json(json!({
+    let mut out = json!({
         "llm": llm.redacted(),
         "telegram": telegram,
         "reflection": all.get("reflection").cloned().unwrap_or(json!({"enabled": true})),
         "proactive": proactive_json(&state).await?,
         "publicUrl": state.public_url().await,
         "ui": all.get("ui").cloned().unwrap_or(json!({})),
-    })))
+    });
+    // The host's own LLM gateway (kongming-cloud), offered as a provider choice.
+    if let Some(url) = &state.cfg.gateway_url {
+        out["gateway"] = json!({"baseUrl": url});
+    }
+    Ok(Json(out))
 }
 
 pub async fn put_settings(State(state): State<Shared>, Json(body): Json<Value>) -> R {
