@@ -1060,15 +1060,9 @@ async fn finish(state: &Shared, ts: TurnState) -> Result<Step> {
         && ts.stop_reason != "cancelled"
         && should_reflect(state, &ts.session.id, ts.used_tools, &ts.stored_text).await
     {
-        let st = state.clone();
-        let agent = ts.plan.agent.clone();
-        let sess = ts.session.clone();
-        let model = ts.plan.model.clone();
-        state.spawn(async move {
-            if let Err(e) = reflect(st, agent, sess, model).await {
-                tracing::warn!("reflection failed: {e:#}");
-            }
-        });
+        let job =
+            Reflection { agent: ts.plan.agent.clone(), session: ts.session.clone(), model: ts.plan.model.clone() };
+        state.host.reflect(state.clone(), job);
     }
 
     Ok(Step::Done(TurnResult {
@@ -1119,6 +1113,21 @@ async fn should_reflect(state: &Shared, session_id: &str, used_tools: bool, user
     }
     let n = state.db.message_count(session_id).await.unwrap_or(0);
     n > 0 && n % 16 == 0
+}
+
+/// A reflection pass to run after a turn. It serializes, so a host can run it
+/// later (a Worker from an alarm) instead of in the background of the turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Reflection {
+    pub agent: Agent,
+    pub session: Session,
+    pub model: String,
+}
+
+/// Run a reflection pass (see `host::Host::reflect`).
+pub async fn run_reflection(state: Shared, job: Reflection) -> Result<()> {
+    reflect(state, job.agent, job.session, job.model).await
 }
 
 /// The reflection pass: a short, tool-only call that may save skills/memory.

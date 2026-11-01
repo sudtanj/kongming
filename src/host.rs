@@ -6,7 +6,7 @@
 
 use futures_util::future::BoxFuture;
 
-use crate::agent::TurnOptions;
+use crate::agent::{Reflection, TurnOptions};
 use crate::db::Session;
 use crate::state::{Event, Shared};
 
@@ -25,6 +25,17 @@ pub trait Host: Send + Sync + 'static {
         self.spawn(Box::pin(async move {
             if let Err(e) = crate::agent::run_turn(state, session, text, opts).await {
                 tracing::warn!("turn failed: {e:#}");
+            }
+        }));
+    }
+
+    /// The reflection pass after a turn that did real work. Natively it runs
+    /// in a background task; a host with a small budget can store `job` (it
+    /// serializes) and call `agent::run_reflection` later.
+    fn reflect(&self, state: Shared, job: Reflection) {
+        self.spawn(Box::pin(async move {
+            if let Err(e) = crate::agent::run_reflection(state, job).await {
+                tracing::warn!("reflection failed: {e:#}");
             }
         }));
     }
