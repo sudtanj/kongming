@@ -95,17 +95,17 @@ it for particular jobs."
         });
         v.push(ToolSpec {
             name: "memory".into(),
-            description: "Long-term memory shared across conversations. add: store a durable fact/preference/lesson. search: find memories. remove: delete one by id. Kind `interest` is a topic, product, person or project the user follows; `watch` is something the user asked to be told about later (check-ins look at both).".into(),
+            description: "Long-term memory shared across conversations. add: store a durable fact/preference/lesson. update: rewrite one by id (a repeat of a saved memory is refused with its id: update that one instead). search: find memories. remove: delete one by id. Write facts, not instructions to yourself: \"User prefers metric units\", not \"Always use metric units\". Kind `interest` is a topic, product, person or project the user follows; `watch` is something the user asked to be told about later (check-ins look at both).".into(),
             parameters: obj(
                 json!({
-                    "action": {"type": "string", "enum": ["add", "search", "remove"]},
-                    "content": {"type": "string", "description": "add: the fact to remember (one or two sentences)"},
+                    "action": {"type": "string", "enum": ["add", "update", "search", "remove"]},
+                    "content": {"type": "string", "description": "add, update: the fact to remember (one or two sentences)"},
                     "kind": {"type": "string", "enum": ["fact", "preference", "lesson", "project", "interest", "watch"]},
                     "keywords": {"type": "array", "items": {"type": "string"}},
                     "importance": {"type": "integer", "minimum": 1, "maximum": 5},
                     "shared": {"type": "boolean", "description": "add: visible to every agent (default true)"},
                     "query": {"type": "string", "description": "search: words to look for"},
-                    "id": {"type": "string", "description": "remove: memory id"}
+                    "id": {"type": "string", "description": "update, remove: memory id"}
                 }),
                 &["action"],
             ),
@@ -190,6 +190,17 @@ by id or name."
         v.retain(|t| allowed.iter().any(|a| a == &t.name));
     }
     v
+}
+
+/// Built-ins a small model does without: the time is in its prompt, the team
+/// in the Team section, and earlier conversations in the recall section
+/// (unless the user pointed at one with `@session:`).
+pub fn trim_for_small_model(specs: &mut Vec<ToolSpec>, sessions_mentioned: bool) {
+    specs.retain(|t| match t.name.as_str() {
+        "current_time" | "list_agents" => false,
+        "list_sessions" | "read_session" => sessions_mentioned,
+        _ => true,
+    });
 }
 
 fn s<'a>(args: &'a Value, k: &str) -> &'a str {
@@ -355,6 +366,18 @@ async fn memory(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
             if content.len() > 2000 {
                 bail!("memory content too long (max 2000 chars)");
             }
+            // One fact, one memory: a repeat points at the saved one instead.
+            let saved = ctx.state.db.memories(Some(&ctx.agent.id), 500).await?;
+            if let Some(m) = crate::db::similar_memory(&saved, content) {
+                return Ok(format!(
+                    "not saved: this is already remembered as memory {} [{}]: {}\nTo change it, call memory with \
+action update, id {} and the full new content.",
+                    m.id,
+                    m.kind,
+                    m.content,
+                    m.id
+                ));
+            }
             let shared = args.get("shared").and_then(Value::as_bool).unwrap_or(true);
             let kind = match s(args, "kind") {
                 "" => "fact",
@@ -383,6 +406,32 @@ async fn memory(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
             });
             Ok(format!("saved memory {}", m.id))
         }
+        "update" => {
+            let (id, content) = (s(args, "id"), s(args, "content").trim());
+            if id.is_empty() || content.is_empty() {
+                bail!("id and content are required: the memory's id and its full new content");
+            }
+            if content.len() > 2000 {
+                bail!("memory content too long (max 2000 chars)");
+            }
+            let keywords = strings(args.get("keywords"));
+            let keywords = (!keywords.is_empty()).then_some(keywords.as_slice());
+            let importance = args.get("importance").and_then(Value::as_i64);
+            if !ctx.state.db.update_memory(id, content, keywords, importance).await? {
+                bail!("no memory with id {id}; find it with action search");
+            }
+            let note = format!("Updated memory: {content}");
+            ctx.state
+                .db
+                .log_improvement(Some(&ctx.agent.id), Some(&ctx.session.id), "memory_saved", Some(id), &note)
+                .await?;
+            ctx.state.emit(Event::Improvement {
+                kind: "memory_saved".into(),
+                note,
+                agent_id: Some(ctx.agent.id.clone()),
+            });
+            Ok(format!("updated memory {id}"))
+        }
         "search" => {
             let found = ctx.state.db.search_memories(Some(&ctx.agent.id), s(args, "query"), 12).await?;
             if found.is_empty() {
@@ -398,7 +447,7 @@ async fn memory(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
             ctx.state.db.delete_memory(id).await?;
             Ok(format!("removed memory {id}"))
         }
-        other => bail!("unknown action '{other}' (add|search|remove)"),
+        other => bail!("unknown action '{other}' (add|update|search|remove)"),
     }
 }
 
@@ -899,6 +948,22 @@ mod tests {
         assert!(!worker.contains(&"delegate_task".to_string()));
         let limited = names(&agent(true, Some(vec!["current_time".into()])), true);
         assert_eq!(limited, vec!["current_time".to_string()]);
+    }
+
+    #[test]
+    fn small_models_get_fewer_built_ins() {
+        let names = |sessions: bool| {
+            let mut specs = builtin_specs(&agent(true, None), false, None);
+            trim_for_small_model(&mut specs, sessions);
+            specs.into_iter().map(|t| t.name).collect::<Vec<_>>()
+        };
+        let small = names(false);
+        for gone in ["current_time", "list_agents", "list_sessions", "read_session"] {
+            assert!(!small.contains(&gone.to_string()), "{gone}: {small:?}");
+        }
+        assert!(small.contains(&"memory".to_string()) && small.contains(&"web_fetch".to_string()));
+        let mentioned = names(true);
+        assert!(mentioned.contains(&"read_session".to_string()) && !mentioned.contains(&"current_time".to_string()));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! System prompt assembly. Stable sections come first (identity, team,
-//! skills index) so provider-side prompt caching gets a long common prefix;
-//! volatile bits (time, attached context) go last.
+//! skills index, rules) so provider-side prompt caching gets a long common
+//! prefix; volatile bits (memory recalled for this message, recent
+//! conversations, time, attached context) go last.
 
 use crate::db::{Agent, Memory, Skill};
 
@@ -8,7 +9,24 @@ pub const DEFAULT_PERSONA: &str = "You are Kongming, a calm and resourceful assi
 prefer verified facts over guesses, and say plainly when you do not know something. You keep answers short and \
 useful. When a task is multi-step you work through it with your tools instead of describing what could be done.";
 
+/// When to ask before acting and when to decide (Hermes' clarify rule).
+pub const ASK_FIRST: &str = "When the goal, the target, or a step that can't be undone (sending, paying, deleting, \
+publishing) is unclear, ask one short question first, offering your recommended option. Low-stakes details: decide \
+yourself and say what you assumed.";
+
+/// Hermes' tool-use enforcement, for models that narrate instead of acting.
+pub const TOOL_RULES: &str = "Every reply either calls a tool or gives the user a final answer. Don't describe what \
+you would do — do it. Never invent tool output.";
+
+pub const RECALL_HINT: &str =
+    "If the user refers to something earlier, check these before asking them to repeat themselves.";
+
 const MAX_DESC: usize = 96;
+/// The Memory section's size, in characters.
+const MEMORY_CHARS: usize = 8000;
+const MEMORY_CHARS_SMALL: usize = 2500;
+/// One line of the Recent conversations section.
+const RECENT_LINE: usize = 150;
 
 fn short(s: &str, n: usize) -> String {
     let s = s.trim().replace('\n', " ");
@@ -35,6 +53,48 @@ pub struct PromptInput<'a> {
     pub now_utc: &'a str,
     /// The user's local time with its offset, when one is set (Settings → Channels).
     pub local_time: &'a str,
+    /// Small-model mode: shorter sections.
+    pub small: bool,
+    /// Add the tool-use enforcement rules (small and loose open models).
+    pub tool_rules: bool,
+    /// Whether `setup` is offered this turn.
+    pub setup: bool,
+    /// MCP servers and their tool counts when the tools are behind
+    /// `tool_search` / `tool_call`; empty when they are offered directly.
+    pub mcp_catalog: &'a [(String, usize)],
+    /// Lines of the Recent conversations section (see `recent_line`).
+    pub recent: &'a [String],
+}
+
+/// One line of the Recent conversations section: the title and what it was
+/// about, with the session id when the model can read it.
+pub fn recent_line(title: &str, gist: &str, session_id: Option<&str>) -> String {
+    let title = if title.trim().is_empty() { "(untitled)" } else { title.trim() };
+    let gist = gist.split_whitespace().collect::<Vec<_>>().join(" ");
+    let line = if gist.is_empty() || gist == title { title.to_string() } else { format!("{title}: {gist}") };
+    let line = short(&line, RECENT_LINE);
+    match session_id {
+        Some(id) => format!("- {line} (session {id})"),
+        None => format!("- {line}"),
+    }
+}
+
+/// Memory lines up to `cap` characters, in the order given; one that does
+/// not fit is skipped and a shorter one after it may still go in. `ids`
+/// adds each memory's id, for a model that may update them.
+fn memory_lines(memories: &[Memory], cap: usize, ids: bool) -> String {
+    let mut out = String::new();
+    for m in memories {
+        let line = if ids {
+            format!("- ({}) [{}] {}\n", m.id, m.kind, m.content.trim())
+        } else {
+            format!("- [{}] {}\n", m.kind, m.content.trim())
+        };
+        if out.len() + line.len() <= cap {
+            out.push_str(&line);
+        }
+    }
+    out
 }
 
 pub fn build(p: &PromptInput<'_>) -> String {
@@ -130,7 +190,13 @@ preferences with `memory`. Fix a skill that misled you instead of working around
     s.push('\n');
 
     // 4b. Reaching the user between conversations (the lead only)
-    if a.is_default {
+    if a.is_default && p.small {
+        s.push_str("# Reaching the user\n");
+        s.push_str(
+            "`notify_user` messages the user on Telegram; `schedule` plans reminders and checks for later. Message \
+only what is new and useful to them.\n\n",
+        );
+    } else if a.is_default {
         s.push_str("# Reaching the user\n");
         s.push_str(
             "You look out for the user between conversations, not only when spoken to. `notify_user` messages them on \
@@ -144,7 +210,14 @@ sending. Message only what is new, timely and clearly useful to them; never smal
     }
 
     // 4c. Setting things up from what the user pastes (the lead, with the user)
-    if a.is_default && matches!(p.channel, "web" | "telegram") {
+    let setup = p.setup && a.is_default && matches!(p.channel, "web" | "telegram");
+    if setup && p.small {
+        s.push_str("# Setup\n");
+        s.push_str(
+            "Configure what the user pastes with `setup`. Keys reach you as `[secret:<id> <kind> …1234]`: pass that \
+reference as the value, never repeat a key, and confirm in one line what changed.\n\n",
+        );
+    } else if setup {
         s.push_str("# Setup\n");
         s.push_str(
             "You set kongming up for the user with `setup`; they should not need the Settings pages. When they paste \
@@ -159,24 +232,29 @@ back. The `setup-from-paste` skill has the details.\n\n",
         );
     }
 
-    // 5. Memory
-    if !p.memories.is_empty() {
-        s.push_str("# Memory\n");
-        for m in p.memories {
-            s.push_str(&format!("- [{}] {}\n", m.kind, m.content.trim()));
-        }
-        s.push('\n');
-    }
-
-    // 6. Tools / MCP
+    // 5. Tools / MCP
     s.push_str("# Using tools\n");
     s.push_str(
         "When a tool call fails, fix it before anything else: read the error, then supply the missing arguments or correct \
 the wrong ones and call again. Look up values you lack with other tools first (for example the account, owner or repository \
 behind a request) or take them from the conversation; try another tool when one cannot do the job. Give up only after real \
-attempts, then tell the user in plain words what failed and what you need. Never answer with raw tool output; summarize it.\n\n",
+attempts, then tell the user in plain words what failed and what you need. Never answer with raw tool output; summarize it.\n",
     );
-    if !p.mcp_servers.is_empty() {
+    s.push_str(ASK_FIRST);
+    s.push('\n');
+    if p.tool_rules {
+        s.push_str(TOOL_RULES);
+        s.push('\n');
+    }
+    s.push('\n');
+    if !p.mcp_catalog.is_empty() {
+        s.push_str("# Connected services\n");
+        s.push_str(&format!(
+            "MCP tools from: {}. They are not listed one by one: find one with `tool_search` (say what you want to \
+do) and run it with `tool_call`.\n\n",
+            super::bridge::catalog(p.mcp_catalog)
+        ));
+    } else if !p.mcp_servers.is_empty() {
         s.push_str("# Connected services\n");
         s.push_str(&format!(
             "MCP tools are available from: {}. Their tool names start with `mcp__`.\n\n",
@@ -184,7 +262,7 @@ attempts, then tell the user in plain words what failed and what you need. Never
         ));
     }
 
-    // 7. Channel conventions
+    // 6. Channel conventions
     s.push_str("# Conversation\n");
     match p.channel {
         "telegram" => s.push_str(
@@ -201,6 +279,26 @@ first, then key findings, then anything that blocked you. Your final message is 
 final answer is a one-line log entry nobody is notified about.\n",
         ),
         _ => s.push_str("This conversation is in the kongming web app. Markdown is rendered, including code blocks and tables.\n"),
+    }
+
+    // 7. What changes from message to message: memory recalled for this one,
+    // the other recent conversations, the time.
+    let memory = memory_lines(p.memories, if p.small { MEMORY_CHARS_SMALL } else { MEMORY_CHARS }, false);
+    if !memory.is_empty() {
+        s.push_str("\n# Memory\n");
+        s.push_str(&memory);
+    }
+    if !p.recent.is_empty() {
+        s.push_str("\n# Recent conversations\n");
+        for line in p.recent {
+            s.push_str(line);
+            s.push('\n');
+        }
+        s.push_str(RECALL_HINT);
+        s.push('\n');
+    }
+    if !memory.is_empty() || !p.recent.is_empty() {
+        s.push('\n');
     }
     s.push_str(&format!("Current time: {} (UTC).", p.now_utc));
     if !p.local_time.is_empty() {
@@ -220,9 +318,14 @@ final answer is a one-line log entry nobody is notified about.\n",
     s
 }
 
+/// The reflection's answer when nothing is worth keeping.
+pub const NOTHING_TO_SAVE: &str = "Nothing to save";
+
 /// Prompt for the post-turn reflection pass (the "keeps improving itself"
-/// part). It runs with only `skill_manage` and `memory` as tools.
-pub fn reflection_prompt(agent: &Agent, skills: &[Skill]) -> String {
+/// part). It runs with only `skill_manage` and `memory` as tools, and sees
+/// the saved memories (up to `memory_chars`) so it updates them instead of
+/// saving them again.
+pub fn reflection_prompt(agent: &Agent, skills: &[Skill], memories: &[Memory], memory_chars: usize) -> String {
     let mut s = String::new();
     s.push_str(&format!(
         "You are the reflection step for the agent @{} ({}). You read a finished conversation and decide whether anything \
@@ -239,8 +342,17 @@ Save a MEMORY for durable facts: who the user is, their systems, names, preferen
 Save an INTEREST memory (kind `interest`) for a topic, product, person, place or project the user clearly follows or keeps \
 asking about, and a WATCH memory (kind `watch`) when they asked to be told about something later; check-ins use both to \
 decide what is worth messaging them about.\n\
+Write memories as facts (\"User prefers metric units\"), not as instructions to yourself.\n\
 Do NOTHING when the conversation was small talk, a one-off question, or already covered by existing skills and memory. \
-Never store secrets (tokens, passwords).\n\n");
+Never store secrets (tokens, passwords). Do not capture: failures of the environment (a server down, a timeout, a \
+missing key), negative claims about tools (\"tool X does not work\"), dead ends that were never resolved, or the details \
+of a one-off task.\n\n");
+    let saved = memory_lines(memories, memory_chars, true);
+    if !saved.is_empty() {
+        s.push_str("Saved memories (update one with its id instead of adding it again):\n");
+        s.push_str(&saved);
+        s.push('\n');
+    }
     if !skills.is_empty() {
         s.push_str("Existing skills:\n");
         for k in skills.iter().filter(|k| k.enabled) {
@@ -250,8 +362,10 @@ Never store secrets (tokens, passwords).\n\n");
         }
         s.push('\n');
     }
-    s.push_str("Use the tools if there is something worth keeping, then answer with one short line describing what you saved, \
-or exactly `nothing to save`.");
+    s.push_str(&format!(
+        "Use the tools if there is something worth keeping, then answer with one short line describing what you saved. \
+When nothing is worth saving, answer exactly: {NOTHING_TO_SAVE}"
+    ));
     s
 }
 
@@ -305,6 +419,11 @@ mod tests {
             extra_context: "",
             now_utc: "2026-01-01 00:00",
             local_time: "",
+            small: false,
+            tool_rules: false,
+            setup: true,
+            mcp_catalog: &[],
+            recent: &[],
         };
         let s = build(&p);
         assert!(s.contains("@dev"));
@@ -321,6 +440,80 @@ mod tests {
         assert!(s.contains("# Setup") && !s2.contains("# Setup"), "only the lead sets things up");
         let s3 = build(&PromptInput { channel: "delegation", ..p });
         assert!(!s3.contains("# Setup"));
+        assert!(s.contains(ASK_FIRST) && !s.contains(TOOL_RULES), "{s}");
+        assert!(!build(&PromptInput { setup: false, ..p }).contains("# Setup"), "only while setup is offered");
+    }
+
+    fn memory(kind: &str, content: &str) -> Memory {
+        Memory {
+            id: "m1".into(),
+            agent_id: None,
+            kind: kind.into(),
+            content: content.into(),
+            keywords: vec![],
+            importance: 3,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn small_mode_is_shorter_and_volatile_sections_come_last() {
+        let lead = Agent { is_default: true, ..agent("1", "kongming", None) };
+        let team = vec![lead.clone()];
+        let memories = vec![memory("preference", "User likes tea"), memory("fact", &"x".repeat(3000))];
+        let recent = vec![recent_line("Trip plan", "Book a hotel in Kyoto for May", None)];
+        let catalog = vec![("GitHub".to_string(), 40)];
+        let p = PromptInput {
+            agent: &lead,
+            team: &team,
+            skills: &[],
+            memories: &memories,
+            inline_skills: &[],
+            mcp_servers: &[],
+            channel: "telegram",
+            can_delegate: false,
+            extra_context: "",
+            now_utc: "2026-01-01 00:00",
+            local_time: "",
+            small: false,
+            tool_rules: false,
+            setup: true,
+            mcp_catalog: &catalog,
+            recent: &recent,
+        };
+        let normal = build(&p);
+        let small = build(&PromptInput { small: true, tool_rules: true, ..p });
+        assert!(small.len() + 1500 < normal.len(), "{} vs {}", small.len(), normal.len());
+        assert!(small.contains("# Setup") && small.contains("# Reaching the user") && small.contains(TOOL_RULES));
+        // The long memory fits the normal cap only.
+        assert!(normal.contains(&"x".repeat(3000)) && !small.contains(&"x".repeat(3000)));
+        assert!(small.contains("- [preference] User likes tea"), "{small}");
+        // Memory, recent conversations and the time come after every stable section.
+        for s in [&normal, &small] {
+            let at = |needle: &str| s.find(needle).unwrap_or_else(|| panic!("no {needle} in {s}"));
+            assert!(at("# Conversation") < at("# Memory"));
+            assert!(at("# Memory") < at("# Recent conversations"));
+            assert!(at("- Trip plan: Book a hotel in Kyoto for May") < at(RECALL_HINT));
+            assert!(at(RECALL_HINT) < at("Current time:"));
+            assert!(at("GitHub (40 tools)") < at("# Conversation") && at("`tool_search`") > 0);
+        }
+    }
+
+    #[test]
+    fn recent_lines_are_short() {
+        let line = recent_line("Trip", &"word ".repeat(100), Some("s1"));
+        assert!(line.starts_with("- Trip: word word") && line.ends_with("… (session s1)"), "{line}");
+        assert_eq!(recent_line("", "", None), "- (untitled)");
+        assert_eq!(recent_line("Hi", "hi", None), "- Hi: hi");
+    }
+
+    #[test]
+    fn reflection_sees_saved_memories_and_the_do_not_capture_list() {
+        let a = agent("1", "kongming", None);
+        let s = reflection_prompt(&a, &[], &[memory("fact", "User lives in Jakarta")], 1000);
+        assert!(s.contains("- (m1) [fact] User lives in Jakarta"), "{s}");
+        assert!(s.contains("Do not capture") && s.ends_with(NOTHING_TO_SAVE), "{s}");
     }
 
     #[test]

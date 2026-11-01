@@ -18,6 +18,11 @@ pub struct OpenAi {
     /// The server refused `tool_choice` once (vLLM started without a tool
     /// parser): leave it out for as long as this provider lives.
     no_tool_choice: AtomicBool,
+    /// Ask for one tool call per reply (small models), until the server
+    /// refuses `parallel_tool_calls`.
+    serial_tools: AtomicBool,
+    /// The context window to ask an Ollama server for.
+    num_ctx: Option<u32>,
 }
 
 impl OpenAi {
@@ -28,7 +33,56 @@ impl OpenAi {
             base: base.trim_end_matches('/').to_string(),
             key: key.filter(|k| !k.trim().is_empty()),
             no_tool_choice: AtomicBool::new(false),
+            serial_tools: AtomicBool::new(false),
+            num_ctx: None,
         }
+    }
+
+    /// Settings from the model profile: one tool call per reply for a small
+    /// model, and the context window for Ollama.
+    pub fn tuned(self, serial_tools: bool, num_ctx: Option<u32>) -> OpenAi {
+        OpenAi { serial_tools: AtomicBool::new(serial_tools), num_ctx, ..self }
+    }
+
+    /// `body` with what this server takes beyond the standard: no parallel
+    /// tool calls, Ollama's `num_ctx` (top level and in `options`), and no
+    /// `tool_choice` once refused.
+    pub fn request_body(&self, req: &ChatRequest) -> Value {
+        let mut body = Self::body(req);
+        if body.get("tools").is_some() {
+            if self.serial_tools.load(Ordering::Relaxed) {
+                body["parallel_tool_calls"] = json!(false);
+            }
+            if self.no_tool_choice.load(Ordering::Relaxed) {
+                if let Some(o) = body.as_object_mut() {
+                    o.remove("tool_choice");
+                }
+            }
+        }
+        if let Some(n) = self.num_ctx {
+            body["num_ctx"] = json!(n);
+            body["options"] = json!({"num_ctx": n});
+        }
+        body
+    }
+
+    /// Drop the field a 400 blames, when it is one this server can do without
+    /// (`parallel_tool_calls`, `tool_choice`), and remember that. Whether a
+    /// field was dropped and the request is worth sending again.
+    fn drop_refused(&self, body: &mut Value, error: &str) -> bool {
+        let (field, flag, on) = if body.get("parallel_tool_calls").is_some() && rejects_parallel_calls(error) {
+            ("parallel_tool_calls", &self.serial_tools, false)
+        } else if body.get("tool_choice").is_some() && rejects_tool_choice(error) {
+            ("tool_choice", &self.no_tool_choice, true)
+        } else {
+            return false;
+        };
+        tracing::info!("the model server refused {field}; sending requests without it");
+        flag.store(on, Ordering::Relaxed);
+        if let Some(o) = body.as_object_mut() {
+            o.remove(field);
+        }
+        true
     }
 
     /// Convert neutral messages into the OpenAI shape. Tool results become
@@ -125,6 +179,12 @@ fn rejects_tool_choice(body: &str) -> bool {
     ["tool_choice", "tool choice", "tool-call-parser", "tool parser", "tool_call_parser"].iter().any(|p| b.contains(p))
 }
 
+/// A 400 that blames `parallel_tool_calls` (servers that do not know it).
+fn rejects_parallel_calls(body: &str) -> bool {
+    let b = body.to_ascii_lowercase();
+    b.contains("parallel_tool_calls") || b.contains("parallel tool calls")
+}
+
 #[derive(Default)]
 struct PendingCall {
     index: u64,
@@ -201,23 +261,18 @@ impl Provider for OpenAi {
     }
 
     async fn stream(&self, req: ChatRequest) -> Result<EventStream> {
-        let mut body = Self::body(&req);
-        if self.no_tool_choice.load(Ordering::Relaxed) {
-            if let Some(o) = body.as_object_mut() {
-                o.remove("tool_choice");
-            }
-        }
+        let mut body = self.request_body(&req);
         let mut resp = self.send(&body).await?;
-        if resp.status() == reqwest::StatusCode::BAD_REQUEST && body.get("tool_choice").is_some() {
+        // A field the server does not take: drop it and ask again (at most
+        // once per field).
+        for _ in 0..2 {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            if !rejects_tool_choice(&text) {
-                bail!("llm HTTP {status}: {}", short_error(&text));
+            if status != reqwest::StatusCode::BAD_REQUEST {
+                break;
             }
-            tracing::info!("the model server refused tool_choice; sending requests without it");
-            self.no_tool_choice.store(true, Ordering::Relaxed);
-            if let Some(o) = body.as_object_mut() {
-                o.remove("tool_choice");
+            let text = resp.text().await.unwrap_or_default();
+            if !self.drop_refused(&mut body, &text) {
+                bail!("llm HTTP {status}: {}", short_error(&text));
             }
             resp = self.send(&body).await?;
         }
@@ -447,6 +502,27 @@ mod tests {
         let vllm = r#""auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set"#;
         assert!(rejects_tool_choice(vllm));
         assert!(!rejects_tool_choice(r#"{"error": {"message": "model not found"}}"#));
+    }
+
+    #[test]
+    fn small_model_requests_ask_for_serial_calls_and_the_window() {
+        let tool = ToolSpec { name: "f".into(), description: "d".into(), parameters: json!({"type": "object"}) };
+        let req = ChatRequest { model: "m".into(), tools: vec![tool], ..Default::default() };
+        let api = OpenAi::new(reqwest::Client::new(), None, None).tuned(true, Some(8192));
+        let mut body = api.request_body(&req);
+        assert_eq!(body["parallel_tool_calls"], json!(false));
+        assert_eq!(body["num_ctx"], json!(8192));
+        assert_eq!(body["options"]["num_ctx"], json!(8192));
+        // Refused once: dropped from then on; other 400s are left alone.
+        assert!(!api.drop_refused(&mut body, "model not found"));
+        assert!(api.drop_refused(&mut body, "Unrecognized request argument supplied: parallel_tool_calls"));
+        assert!(body.get("parallel_tool_calls").is_none() && body.get("tool_choice").is_some());
+        assert!(api.request_body(&req).get("parallel_tool_calls").is_none());
+        // No tools, no tool fields; a normal provider adds nothing.
+        let plain = ChatRequest { model: "m".into(), ..Default::default() };
+        assert!(api.request_body(&plain).get("parallel_tool_calls").is_none());
+        let normal = OpenAi::new(reqwest::Client::new(), None, None).request_body(&req);
+        assert!(normal.get("parallel_tool_calls").is_none() && normal.get("num_ctx").is_none());
     }
 
     #[test]

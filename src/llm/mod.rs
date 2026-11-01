@@ -4,9 +4,12 @@
 
 pub mod anthropic;
 pub mod openai;
+pub mod profile;
 pub mod repair;
 pub mod sse;
 pub mod think;
+
+pub use profile::{profile, profile_for, ModelProfile};
 
 use std::pin::Pin;
 
@@ -95,10 +98,18 @@ pub struct ProviderConfig {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub effort: Option<String>,
+    /// The model's context window in tokens, when known: the turn's budgets
+    /// are sized from it.
+    #[serde(default)]
+    pub context_window: Option<u32>,
+    /// Small-model mode; `None` detects it from the model name and address.
+    #[serde(default)]
+    pub small_model: Option<bool>,
 }
 
 impl ProviderConfig {
     pub fn redacted(&self) -> Value {
+        let detected = profile(&ProviderConfig { small_model: None, ..self.clone() });
         serde_json::json!({
             "kind": self.kind,
             "baseUrl": self.base_url,
@@ -107,13 +118,23 @@ impl ProviderConfig {
             "maxTokens": self.max_tokens,
             "temperature": self.temperature,
             "effort": self.effort,
+            "contextWindow": self.context_window,
+            "smallModel": self.small_model,
+            "smallDetected": detected.small,
         })
     }
 }
 
 pub fn build(cfg: &ProviderConfig, http: reqwest::Client) -> Result<Box<dyn Provider>> {
     match cfg.kind.as_str() {
-        "openai" | "" => Ok(Box::new(openai::OpenAi::new(http, cfg.base_url.clone(), cfg.api_key.clone()))),
+        "openai" | "" => {
+            let p = profile(cfg);
+            // Ollama cuts prompts at its own small default unless told the window.
+            let num_ctx = (p.context_window > 0 && profile::is_ollama(cfg.base_url.as_deref()))
+                .then(|| u32::try_from(p.context_window).unwrap_or(u32::MAX));
+            let api = openai::OpenAi::new(http, cfg.base_url.clone(), cfg.api_key.clone());
+            Ok(Box::new(api.tuned(p.small, num_ctx)))
+        }
         "anthropic" => Ok(Box::new(anthropic::Anthropic::new(http, cfg.base_url.clone(), cfg.api_key.clone()))),
         other => bail!("unknown provider kind '{other}' (use openai or anthropic)"),
     }

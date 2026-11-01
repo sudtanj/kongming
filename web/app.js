@@ -179,6 +179,14 @@ const STRINGS = {
     'models.maxTokens': 'Max tokens',
     'models.temperature': 'Temperature',
     'models.effort': 'Reasoning effort',
+    'models.contextWindow': 'Context window',
+    'models.contextWindowDesc': 'Tokens the model can take. The prompt, history and replies are sized to fit; leave empty for the default budget.',
+    'models.smallModel': 'Small-model mode',
+    'models.smallModelDesc': 'A shorter prompt, fewer tools, MCP tools behind a search, and cooler sampling. Auto turns it on for models up to 34b and for local servers (Ollama, llama.cpp, LM Studio).',
+    'models.smallAutoOn': 'Auto (detected: small)',
+    'models.smallAutoOff': 'Auto (detected: not small)',
+    'models.smallOn': 'On',
+    'models.smallOff': 'Off',
     'models.test': 'Test connection',
     'models.testing': 'Testing…',
     'models.testOk': 'Replied "{{reply}}" in {{ms}} ms ({{model}})',
@@ -1565,10 +1573,12 @@ const settings = (() => {
     const maxTokens = input({ type: 'number', min: 1, value: llm.maxTokens == null ? '' : llm.maxTokens, placeholder: 'auto' });
     const temperature = input({ type: 'number', min: 0, max: 2, step: 0.1, value: llm.temperature == null ? '' : llm.temperature, placeholder: 'default' });
     const effort = select([['', t('common.none')], ['low', 'low'], ['medium', 'medium'], ['high', 'high']], llm.effort || '');
+    const contextWindow = input({ type: 'number', min: 1024, step: 1024, value: llm.contextWindow == null ? '' : llm.contextWindow, placeholder: 'auto' });
+    const smallModel = select([['', t(llm.smallDetected ? 'models.smallAutoOn' : 'models.smallAutoOff')], ['true', t('models.smallOn')], ['false', t('models.smallOff')]], llm.smallModel == null ? '' : String(llm.smallModel));
     const keyState = h('span', { class: 'pill ' + (llm.apiKeySet ? 'ok' : 'warn') }, llm.apiKeySet ? t('models.apiKeySet') : t('models.apiKeyNone'));
     const testOut = h('div', { class: 'hint', style: 'margin-top:0.4rem' });
     const save = saveBtn(null, async () => {
-      const body = { kind: kind.value, baseUrl: baseUrl.value.trim(), model: model.value.trim(), maxTokens: maxTokens.value ? Number(maxTokens.value) : null, temperature: temperature.value !== '' ? Number(temperature.value) : null, effort: effort.value || null };
+      const body = { kind: kind.value, baseUrl: baseUrl.value.trim(), model: model.value.trim(), maxTokens: maxTokens.value ? Number(maxTokens.value) : null, temperature: temperature.value !== '' ? Number(temperature.value) : null, effort: effort.value || null, contextWindow: contextWindow.value ? Number(contextWindow.value) : null, smallModel: smallModel.value === '' ? null : smallModel.value === 'true' };
       if (apiKey.value) body.apiKey = apiKey.value;
       const res = await api.put('/api/settings', { llm: body }); apiKey.value = '';
       keyState.textContent = res.llm.apiKeySet ? t('models.apiKeySet') : t('models.apiKeyNone'); keyState.className = 'pill ' + (res.llm.apiKeySet ? 'ok' : 'warn');
@@ -1584,6 +1594,8 @@ const settings = (() => {
         row(t('models.maxTokens'), null, maxTokens),
         row(t('models.temperature'), null, temperature),
         row(t('models.effort'), null, effort),
+        row(t('models.contextWindow'), t('models.contextWindowDesc'), contextWindow),
+        row(t('models.smallModel'), t('models.smallModelDesc'), smallModel),
         h('div', { class: 'settings-footer' }, h('div', {}, test, testOut), h('div', { class: 'acts' }, save))),
       section(t('models.reflection'), row(t('models.reflection'), t('models.reflectionDesc'), switchEl(!(st.reflection && st.reflection.enabled === false), (v) => api.put('/api/settings', { reflection: { enabled: v } }), t('models.reflection')), { switch: true })),
       section(t('models.publicUrl'), row(t('models.publicUrl'), t('models.publicUrlDesc'), publicUrl), h('div', { class: 'settings-footer' }, h('span'), h('div', { class: 'acts' }, saveBtn(null, () => api.put('/api/settings', { publicUrl: publicUrl.value.trim() }))))));

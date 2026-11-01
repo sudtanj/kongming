@@ -668,6 +668,39 @@ impl Db {
         Ok(scored.into_iter().take(limit as usize).map(|(_, m)| m).collect())
     }
 
+    /// The agent's latest conversations with the user other than `exclude`,
+    /// newest first, each with the text of its last user message.
+    pub async fn recent_conversations(
+        &self,
+        agent_id: &str,
+        exclude: &str,
+        limit: i64,
+    ) -> Result<Vec<(Session, String)>> {
+        let rows = self
+            .turso
+            .query(
+                "SELECT s.*, (SELECT m.content FROM messages m WHERE m.session_id = s.id AND m.role = 'user' ORDER BY m.seq DESC LIMIT 1) AS last_user
+                 FROM sessions s WHERE s.archived = 0 AND s.channel IN ('web', 'telegram') AND s.agent_id = ? AND s.id != ?
+                 ORDER BY s.updated_at DESC LIMIT ?",
+                &[agent_id.into(), exclude.into(), limit.into()],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let parts: Vec<Part> = serde_json::from_value(r.json("last_user")).unwrap_or_default();
+                let text: Vec<&str> = parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        Part::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                (Session::from_row(&r), text.join(" "))
+            })
+            .collect())
+    }
+
     pub async fn save_memory(
         &self,
         agent_id: Option<&str>,
@@ -694,6 +727,24 @@ impl Db {
             )
             .await?;
         Ok(m)
+    }
+
+    /// Rewrite a memory; keywords and importance stay unless given.
+    pub async fn update_memory(
+        &self,
+        id: &str,
+        content: &str,
+        keywords: Option<&[String]>,
+        importance: Option<i64>,
+    ) -> Result<bool> {
+        let done = self
+            .turso
+            .execute(
+                "UPDATE memories SET content = ?, keywords = COALESCE(?, keywords), importance = COALESCE(?, importance), updated_at = ? WHERE id = ?",
+                &[content.trim().into(), keywords.map(|k| j(&k)).into(), importance.map(|i| i.clamp(1, 5)).into(), now_ms().into(), id.into()],
+            )
+            .await?;
+        Ok(done.affected > 0)
     }
 
     pub async fn delete_memory(&self, id: &str) -> Result<()> {
@@ -1148,9 +1199,122 @@ pub fn normalize_skill_name(name: &str) -> Result<String> {
     Ok(n)
 }
 
+/// Words every memory and question has, which tell nothing apart.
+const FILLER: &str = "the and for you your are was were with that this what when where which who why how have has had \
+can could would should will just about from into they them their there then than but not all any some its our out also \
+been does did please user";
+
+/// Words that tell memories apart: lowercase, three letters or more, no filler.
+fn memory_words(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() > 2)
+        .map(str::to_lowercase)
+        .filter(|w| !FILLER.split(' ').any(|f| f == w))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Lowercase words joined by single spaces.
+fn flat_words(s: &str) -> String {
+    s.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
+}
+
+/// The same word, or one the start of the other ("deploy", "deploys").
+fn same_word(a: &str, b: &str) -> bool {
+    a == b || (a.len() > 3 && b.len() > 3 && (a.starts_with(b) || b.starts_with(a)))
+}
+
+/// Whether two memories say the same thing: the same words, one inside the
+/// other, or at least 80% of the words shared.
+pub fn near_duplicate(a: &str, b: &str) -> bool {
+    let (fa, fb) = (flat_words(a), flat_words(b));
+    if fa.is_empty() || fb.is_empty() {
+        return false;
+    }
+    let (short, long) = if fa.len() <= fb.len() { (&fa, &fb) } else { (&fb, &fa) };
+    if short == long || (short.split(' ').count() >= 3 && format!(" {long} ").contains(&format!(" {short} "))) {
+        return true;
+    }
+    let (wa, wb) = (memory_words(a), memory_words(b));
+    let (few, many) = if wa.len() <= wb.len() { (&wa, &wb) } else { (&wb, &wa) };
+    if few.len() < 2 {
+        return false;
+    }
+    let shared = few.iter().filter(|w| many.iter().any(|v| same_word(w, v))).count();
+    shared * 5 >= many.len() * 4
+}
+
+/// The saved memory a new one would repeat, if any.
+pub fn similar_memory<'a>(existing: &'a [Memory], content: &str) -> Option<&'a Memory> {
+    existing.iter().find(|m| near_duplicate(&m.content, content))
+}
+
+/// Memories that share words with `text`, best match first, at most
+/// `limit`; one without a shared word is never returned.
+pub fn relevant_memories(all: &[Memory], text: &str, limit: usize) -> Vec<Memory> {
+    let terms = memory_words(text);
+    if terms.is_empty() {
+        return vec![];
+    }
+    let mut scored: Vec<(usize, &Memory)> = all
+        .iter()
+        .map(|m| {
+            let words = memory_words(&format!("{} {}", m.content, m.keywords.join(" ")));
+            let hits = terms.iter().filter(|t| words.iter().any(|w| same_word(t, w))).count();
+            (hits, m)
+        })
+        .filter(|(hits, _)| *hits > 0)
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.importance.cmp(&a.1.importance)));
+    scored.into_iter().take(limit).map(|(_, m)| m.clone()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn memory(content: &str, keywords: &[&str], importance: i64) -> Memory {
+        Memory {
+            id: content.chars().take(8).collect(),
+            agent_id: None,
+            kind: "fact".into(),
+            content: content.into(),
+            keywords: keywords.iter().map(|k| k.to_string()).collect(),
+            importance,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn near_duplicate_memories_are_recognized() {
+        assert!(near_duplicate("User likes green tea.", "user likes  GREEN tea"));
+        assert!(near_duplicate("User likes green tea", "User likes green tea and coffee in the morning"));
+        assert!(near_duplicate("User prefers dark mode in the editor", "User prefers dark mode in editors"));
+        assert!(!near_duplicate("User lives in Jakarta", "User lives in Bandung"));
+        assert!(!near_duplicate("Server is called orion", "Server orion runs Debian 12"));
+        assert!(!near_duplicate("tea", "User likes green tea"), "a lone word is not a duplicate");
+        let saved = vec![memory("Deploys go out on Mondays", &[], 3), memory("User likes green tea", &[], 2)];
+        assert_eq!(similar_memory(&saved, "user likes green tea!").map(|m| m.id.as_str()), Some("User lik"));
+        assert!(similar_memory(&saved, "The NAS is at 10.0.0.5").is_none());
+    }
+
+    #[test]
+    fn relevant_memories_share_words_with_the_message() {
+        let all = vec![
+            memory("Server orion runs Debian", &["homelab"], 1),
+            memory("User likes green tea", &["drinks"], 5),
+            memory("The homelab backup runs nightly", &[], 2),
+        ];
+        let found = relevant_memories(&all, "Is my homelab server up?", 8);
+        let ids: Vec<&str> = found.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["Server o", "The home"], "two words beat one; no shared word, not recalled");
+        assert!(relevant_memories(&all, "what is it?", 8).is_empty());
+        assert_eq!(relevant_memories(&all, "homelab", 1).len(), 1);
+    }
 
     #[test]
     fn skill_names_are_slugs() {

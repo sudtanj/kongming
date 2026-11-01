@@ -25,6 +25,23 @@ pub fn offered(agent: &Agent, channel: &str) -> bool {
         && agent.tools.as_ref().is_none_or(|t| t.iter().any(|n| n == "setup"))
 }
 
+/// Words of a message about configuring kongming (`connect`, `configure`
+/// and `install` in any form).
+const SETUP_WORDS: &[&str] = &["key", "keys", "token", "tokens", "api", "mcp", "telegram", "setup"];
+
+/// Whether a message may call for `setup`: a pasted secret, or words about
+/// setting something up. A small model is offered the tool only then.
+pub fn wanted(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("[secret:")
+        || lower.contains("set up")
+        || lower.split(|c: char| !c.is_alphanumeric()).any(setup_word)
+}
+
+fn setup_word(w: &str) -> bool {
+    SETUP_WORDS.contains(&w) || ["connect", "configur", "install"].iter().any(|p| w.starts_with(*p))
+}
+
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "setup".into(),
@@ -603,6 +620,16 @@ async fn skill_import(state: &Shared, args: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_is_wanted_for_secrets_and_setup_words() {
+        assert!(wanted("here: [secret:ab12 openai …1234]"));
+        assert!(wanted("Connect my GitHub MCP"));
+        assert!(wanted("can you set up the Telegram bot?"));
+        assert!(wanted("configure the API key"));
+        assert!(!wanted("what is the weather in Jakarta?"));
+        assert!(!wanted("the monkey is tokenless"), "words, not parts of words");
+    }
 
     #[test]
     fn names_and_transports_come_from_the_url() {

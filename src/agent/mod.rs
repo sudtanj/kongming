@@ -3,6 +3,7 @@
 //! stops, persists every round, and (optionally) runs a reflection pass that
 //! may save skills and memories. Events go to the bus for whoever is listening.
 
+pub mod bridge;
 pub mod guard;
 pub mod mention;
 pub mod paste;
@@ -18,17 +19,37 @@ use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
 use serde_json::Value;
 
-use crate::db::{new_id, Agent, Message, Part, Session, Skill};
-use crate::llm::{self, repair, think, ChatMessage, ChatRequest, LlmEvent, ProviderConfig, ToolSpec};
+use crate::db::{new_id, Agent, Memory, Message, Part, Session, Skill};
+use crate::llm::{self, repair, think, ChatMessage, ChatRequest, LlmEvent, ModelProfile, ProviderConfig, ToolSpec};
 use crate::state::{Event, Shared};
 use tools::ToolCtx;
 
 const MAX_TOOL_RESULT_CHARS: usize = 16_000;
+/// Transcript handed to a compaction request, in characters.
+const COMPACTION_CHARS: usize = 60_000;
+const DEFAULT_MAX_TOKENS: u32 = 8192;
+/// Sampling temperature of a small model when the provider sets none.
+const SMALL_TEMPERATURE: f32 = 0.3;
+/// Memories in every prompt (the most important), and those recalled by the
+/// words of the message on top of them.
+const TOP_MEMORIES: usize = 40;
+const TOP_MEMORIES_SMALL: usize = 8;
+const RELEVANT_MEMORIES: usize = 8;
+/// Other conversations listed in the prompt.
+const RECENT_SESSIONS: i64 = 3;
+const RECENT_SESSIONS_SMALL: i64 = 2;
+/// A small model reflects after a correction, and after every this many
+/// tool-using turns of a conversation.
+const SMALL_REFLECT_EVERY: u32 = 4;
+/// Longest reflection answer kept as a note from a small model; longer ones
+/// are rambling, not a summary of what was saved.
+const SMALL_REFLECT_NOTE_CHARS: usize = 300;
 /// Appended to failed tool results: weaker models otherwise stop at the first
 /// error and hand it to the user instead of fixing the call.
 const RETRY_HINT: &str = "[kongming] This call failed. Work out why from the error above and fix it yourself: add \
 missing arguments or correct wrong ones (find the values with another tool, such as a list or search call, or take them \
-from the conversation), or use a different tool. Ask the user only for what you cannot find out yourself.";
+from the conversation), or use a different tool. If the error shows you need something only the user knows, ask them \
+for exactly that.";
 /// Tool results from earlier step blocks, once a turn continues past the limit.
 const OLD_TOOL_RESULT_CHARS: usize = 1_500;
 const KEEP_RECENT_MESSAGES: usize = 12;
@@ -151,8 +172,16 @@ fn is_context_overflow(err: &str) -> bool {
 /// Fold older history into the session summary. Keeps the last `keep`
 /// messages verbatim and may cut inside a turn (a long task has one user
 /// message and many tool rounds), but never between a tool call and its
-/// results. Returns whether anything was folded.
-async fn compact(state: &Shared, session: &mut Session, turn_id: &str, model: &str, keep: usize) -> Result<bool> {
+/// results. The model reads at most `max_chars` of transcript. Returns
+/// whether anything was folded.
+async fn compact(
+    state: &Shared,
+    session: &mut Session,
+    turn_id: &str,
+    model: &str,
+    keep: usize,
+    max_chars: usize,
+) -> Result<bool> {
     let msgs = state.db.messages(&session.id, session.summary_upto).await?;
     let live: Vec<&Message> = msgs.iter().filter(|m| m.seq > session.summary_upto && m.role != "system").collect();
     if live.len() <= keep {
@@ -195,7 +224,7 @@ async fn compact(state: &Shared, session: &mut Session, turn_id: &str, model: &s
         model: model.to_string(),
         system: prompt::compaction_prompt().to_string(),
         // The previous summary leads and the newest messages close it: keep both.
-        messages: vec![ChatMessage::text("user", shell::head_tail(&transcript, 60_000))],
+        messages: vec![ChatMessage::text("user", shell::head_tail(&transcript, max_chars))],
         tools: vec![],
         max_tokens: 1500,
         temperature: Some(0.2),
@@ -218,12 +247,12 @@ async fn compact_chat(
     state: &Shared,
     session: &mut Session,
     turn_id: &str,
-    model: &str,
+    plan: &TurnPlan,
     keep: usize,
     request: (i64, &str),
     chat: &mut Vec<ChatMessage>,
 ) -> bool {
-    match compact(state, session, turn_id, model, keep).await {
+    match compact(state, session, turn_id, &plan.model, keep, plan.budget.compaction_chars).await {
         Ok(true) => match load_chat(state, session, request).await {
             Ok(c) => {
                 *chat = c;
@@ -255,19 +284,108 @@ pub async fn collect_text(mut stream: llm::EventStream) -> Result<String> {
     Ok(out)
 }
 
+/// What one turn may spend, sized from the model's context window when it is
+/// known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Budget {
+    small: bool,
+    /// The context window in tokens; 0 when unknown.
+    window: usize,
+    /// Request size (tokens) past which older history is compacted.
+    context_tokens: usize,
+    max_tokens: u32,
+    tool_result_chars: usize,
+    /// Transcript handed to the compaction request.
+    compaction_chars: usize,
+}
+
+impl Budget {
+    /// The request takes at most 60% of the window, the reply a quarter for a
+    /// small model (two fifths otherwise, at least 1024 tokens), one tool
+    /// result about 15% (at least 2000 characters), the compaction
+    /// transcript about half.
+    fn new(profile: ModelProfile, context_tokens: usize, max_tokens: Option<u32>) -> Budget {
+        let max_tokens = max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        let w = profile.context_window;
+        if w == 0 {
+            return Budget {
+                small: profile.small,
+                window: 0,
+                context_tokens,
+                max_tokens,
+                tool_result_chars: MAX_TOOL_RESULT_CHARS,
+                compaction_chars: COMPACTION_CHARS,
+            };
+        }
+        let reply = if profile.small { w / 4 } else { w * 2 / 5 };
+        Budget {
+            small: profile.small,
+            window: w,
+            context_tokens: context_tokens.min(w * 3 / 5),
+            max_tokens: max_tokens.min(u32::try_from(reply.max(1024)).unwrap_or(u32::MAX)),
+            tool_result_chars: MAX_TOOL_RESULT_CHARS.min((w * 4 * 15 / 100).max(2000)),
+            compaction_chars: COMPACTION_CHARS.min((w * 2).max(4000)),
+        }
+    }
+}
+
 struct TurnPlan {
     agent: Agent,
     system: String,
     tools: Vec<ToolSpec>,
+    /// MCP tools behind `tool_search` / `tool_call` (empty when offered directly).
+    deferred: Vec<ToolSpec>,
     mcp_names: Vec<String>,
     model: String,
     can_delegate: bool,
+    budget: Budget,
+    temperature: Option<f32>,
 }
 
-async fn plan(state: &Shared, session: &Session, agent: Agent, mentions: &mention::Mentions) -> Result<TurnPlan> {
+/// The memories for the prompt: those that share words with the message
+/// first, then the most important ones, without repeats.
+fn recall(all: &[Memory], text: &str, small: bool) -> Vec<Memory> {
+    let top = if small { TOP_MEMORIES_SMALL } else { TOP_MEMORIES };
+    let mut out = crate::db::relevant_memories(all, text, RELEVANT_MEMORIES);
+    for m in all.iter().take(top) {
+        if !out.iter().any(|x| x.id == m.id) {
+            out.push(m.clone());
+        }
+    }
+    out
+}
+
+/// The Recent conversations section: the agent's other latest conversations
+/// with the user, each with its title and last request.
+async fn recent_lines(state: &Shared, session: &Session, agent_id: &str, small: bool) -> Vec<String> {
+    let n = if small { RECENT_SESSIONS_SMALL } else { RECENT_SESSIONS };
+    let found = state.db.recent_conversations(agent_id, &session.id, n).await.unwrap_or_default();
+    found
+        .iter()
+        .map(|(s, last)| {
+            let summary = s.summary.as_deref().and_then(|x| x.lines().map(str::trim).find(|l| !l.is_empty()));
+            let gist = if last.trim().is_empty() { summary.unwrap_or("") } else { last.as_str() };
+            // A small model has no read_session to open them with.
+            prompt::recent_line(&s.title, gist, (!small).then_some(s.id.as_str()))
+        })
+        .collect()
+}
+
+async fn plan(
+    state: &Shared,
+    session: &Session,
+    agent: Agent,
+    mentions: &mention::Mentions,
+    request_text: &str,
+    setup_hint: bool,
+) -> Result<TurnPlan> {
     let team = state.db.agents().await?;
     let skills = state.db.skills().await?;
-    let memories = state.db.memories(Some(&agent.id), 40).await?;
+    let (pcfg, _) = state.provider().await?;
+    let model = agent.model.clone().filter(|m| !m.is_empty()).unwrap_or(pcfg.model.clone());
+    let profile = llm::profile_for(&pcfg, &model);
+    let all_memories = state.db.memories(Some(&agent.id), 500).await?;
+    let memories = recall(&all_memories, request_text, profile.small);
     let can_delegate = team.iter().any(|t| t.manager_id.as_deref() == Some(agent.id.as_str()));
 
     // Inline skills: pinned + mentioned.
@@ -291,6 +409,9 @@ async fn plan(state: &Shared, session: &Session, agent: Agent, mentions: &mentio
 
     // Tools: built-ins + MCP (restricted per agent, plus @mcp: mentions).
     let mut tool_specs = tools::builtin_specs(&agent, can_delegate, state.shell.as_ref());
+    if profile.small {
+        tools::trim_for_small_model(&mut tool_specs, !mentions.sessions.is_empty());
+    }
     // Earnings: the lead agent, while switched on.
     if agent.is_default
         && agent.tools.as_ref().is_none_or(|t| t.iter().any(|n| n == "earn"))
@@ -298,8 +419,10 @@ async fn plan(state: &Shared, session: &Session, agent: Agent, mentions: &mentio
     {
         tool_specs.push(crate::earn::tool_spec());
     }
-    // Setup: the lead agent, in a conversation with the user.
-    if setup::offered(&agent, &session.channel) {
+    // Setup: the lead agent, in a conversation with the user; for a small
+    // model only when the conversation is about setting something up.
+    let offer_setup = setup::offered(&agent, &session.channel) && (!profile.small || setup_hint);
+    if offer_setup {
         tool_specs.push(setup::spec());
     }
     let mut allowed = agent.mcp_servers.clone();
@@ -310,10 +433,26 @@ async fn plan(state: &Shared, session: &Session, agent: Agent, mentions: &mentio
     let mut mcp_names: Vec<String> = mcp_tools.iter().map(|t| t.server_name.clone()).collect();
     mcp_names.sort();
     mcp_names.dedup();
-    tool_specs.extend(mcp_tools.into_iter().map(|t| t.spec));
+    // Many MCP tools (any, for a small model) go behind tool_search / tool_call.
+    let mut catalog: Vec<(String, usize)> = Vec::new();
+    let mut deferred = Vec::new();
+    if bridge::defer(profile.small, mcp_tools.len()) {
+        for t in &mcp_tools {
+            match catalog.iter().position(|(name, _)| *name == t.server_name) {
+                Some(i) => catalog[i].1 += 1,
+                None => catalog.push((t.server_name.clone(), 1)),
+            }
+        }
+        deferred = mcp_tools.into_iter().map(|t| t.spec).collect();
+        tool_specs.extend(bridge::specs());
+    } else {
+        tool_specs.extend(mcp_tools.into_iter().map(|t| t.spec));
+    }
+    let recent = match session.channel.as_str() {
+        "web" | "telegram" => recent_lines(state, session, &agent.id, profile.small).await,
+        _ => vec![],
+    };
 
-    let (pcfg, _) = state.provider().await?;
-    let model = agent.model.clone().filter(|m| !m.is_empty()).unwrap_or(pcfg.model.clone());
     let proactive = crate::proactive::settings(state).await;
     let local_time = match proactive.utc_offset_minutes {
         0 => String::new(),
@@ -331,8 +470,15 @@ async fn plan(state: &Shared, session: &Session, agent: Agent, mentions: &mentio
         extra_context: &extra,
         now_utc: &now_utc_string(),
         local_time: &local_time,
+        small: profile.small,
+        tool_rules: profile.small || llm::profile::needs_tool_rules(&model),
+        setup: offer_setup,
+        mcp_catalog: &catalog,
+        recent: &recent,
     });
-    Ok(TurnPlan { agent, system, tools: tool_specs, mcp_names, model, can_delegate })
+    let budget = Budget::new(profile, state.cfg.context_tokens, pcfg.max_tokens);
+    let temperature = pcfg.temperature.or(profile.small.then_some(SMALL_TEMPERATURE));
+    Ok(TurnPlan { agent, system, tools: tool_specs, deferred, mcp_names, model, can_delegate, budget, temperature })
 }
 
 /// Call the model with retries on transport/5xx errors. Returns the assistant
@@ -485,11 +631,14 @@ fn take_text_calls(parts: &mut Vec<Part>, tools: &[ToolSpec], counter: &mut usiz
 }
 
 /// Near-miss tool names are mapped to the offered tool and argument values
-/// brought to the schema's types, before the calls are stored and run.
-fn repair_calls(parts: &mut [Part], tools: &[ToolSpec]) {
+/// brought to the schema's types, before the calls are stored and run. A
+/// deferred MCP tool called by its exact name keeps it.
+fn repair_calls(parts: &mut [Part], tools: &[ToolSpec], deferred: &[ToolSpec]) {
     for p in parts {
         if let Part::ToolCall { name, args, .. } = p {
-            if let Some(spec) = repair::resolve_tool_name(name, tools) {
+            if let Some(spec) = deferred.iter().find(|t| t.name == *name) {
+                repair::coerce_args(spec, args);
+            } else if let Some(spec) = repair::resolve_tool_name(name, tools) {
                 if spec.name != *name {
                     tracing::info!(from = %name, to = %spec.name, "repaired a tool name");
                     *name = spec.name.clone();
@@ -531,8 +680,8 @@ fn chat_request(plan: &TurnPlan, pcfg: &ProviderConfig, messages: Vec<ChatMessag
         system: plan.system.clone(),
         messages,
         tools: plan.tools.clone(),
-        max_tokens: pcfg.max_tokens.unwrap_or(8192),
-        temperature: pcfg.temperature,
+        max_tokens: plan.budget.max_tokens,
+        temperature: plan.temperature,
         effort: pcfg.effort.clone(),
     }
 }
@@ -600,8 +749,42 @@ fn invalid_call(name: &str, args: &Value, tools: &[ToolSpec]) -> Option<String> 
     }
 }
 
-/// Execute one tool call (built-in or MCP) and return the result part.
-async fn execute_tool(ctx: &ToolCtx<'_>, id: &str, name: &str, args: &Value) -> Part {
+/// `invalid_call` for a turn: an MCP tool kept behind the bridge may still
+/// be called directly by its name (small models do, after `tool_search`).
+fn call_problem(plan: &TurnPlan, name: &str, args: &Value) -> Option<String> {
+    match plan.deferred.iter().find(|t| t.name == name) {
+        Some(spec) => check_args(Some(spec), args),
+        None => invalid_call(name, args, &plan.tools),
+    }
+}
+
+/// Run a checked call: the bridge tools here, the others in `execute_tool`.
+async fn run_call(ctx: &ToolCtx<'_>, plan: &TurnPlan, id: &str, name: &str, args: &Value) -> Part {
+    let max_chars = plan.budget.tool_result_chars;
+    if plan.deferred.is_empty() || !matches!(name, bridge::SEARCH | bridge::CALL) {
+        return execute_tool(ctx, id, name, args, max_chars).await;
+    }
+    if name == bridge::SEARCH {
+        let query = args.get("query").and_then(Value::as_str).unwrap_or("");
+        let found = bridge::search(&plan.deferred, query, bridge::SEARCH_LIMIT);
+        return Part::ToolResult { id: id.into(), name: name.into(), content: bridge::render(&found), is_error: false };
+    }
+    match bridge::resolve(&plan.deferred, args) {
+        Ok((tool, tool_args)) => {
+            let mut part = execute_tool(ctx, id, &tool, &tool_args, max_chars).await;
+            // The result answers the tool_call it came from.
+            if let Part::ToolResult { name: n, .. } = &mut part {
+                *n = name.to_string();
+            }
+            part
+        }
+        Err(problem) => error_result(id, name, format!("error: {problem}")),
+    }
+}
+
+/// Execute one tool call (built-in or MCP) and return the result part, its
+/// content cut to `max_chars`.
+async fn execute_tool(ctx: &ToolCtx<'_>, id: &str, name: &str, args: &Value, max_chars: usize) -> Part {
     let result: Result<(String, bool)> = match tools::run_builtin(ctx, name, args).await {
         Some(r) => r,
         None => match ctx.state.mcp.find_tool(name).await {
@@ -614,7 +797,7 @@ async fn execute_tool(ctx: &ToolCtx<'_>, id: &str, name: &str, args: &Value) -> 
         Ok((c, e)) => (c, e),
         Err(e) => (format!("error: {e:#}"), true),
     };
-    let content = crate::mcp::truncate(&content, MAX_TOOL_RESULT_CHARS);
+    let content = crate::mcp::truncate(&content, max_chars);
     let content = if is_error { format!("{content}\n\n{RETRY_HINT}") } else { content };
     Part::ToolResult { id: id.to_string(), name: name.to_string(), content, is_error }
 }
@@ -731,7 +914,22 @@ async fn run_turn_inner(
     }
     state.emit(Event::TurnStart { session_id: session.id.clone(), turn_id: turn_id.clone(), agent: agent.clone() });
 
-    let mut plan = match plan(state, session, agent, &mentions).await {
+    // Context: load, and fold older messages into the summary when the request
+    // would not fit the budget. The agent is addressed as "@handle: text"; the
+    // live copy of the request drops the prefix.
+    let request_text = mention::strip_leading_handle(&stored_text, &agent.handle);
+    let request = (user_msg.seq, request_text.as_str());
+    let mut chat = load_chat(state, session, request).await?;
+    // A pasted key or setup words in the last few requests.
+    let setup_hint = chat
+        .iter()
+        .rev()
+        .filter(|m| m.role == "user")
+        .take(3)
+        .flat_map(|m| m.parts.iter())
+        .any(|p| matches!(p, Part::Text { text } if setup::wanted(text)));
+
+    let mut plan = match plan(state, session, agent, &mentions, &request_text, setup_hint).await {
         Ok(p) => p,
         Err(e) => {
             let msg = format!("{e:#}");
@@ -745,15 +943,8 @@ async fn run_turn_inner(
         }
     };
     let (pcfg, _) = state.provider().await?;
-
-    // Context: load, and fold older messages into the summary when the request
-    // would not fit the budget. The agent is addressed as "@handle: text"; the
-    // live copy of the request drops the prefix.
-    let request_text = mention::strip_leading_handle(&stored_text, &plan.agent.handle);
-    let request = (user_msg.seq, request_text.as_str());
-    let mut chat = load_chat(state, session, request).await?;
-    if request_tokens(&plan.system, &plan.tools, &chat) >= state.cfg.context_tokens {
-        compact_chat(state, session, &turn_id, &plan.model, KEEP_RECENT_MESSAGES, request, &mut chat).await;
+    if request_tokens(&plan.system, &plan.tools, &chat) >= plan.budget.context_tokens {
+        compact_chat(state, session, &turn_id, &plan, KEEP_RECENT_MESSAGES, request, &mut chat).await;
     }
     // Inside the turn: compact again once enough new rounds have piled up;
     // in between, cut old tool output down instead.
@@ -794,7 +985,7 @@ async fn run_turn_inner(
                     overflow_retried = true;
                     tracing::warn!(session = %session.id, "the model rejected the request as too long; compacting");
                     let keep = KEEP_RECENT_MESSAGES / 3;
-                    compact_chat(state, session, &turn_id, &plan.model, keep, request, &mut chat).await;
+                    compact_chat(state, session, &turn_id, &plan, keep, request, &mut chat).await;
                     let fresh = chat.len().saturating_sub(1);
                     shorten_tool_results(&mut chat[..fresh]);
                     rounds_since_compact = 0;
@@ -830,7 +1021,7 @@ async fn run_turn_inner(
         if !has_calls(&parts) {
             take_text_calls(&mut parts, &plan.tools, &mut text_calls);
         }
-        repair_calls(&mut parts, &plan.tools);
+        repair_calls(&mut parts, &plan.tools, &plan.deferred);
         let calls = parts
             .iter()
             .filter_map(|p| match p {
@@ -901,7 +1092,7 @@ async fn run_turn_inner(
                 args: args.clone(),
             });
             let cancelled = cancel.load(Ordering::Relaxed);
-            let problem = invalid_call(name, args, &plan.tools);
+            let problem = call_problem(&plan, name, args);
             let blocked = guard.blocked(name, args);
             invalid += usize::from(problem.is_some());
             let checked = !cancelled && blocked.is_none();
@@ -909,7 +1100,7 @@ async fn run_turn_inner(
                 _ if cancelled => error_result(id, name, "cancelled by user".into()),
                 (Some(problem), _) => error_result(id, name, format!("error: {problem}")),
                 (None, Some(note)) => error_result(id, name, note),
-                (None, None) => execute_tool(&ctx, id, name, args).await,
+                (None, None) => run_call(&ctx, &plan, id, name, args).await,
             };
             if let Part::ToolResult { content, is_error, .. } = &mut part {
                 // The guardrail sees every outcome and may add a note for the model.
@@ -951,9 +1142,9 @@ async fn run_turn_inner(
         chat.push(ChatMessage { role: "tool".into(), parts: results });
         rounds_since_compact += 1;
         let need = request_tokens(&plan.system, &plan.tools, &chat).max(used_tokens);
-        if need >= state.cfg.context_tokens {
+        if need >= plan.budget.context_tokens {
             let compacted = rounds_since_compact >= KEEP_RECENT_MESSAGES / 2
-                && compact_chat(state, session, &turn_id, &plan.model, KEEP_RECENT_MESSAGES, request, &mut chat).await;
+                && compact_chat(state, session, &turn_id, &plan, KEEP_RECENT_MESSAGES, request, &mut chat).await;
             if compacted {
                 rounds_since_compact = 0;
             } else {
@@ -1020,14 +1211,14 @@ briefly what you did, what you found, and what is left to do."
         && plan.agent.self_improve
         && error.is_none()
         && stop_reason != "cancelled"
-        && should_reflect(state, &session.id, used_tools, &stored_text).await
+        && should_reflect(state, &session.id, used_tools, &stored_text, plan.budget.small).await
     {
         let st = state.clone();
         let agent = plan.agent.clone();
         let sess = session.clone();
-        let model = plan.model.clone();
+        let (model, budget, temperature) = (plan.model.clone(), plan.budget, plan.temperature);
         tokio::spawn(async move {
-            if let Err(e) = reflect(st, agent, sess, model).await {
+            if let Err(e) = reflect(st, agent, sess, model, budget, temperature).await {
                 tracing::warn!("reflection failed: {e:#}");
             }
         });
@@ -1038,8 +1229,10 @@ briefly what you did, what you found, and what is left to do."
 }
 
 /// Reflect after tool-using turns, after user corrections, and every few
-/// plain turns, without burning tokens on every message.
-async fn should_reflect(state: &Shared, session_id: &str, used_tools: bool, user_text: &str) -> bool {
+/// plain turns, without burning tokens on every message. A small model, whose
+/// reflections are slow and noisy, reflects after corrections and every few
+/// tool-using turns only.
+async fn should_reflect(state: &Shared, session_id: &str, used_tools: bool, user_text: &str, small: bool) -> bool {
     let enabled = state
         .db
         .setting("reflection")
@@ -1056,6 +1249,9 @@ async fn should_reflect(state: &Shared, session_id: &str, used_tools: bool, user
         ["wrong", "not that", "actually", "instead", "no,", "remember", "always", "never", "from now on", "prefer"]
             .iter()
             .any(|k| lower.contains(k));
+    if small && !correction {
+        return used_tools && state.count_tool_turn(session_id) % SMALL_REFLECT_EVERY == 0;
+    }
     if used_tools || correction {
         return true;
     }
@@ -1064,8 +1260,16 @@ async fn should_reflect(state: &Shared, session_id: &str, used_tools: bool, user
 }
 
 /// The reflection pass: a short, tool-only call that may save skills/memory.
-async fn reflect(state: Shared, agent: Agent, session: Session, model: String) -> Result<()> {
+async fn reflect(
+    state: Shared,
+    agent: Agent,
+    session: Session,
+    model: String,
+    budget: Budget,
+    temperature: Option<f32>,
+) -> Result<()> {
     let skills = state.db.skills().await?;
+    let memories = state.db.memories(Some(&agent.id), 60).await?;
     let msgs = state.db.recent_messages(&session.id, 24).await?;
     let mut transcript = String::new();
     for m in &msgs {
@@ -1085,16 +1289,18 @@ async fn reflect(state: Shared, agent: Agent, session: Session, model: String) -
             }
         }
     }
-    let system = prompt::reflection_prompt(&agent, &skills);
+    let memory_chars = if budget.small { 1500 } else { 4000 };
+    let system = prompt::reflection_prompt(&agent, &skills, &memories, memory_chars);
     let specs: Vec<ToolSpec> = tools::builtin_specs(&agent, false, None)
         .into_iter()
         .filter(|t| t.name == "skill_manage" || t.name == "memory" || t.name == "skill_view")
         .collect();
-    let (pcfg, provider) = state.provider().await?;
-    let mut chat = vec![ChatMessage::text(
-        "user",
-        format!("Conversation to review:\n\n{}", crate::mcp::truncate(&transcript, 30_000)),
-    )];
+    let (_, provider) = state.provider().await?;
+    let review = crate::mcp::truncate(&transcript, budget.compaction_chars.min(30_000));
+    let mut chat = vec![ChatMessage::text("user", format!("Conversation to review:\n\n{review}"))];
+    // Room for a whole skill body (a cut-off call arrives as invalid JSON),
+    // within what a small window leaves.
+    let max_tokens = if budget.window > 0 { budget.max_tokens.min(8000) } else { 8000 };
     let ctx = ToolCtx {
         state: &state,
         agent: &agent,
@@ -1109,9 +1315,8 @@ async fn reflect(state: Shared, agent: Agent, session: Session, model: String) -
             system: system.clone(),
             messages: chat.clone(),
             tools: specs.clone(),
-            // Room for a whole skill body: a cut-off call arrives as invalid JSON.
-            max_tokens: 8000,
-            temperature: pcfg.temperature,
+            max_tokens,
+            temperature,
             effort: Some("low".into()),
         };
         let mut stream = provider.stream(req).await?;
@@ -1126,26 +1331,34 @@ async fn reflect(state: Shared, agent: Agent, session: Session, model: String) -
             }
         }
         if calls.is_empty() {
-            let note = text.trim();
-            if !note.is_empty() && !note.eq_ignore_ascii_case("nothing to save") {
+            let note = think::strip(&text);
+            let note = note.trim();
+            let nothing = note.is_empty() || note.trim_end_matches('.').eq_ignore_ascii_case(prompt::NOTHING_TO_SAVE);
+            // A small model's long answer is rambling, not a note of what it saved.
+            let rambling = budget.small && note.chars().count() > SMALL_REFLECT_NOTE_CHARS;
+            if !nothing && !rambling {
                 let _ = state.db.log_improvement(Some(&agent.id), Some(&session.id), "reflection", None, note).await;
             }
             return Ok(());
         }
         let mut parts = Vec::new();
         let mut results = Vec::new();
-        for (id, name, args) in calls {
+        for (id, name, mut args) in calls {
+            // The same repairs and checks as the calls of a turn.
+            let spec = repair::resolve_tool_name(&name, &specs);
+            let name = spec.map_or(name, |t| t.name.clone());
+            let problem = match spec {
+                Some(spec) => {
+                    repair::coerce_args(spec, &mut args);
+                    check_args(Some(spec), &args)
+                }
+                None => Some("not available here".to_string()),
+            };
             parts.push(Part::ToolCall { id: id.clone(), name: name.clone(), args: args.clone() });
-            if specs.iter().any(|t| t.name == name) {
-                results.push(execute_tool(&ctx, &id, &name, &args).await);
-            } else {
-                results.push(Part::ToolResult {
-                    id,
-                    name,
-                    content: "error: not available here".into(),
-                    is_error: true,
-                });
-            }
+            results.push(match problem {
+                Some(problem) => error_result(&id, &name, format!("error: {problem}")),
+                None => execute_tool(&ctx, &id, &name, &args, budget.tool_result_chars).await,
+            });
         }
         chat.push(ChatMessage { role: "assistant".into(), parts });
         chat.push(ChatMessage { role: "tool".into(), parts: results });
@@ -1526,6 +1739,50 @@ mod tests {
         let chat = history_to_chat(&session(1), &[msg(1, "user"), msg(2, "assistant"), msg(3, "tool")]);
         let roles: Vec<&str> = chat.iter().map(|m| m.role.as_str()).collect();
         assert_eq!(roles, ["user", "assistant", "tool"]);
+    }
+
+    #[test]
+    fn budgets_follow_the_context_window() {
+        let profile = |small, context_window| ModelProfile { small, context_window };
+        let unknown = Budget::new(profile(false, 0), 48_000, None);
+        assert_eq!((unknown.context_tokens, unknown.max_tokens), (48_000, DEFAULT_MAX_TOKENS));
+        assert_eq!((unknown.tool_result_chars, unknown.compaction_chars), (MAX_TOOL_RESULT_CHARS, COMPACTION_CHARS));
+        // An 8k small model: 60% for the request, a quarter for the reply.
+        let small = Budget::new(profile(true, 8192), 48_000, None);
+        assert_eq!((small.context_tokens, small.max_tokens), (4915, 2048));
+        assert_eq!((small.tool_result_chars, small.compaction_chars), (4915, 16_384));
+        // Floors, and a lower setting of the user's own wins.
+        let tiny = Budget::new(profile(true, 2048), 48_000, Some(512));
+        assert_eq!((tiny.max_tokens, tiny.tool_result_chars, tiny.compaction_chars), (512, 2000, 4096));
+        assert_eq!(Budget::new(profile(true, 2048), 48_000, None).max_tokens, 1024);
+        // A large window leaves the global budget in charge.
+        let large = Budget::new(profile(false, 200_000), 48_000, Some(16_000));
+        assert_eq!((large.context_tokens, large.max_tokens, large.tool_result_chars), (48_000, 16_000, 16_000));
+    }
+
+    #[test]
+    fn memories_relevant_to_the_message_come_first() {
+        let memory = |id: &str, content: &str, importance| Memory {
+            id: id.into(),
+            agent_id: None,
+            kind: "fact".into(),
+            content: content.into(),
+            keywords: vec![],
+            importance,
+            created_at: 0,
+            updated_at: 0,
+        };
+        // As loaded: most important first.
+        let all: Vec<Memory> = (0..12)
+            .map(|i| memory(&format!("m{i}"), &format!("note number {i}"), 5))
+            .chain([memory("deploy", "Deploys go out from the CI runner on Mondays", 1)])
+            .collect();
+        let ids = |v: Vec<Memory>| v.into_iter().map(|m| m.id).collect::<Vec<_>>();
+        let small = ids(recall(&all, "when do we deploy?", true));
+        assert_eq!(small.len(), 1 + TOP_MEMORIES_SMALL);
+        assert_eq!(small[0], "deploy");
+        assert!(!ids(recall(&all, "hello", true)).contains(&"deploy".to_string()));
+        assert_eq!(ids(recall(&all, "hello", false)).len(), all.len());
     }
 
     #[test]

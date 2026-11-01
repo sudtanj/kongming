@@ -1,6 +1,8 @@
 //! Small and local models through the agent loop: calls written as text,
 //! inline reasoning, near-miss tool names, repeated failures, nudges and the
-//! closing summary at the step limit.
+//! closing summary at the step limit; small-model mode (sampling, fewer
+//! tools, MCP tools behind a search), memory recall and deduplication, and
+//! the recent conversations in the prompt.
 
 mod support;
 
@@ -150,4 +152,142 @@ async fn the_step_limit_ends_with_a_summary_from_the_model() {
     let msgs = sent(&reqs[1]);
     assert!(msgs.iter().all(|m| role(m) != "tool" && m.get("tool_calls").is_none()), "{msgs:?}");
     assert!(str_of(msgs.last().unwrap(), "content").contains("You have used all 1 steps"));
+}
+
+/// The scripted app with its model switched to small-model mode and an 8k
+/// window from the settings API, the way the dashboard saves it.
+async fn small_app(replies: Vec<support::ScriptedReply>) -> support::TestApp {
+    let app = spawn_app(replies).await;
+    app.disable_reflection().await;
+    let saved = app.put("/api/settings", json!({"llm": {"smallModel": true, "contextWindow": 8192}})).await;
+    assert_eq!(saved["llm"]["smallModel"], json!(true), "{saved}");
+    assert_eq!(saved["llm"]["contextWindow"], json!(8192), "{saved}");
+    app
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_small_model_gets_cool_sampling_serial_calls_and_fewer_tools() {
+    let app = small_app(vec![text("Hello!")]).await;
+    let sid = app.create_session().await;
+    assert_eq!(app.send_wait(&sid, "hello").await["text"], json!("Hello!"));
+    let req = app.llm.requests()[0].clone();
+    let temperature = req["temperature"].as_f64().expect("a temperature");
+    assert!((temperature - 0.3).abs() < 1e-6, "{req}");
+    assert_eq!(req["parallel_tool_calls"], json!(false));
+    assert_eq!(req["max_tokens"], json!(2048), "a quarter of the window");
+    let names = support::tool_names(&req);
+    for gone in ["current_time", "list_agents", "list_sessions", "read_session", "setup"] {
+        assert!(!names.contains(&gone.to_string()), "{gone}: {names:?}");
+    }
+    assert!(names.contains(&"memory".to_string()), "{names:?}");
+    let sys = support::system_prompt(&req);
+    assert!(sys.contains("Every reply either calls a tool or gives the user a final answer"), "{sys}");
+    assert!(sys.contains("ask one short question first"), "{sys}");
+    assert!(!sys.contains("# Setup"), "{sys}");
+
+    // Talk of setting something up brings the setup tool back.
+    app.llm.push(vec![text("Sure.")]);
+    app.send_wait(&sid, "please connect my Telegram bot").await;
+    let req = app.llm.requests().last().cloned().unwrap();
+    assert!(support::tool_names(&req).contains(&"setup".to_string()));
+    assert!(support::system_prompt(&req).contains("# Setup"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_tools_of_a_small_model_are_found_and_called_through_the_bridge() {
+    let mcp = support::McpMock::start(false).await;
+    let app = small_app(vec![
+        tool_call("tool_search", json!({"query": "echo text"})),
+        tool_call("tool_call", json!({"name": "echo", "arguments": {"text": "via bridge"}})),
+        text("done"),
+    ])
+    .await;
+    let created = app.post("/api/mcp", json!({"name": "Echo", "url": mcp.endpoint(), "transport": "http"})).await;
+    app.post(&format!("/api/mcp/{}/refresh", str_of(&created, "id")), json!({})).await;
+
+    let sid = app.create_session().await;
+    assert_eq!(app.send_wait(&sid, "echo something").await["text"], json!("done"));
+    let first = app.llm.requests()[0].clone();
+    let names = support::tool_names(&first);
+    assert!(names.contains(&"tool_search".to_string()) && names.contains(&"tool_call".to_string()), "{names:?}");
+    assert!(!names.contains(&"mcp__echo__echo".to_string()), "deferred: {names:?}");
+    let sys = support::system_prompt(&first);
+    assert!(sys.contains("Echo (1 tool)") && sys.contains("`tool_search`"), "{sys}");
+
+    let results = tool_results(&app.messages(&sid).await).into_iter().cloned().collect::<Vec<_>>();
+    assert_eq!(results.len(), 2);
+    let found = str_of(&results[0], "content");
+    assert!(found.contains("- mcp__echo__echo: [Echo] Echo the text back"), "{found}");
+    assert!(found.contains("arguments: text (string)"), "{found}");
+    // A near-miss name through tool_call reaches the MCP server.
+    assert_eq!(results[1]["name"], json!("tool_call"));
+    assert_eq!(results[1]["isError"], json!(false), "{}", results[1]);
+    assert_eq!(results[1]["content"], json!("echo: via bridge"));
+    let call = mcp.calls().into_iter().rfind(|c| c["method"] == json!("tools/call")).expect("a tools/call");
+    assert_eq!(call["params"]["name"], json!("echo"));
+    assert_eq!(call["params"]["arguments"]["text"], json!("via bridge"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memories_sharing_words_with_the_message_are_recalled() {
+    let app = small_app(vec![text("Sunday night."), text("Hi.")]).await;
+    let db = &app.state.db;
+    for i in 0..10 {
+        db.save_memory(None, "fact", &format!("Filler fact number {i}"), &[], 5).await.unwrap();
+    }
+    db.save_memory(None, "fact", "The NAS backup runs every Sunday night", &["storage".into()], 1).await.unwrap();
+
+    let sid = app.create_session().await;
+    app.send_wait(&sid, "When does the NAS backup run?").await;
+    let sys = support::system_prompt(&app.llm.requests()[0]);
+    assert!(sys.contains("- [fact] The NAS backup runs every Sunday night"), "{sys}");
+    // Unrelated messages get the most important memories only (8 for a small model).
+    app.send_wait(&sid, "hello").await;
+    let sys = support::system_prompt(&app.llm.requests()[1]);
+    assert!(!sys.contains("NAS backup"), "{sys}");
+    assert_eq!(sys.matches("Filler fact number").count(), 8, "{sys}");
+    // The Memory section sits after the stable sections.
+    assert!(sys.find("# Memory").unwrap() > sys.find("# Using tools").unwrap(), "{sys}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repeated_memory_is_refused_and_can_be_updated_instead() {
+    let add = |content: &str| tool_call("memory", json!({"action": "add", "content": content, "kind": "preference"}));
+    let app = spawn_app(vec![add("User likes green tea"), add("user likes green tea!"), text("noted")]).await;
+    app.disable_reflection().await;
+    let sid = app.create_session().await;
+    app.send_wait(&sid, "I like green tea").await;
+    let memories = app.get("/api/memories").await;
+    assert_eq!(memories.as_array().unwrap().len(), 1, "{memories}");
+    let id = str_of(&memories[0], "id").to_string();
+    let results = tool_results(&app.messages(&sid).await).into_iter().cloned().collect::<Vec<_>>();
+    let refused = str_of(&results[1], "content");
+    assert!(refused.contains("not saved") && refused.contains(&id) && refused.contains("update"), "{refused}");
+    assert_eq!(results[1]["isError"], json!(false));
+
+    let update = json!({"action": "update", "id": id, "content": "User likes green tea and jasmine tea"});
+    app.llm.push(vec![tool_call("memory", update), text("updated")]);
+    app.send_wait(&sid, "jasmine too").await;
+    let memories = app.get("/api/memories").await;
+    assert_eq!(memories.as_array().unwrap().len(), 1, "{memories}");
+    assert_eq!(memories[0]["content"], json!("User likes green tea and jasmine tea"));
+    assert_eq!(memories[0]["kind"], json!("preference"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn other_recent_conversations_are_listed_in_the_prompt() {
+    let app = spawn_app(vec![text("Kyoto it is."), text("Hi!")]).await;
+    app.disable_reflection().await;
+    let trip = app.create_session().await;
+    app.send_wait(&trip, "plan my trip to Kyoto in May").await;
+    let first = support::system_prompt(&app.llm.requests()[0]);
+    assert!(!first.contains("# Recent conversations"), "no other conversation yet: {first}");
+
+    let sid = app.create_session().await;
+    app.send_wait(&sid, "hi").await;
+    let sys = support::system_prompt(&app.llm.requests()[1]);
+    assert!(sys.contains("# Recent conversations"), "{sys}");
+    assert!(sys.contains(&format!("- plan my trip to Kyoto in May (session {trip})")), "{sys}");
+    assert!(sys.contains("check these before asking them to repeat themselves"), "{sys}");
+    assert!(sys.find("# Recent conversations").unwrap() < sys.find("Current time:").unwrap(), "{sys}");
 }

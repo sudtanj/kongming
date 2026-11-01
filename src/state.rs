@@ -115,6 +115,9 @@ pub struct AppState {
     /// Sessions with a turn in flight, with a cancel flag each.
     running: Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
     provider_cache: RwLock<Option<(ProviderConfig, Arc<dyn Provider>)>>,
+    /// Tool-using turns per session since boot (a small model reflects on
+    /// every few).
+    tool_turns: Mutex<std::collections::HashMap<String, u32>>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -145,6 +148,7 @@ impl AppState {
             started_at: crate::db::now_ms(),
             running: Mutex::new(Default::default()),
             provider_cache: RwLock::new(None),
+            tool_turns: Mutex::new(Default::default()),
             telegram_reload: tokio::sync::Notify::new(),
             telegram_status: Mutex::new(Value::Null),
             shell,
@@ -172,6 +176,18 @@ impl AppState {
 
     pub fn end_turn(&self, session_id: &str) {
         self.running.lock().remove(session_id);
+    }
+
+    /// Count a tool-using turn of a session; returns the count so far.
+    pub fn count_tool_turn(&self, session_id: &str) -> u32 {
+        let mut turns = self.tool_turns.lock();
+        // Only a rough cadence is needed: start over rather than grow.
+        if turns.len() > 1000 {
+            turns.clear();
+        }
+        let n = turns.entry(session_id.to_string()).or_insert(0);
+        *n += 1;
+        *n
     }
 
     pub fn cancel_turn(&self, session_id: &str) -> bool {

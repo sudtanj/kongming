@@ -726,6 +726,18 @@ pub async fn merge_llm(state: &Shared, llm: &Value) -> Result<ProviderConfig, Ap
     if llm.get("effort").is_some() {
         cfg.effort = s(llm, "effort").map(str::to_string);
     }
+    // Empty or 0: unknown. Below 1024 tokens nothing useful fits.
+    if let Some(w) = llm.get("contextWindow") {
+        cfg.context_window = match w.as_u64() {
+            None | Some(0) => None,
+            Some(n) if n < 1024 => return Err(bad("llm.contextWindow must be at least 1024 tokens")),
+            Some(n) => Some(u32::try_from(n).unwrap_or(u32::MAX)),
+        };
+    }
+    // null: detect from the model name and address.
+    if llm.get("smallModel").is_some() {
+        cfg.small_model = llm.get("smallModel").and_then(Value::as_bool);
+    }
     if !matches!(cfg.kind.as_str(), "openai" | "anthropic") {
         return Err(bad("llm.kind must be openai or anthropic"));
     }
