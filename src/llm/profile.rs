@@ -97,9 +97,8 @@ fn param_billions(model: &str) -> Option<f64> {
 
 fn small_family(model: &str) -> bool {
     let tokens = tokens(model);
-    let family = tokens
-        .iter()
-        .any(|t| SMALL_FAMILIES.iter().any(|f| t.starts_with(f)) || SMALL_NAMES.contains(&t.as_str()));
+    let family =
+        tokens.iter().any(|t| SMALL_FAMILIES.iter().any(|f| t.starts_with(f)) || SMALL_NAMES.contains(&t.as_str()));
     family && !tokens.iter().any(|t| LARGE_MARKERS.contains(&t.as_str()))
 }
 

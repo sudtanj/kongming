@@ -84,11 +84,8 @@ fn any_hit(term: &str, words: &[String]) -> bool {
 /// lists the first ones).
 pub fn search<'a>(tools: &'a [ToolSpec], query: &str, limit: usize) -> Vec<&'a ToolSpec> {
     let terms = words(query);
-    let mut scored: Vec<(usize, &ToolSpec)> = tools
-        .iter()
-        .map(|t| (score(t, &terms), t))
-        .filter(|(s, _)| terms.is_empty() || *s > 0)
-        .collect();
+    let mut scored: Vec<(usize, &ToolSpec)> =
+        tools.iter().map(|t| (score(t, &terms), t)).filter(|(s, _)| terms.is_empty() || *s > 0).collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
     scored.into_iter().take(limit).map(|(_, t)| t).collect()
 }
@@ -169,10 +166,8 @@ pub fn resolve(tools: &[ToolSpec], args: &Value) -> Result<(String, Value), Stri
 
 /// The one-line catalog for the prompt: each server with its tool count.
 pub fn catalog(servers: &[(String, usize)]) -> String {
-    let list: Vec<String> = servers
-        .iter()
-        .map(|(name, n)| format!("{name} ({n} tool{})", if *n == 1 { "" } else { "s" }))
-        .collect();
+    let list: Vec<String> =
+        servers.iter().map(|(name, n)| format!("{name} ({n} tool{})", if *n == 1 { "" } else { "s" })).collect();
     list.join(", ")
 }
 

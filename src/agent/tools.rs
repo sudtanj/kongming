@@ -372,10 +372,7 @@ async fn memory(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
                 return Ok(format!(
                     "not saved: this is already remembered as memory {} [{}]: {}\nTo change it, call memory with \
 action update, id {} and the full new content.",
-                    m.id,
-                    m.kind,
-                    m.content,
-                    m.id
+                    m.id, m.kind, m.content, m.id
                 ));
             }
             let shared = args.get("shared").and_then(Value::as_bool).unwrap_or(true);
