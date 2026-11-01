@@ -35,7 +35,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use futures_util::future::BoxFuture;
 use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::db::{new_id, Agent, Message, Part, Session, Skill};
@@ -55,7 +57,8 @@ const KEEP_RECENT_MESSAGES: usize = 12;
 const LLM_RETRIES: usize = 3;
 
 /// Outcome of a turn, for callers that need the text (Telegram, delegation, cron).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TurnResult {
     pub text: String,
     pub agent: Option<Agent>,
@@ -64,7 +67,8 @@ pub struct TurnResult {
 }
 
 /// Options for a turn beyond the text itself.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TurnOptions {
     /// Delegation depth (0 for a human turn).
     pub depth: usize,
@@ -265,6 +269,8 @@ pub async fn collect_text(mut stream: llm::EventStream) -> Result<String> {
     Ok(out)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct TurnPlan {
     agent: Agent,
     system: String,
@@ -454,6 +460,11 @@ async fn execute_tool(ctx: &ToolCtx<'_>, id: &str, name: &str, args: &Value) -> 
             Err(e) => Err(e),
         },
     };
+    result_part(id, name, result)
+}
+
+/// A tool's outcome as the result part the model sees.
+fn result_part(id: &str, name: &str, result: Result<(String, bool)>) -> Part {
     let (content, is_error) = match result {
         Ok((c, e)) => (c, e),
         Err(e) => (format!("error: {e:#}"), true),
@@ -522,27 +533,148 @@ fn shorten_tool_results(chat: &mut [ChatMessage]) {
     }
 }
 
+/// Model-round settings from the provider config when the turn started. The
+/// API key is not kept: a host may store the turn between steps.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RoundParams {
+    max_tokens: u32,
+    temperature: Option<f32>,
+    effort: Option<String>,
+}
+
+/// The tool calls of the current model round, while they run.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ToolRound {
+    calls: Vec<(String, String, Value)>,
+    next: usize,
+    results: Vec<Part>,
+    used_tokens: usize,
+}
+
+/// A `delegate_task` call whose delegate works as a turn of its own, one step
+/// at a time (turns started with `begin_turn`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Delegation {
+    call_id: String,
+    to: Agent,
+    task_id: String,
+    child: TurnState,
+}
+
+/// A turn between two steps. It serializes, so a host that cannot run a
+/// whole turn at once (a Worker on the free plan) can store it and call
+/// `step_turn` again from a later invocation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnState {
+    session: Session,
+    turn_id: String,
+    opts: TurnOptions,
+    /// Delegations run to the end inside their tool call (`run_turn`)
+    /// instead of as steps of their own (`begin_turn`).
+    inline_delegation: bool,
+    plan: TurnPlan,
+    params: RoundParams,
+    request_seq: i64,
+    request_text: String,
+    stored_text: String,
+    chat: Vec<ChatMessage>,
+    iteration: usize,
+    rounds_since_compact: usize,
+    overflow_retried: bool,
+    final_text: String,
+    stop_reason: String,
+    error: Option<String>,
+    used_tools: bool,
+    retried_empty: bool,
+    seen: std::collections::HashSet<String>,
+    block_calls: usize,
+    repeats: usize,
+    round: Option<ToolRound>,
+    delegation: Option<Box<Delegation>>,
+}
+
+impl TurnState {
+    pub fn session_id(&self) -> &str {
+        &self.session.id
+    }
+
+    pub fn turn_id(&self) -> &str {
+        &self.turn_id
+    }
+
+    /// The agent answering this turn.
+    pub fn agent(&self) -> &Agent {
+        &self.plan.agent
+    }
+
+    /// The session of the delegated task this turn is waiting on, if any.
+    pub fn waiting_on(&self) -> Option<&str> {
+        self.delegation.as_ref().map(|d| d.child.session.id.as_str())
+    }
+}
+
+/// What `step_turn` did. Short-lived, so the size difference of the
+/// variants does not matter.
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+pub enum Step {
+    /// More to do: call `step_turn` again with this state.
+    Continue(Box<TurnState>),
+    /// The turn is over; `TurnEnd` was emitted.
+    Done(TurnResult),
+}
+
 /// Run one user turn end to end. The user message is persisted here.
-pub async fn run_turn(state: Shared, mut session: Session, user_text: String, opts: TurnOptions) -> Result<TurnResult> {
+pub async fn run_turn(state: Shared, session: Session, user_text: String, opts: TurnOptions) -> Result<TurnResult> {
     let Some(cancel) = state.begin_turn(&session.id) else {
         return Err(anyhow!("a reply is already in progress for this conversation"));
     };
-    let result = run_turn_inner(&state, &mut session, user_text, &opts, &cancel).await;
-    state.end_turn(&session.id);
+    let session_id = session.id.clone();
+    let result = drive(&state, session, user_text, opts, &cancel).await;
+    state.end_turn(&session_id);
     result
 }
 
-async fn run_turn_inner(
+async fn drive(
     state: &Shared,
-    session: &mut Session,
+    session: Session,
     user_text: String,
-    opts: &TurnOptions,
+    opts: TurnOptions,
     cancel: &AtomicBool,
 ) -> Result<TurnResult> {
+    let mut ts = begin(state, session, user_text, opts, true).await?;
+    loop {
+        match step_turn(state, ts, cancel).await? {
+            Step::Continue(next) => ts = *next,
+            Step::Done(r) => return Ok(r),
+        }
+    }
+}
+
+/// Start a turn that the host drives with `step_turn`: persists the user
+/// message, emits `UserMessage`/`TurnStart` and plans the turn (no model
+/// round yet, but a compaction when the history is over budget). Delegated
+/// tasks become steps of their own. The host keeps track of running turns
+/// and cancellation itself (`AppState::begin_turn` is not used).
+pub async fn begin_turn(state: &Shared, session: Session, user_text: String, opts: TurnOptions) -> Result<TurnState> {
+    begin(state, session, user_text, opts, false).await
+}
+
+async fn begin(
+    state: &Shared,
+    mut session: Session,
+    user_text: String,
+    opts: TurnOptions,
+    inline_delegation: bool,
+) -> Result<TurnState> {
     let turn_id = new_id();
     let agent = match &opts.agent_override {
         Some(a) => a.clone(),
-        None => user_agent(state, session).await?,
+        None => user_agent(state, &session).await?,
     };
     // A person's message: pasted keys go to the vault before anything sees them.
     let user_text = match &opts.agent_override {
@@ -570,7 +702,7 @@ async fn run_turn_inner(
     }
     state.emit(Event::TurnStart { session_id: session.id.clone(), turn_id: turn_id.clone(), agent: agent.clone() });
 
-    let mut plan = match plan(state, session, agent, &mentions).await {
+    let plan = match plan(state, &session, agent, &mentions).await {
         Ok(p) => p,
         Err(e) => {
             let msg = format!("{e:#}");
@@ -590,244 +722,333 @@ async fn run_turn_inner(
     // live copy of the request drops the prefix.
     let request_text = mention::strip_leading_handle(&stored_text, &plan.agent.handle);
     let request = (user_msg.seq, request_text.as_str());
-    let mut chat = load_chat(state, session, request).await?;
+    let mut chat = load_chat(state, &session, request).await?;
     if request_tokens(&plan.system, &plan.tools, &chat) >= state.cfg.context_tokens {
-        compact_chat(state, session, &turn_id, &plan.model, KEEP_RECENT_MESSAGES, request, &mut chat).await;
+        compact_chat(state, &mut session, &turn_id, &plan.model, KEEP_RECENT_MESSAGES, request, &mut chat).await;
     }
-    // Inside the turn: compact again once enough new rounds have piled up;
-    // in between, cut old tool output down instead.
-    let mut rounds_since_compact = KEEP_RECENT_MESSAGES / 2;
-    let mut overflow_retried = false;
-
-    let mut final_text = String::new();
-    let mut stop_reason = String::from("stop");
-    let mut error: Option<String> = None;
-    let mut used_tools = false;
-    let mut retried_empty = false;
-
-    // The step limit is a checkpoint, not the end: a long task carries on by
-    // itself for `auto_continue` more blocks unless it is going in circles.
-    let block = state.cfg.max_iterations.max(1);
-    let limit = block * (1 + state.cfg.auto_continue);
-    let mut seen = std::collections::HashSet::new();
-    let (mut block_calls, mut repeats) = (0usize, 0usize);
-
-    for iteration in 0..limit {
-        if cancel.load(Ordering::Relaxed) {
-            stop_reason = "cancelled".into();
-            break;
-        }
-        let req = ChatRequest {
-            model: plan.model.clone(),
-            system: plan.system.clone(),
-            messages: chat.clone(),
-            tools: plan.tools.clone(),
+    Ok(TurnState {
+        session,
+        turn_id,
+        opts,
+        inline_delegation,
+        plan,
+        params: RoundParams {
             max_tokens: pcfg.max_tokens.unwrap_or(8192),
             temperature: pcfg.temperature,
             effort: pcfg.effort.clone(),
-        };
-        let (parts, stop, usage) = match model_round(state, &session.id, &turn_id, req, cancel).await {
-            Ok(r) => r,
-            Err(e) => {
-                let msg = format!("{e:#}");
-                // Too long for the model after all: fold harder and try once more.
-                if is_context_overflow(&msg) && !overflow_retried {
-                    overflow_retried = true;
-                    tracing::warn!(session = %session.id, "the model rejected the request as too long; compacting");
-                    let keep = KEEP_RECENT_MESSAGES / 3;
-                    compact_chat(state, session, &turn_id, &plan.model, keep, request, &mut chat).await;
-                    let fresh = chat.len().saturating_sub(1);
-                    shorten_tool_results(&mut chat[..fresh]);
-                    rounds_since_compact = 0;
-                    continue;
-                }
-                if msg.contains("cancelled") {
-                    stop_reason = "cancelled".into();
-                } else {
-                    stop_reason = "error".into();
-                    error = Some(msg);
-                }
-                break;
-            }
-        };
-        if usage.0 > 0 || usage.1 > 0 {
-            let _ = state.db.record_usage(Some(&session.id), Some(&plan.agent.id), &plan.model, usage.0, usage.1).await;
-        }
-        let used_tokens = usize::try_from(usage.0 + usage.1).unwrap_or(0);
-        let calls = parts
-            .iter()
-            .filter_map(|p| match p {
-                Part::ToolCall { id, name, args } => Some((id.clone(), name.clone(), args.clone())),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let has_text = parts.iter().any(|p| matches!(p, Part::Text { text } if !text.trim().is_empty()));
-        if !has_text && calls.is_empty() {
-            // No answer (only thinking, or nothing at all): ask once more, then
-            // say so instead of ending the turn in silence.
-            if !retried_empty {
-                retried_empty = true;
-                continue;
-            }
-            stop_reason = "error".into();
-            error = Some(format!(
-                "the model ({}) returned an empty reply{}; try again, or pick a stronger model in Settings → Models",
-                plan.model,
-                if used_tools { " after the tool results" } else { "" }
-            ));
-            break;
-        }
-        let assistant_msg = state.db.append_message(&session.id, "assistant", &parts, Some(&plan.agent.id)).await?;
-        state.emit(Event::Message { session_id: session.id.clone(), message: assistant_msg });
-        for p in &parts {
-            if let Part::Text { text } = p {
-                final_text = text.clone();
-            }
-        }
-        chat.push(ChatMessage {
-            role: "assistant".into(),
-            parts: parts.iter().filter(|p| !matches!(p, Part::Thinking { .. })).cloned().collect(),
-        });
+        },
+        request_seq: user_msg.seq,
+        request_text,
+        stored_text,
+        chat,
+        iteration: 0,
+        // Inside the turn: compact again once enough new rounds have piled up;
+        // in between, cut old tool output down instead.
+        rounds_since_compact: KEEP_RECENT_MESSAGES / 2,
+        overflow_retried: false,
+        final_text: String::new(),
+        stop_reason: String::from("stop"),
+        error: None,
+        used_tools: false,
+        retried_empty: false,
+        seen: Default::default(),
+        block_calls: 0,
+        repeats: 0,
+        round: None,
+        delegation: None,
+    })
+}
 
-        if calls.is_empty() {
-            stop_reason = stop;
-            break;
+/// Advance a turn by one step: one model round and the tool calls it asks
+/// for. While a delegated task runs (turns from `begin_turn`), a step is one
+/// step of the delegate's turn instead; when that ends, the rest of the
+/// manager's tool calls run. `cancel` stops the turn at the next check.
+pub fn step_turn<'a>(state: &'a Shared, ts: TurnState, cancel: &'a AtomicBool) -> BoxFuture<'a, Result<Step>> {
+    Box::pin(async move {
+        let mut ts = ts;
+        if let Some(d) = ts.delegation.take() {
+            let child_id = d.child.session.id.clone();
+            let mut d = *d;
+            let res = match step_turn(state, d.child, cancel).await {
+                Ok(Step::Continue(child)) => {
+                    d.child = *child;
+                    ts.delegation = Some(Box::new(d));
+                    return Ok(Step::Continue(Box::new(ts)));
+                }
+                Ok(Step::Done(r)) => Ok(r),
+                Err(e) => Err(e),
+            };
+            let summary = close_delegation(state, &d.to, &d.task_id, &child_id, res).await;
+            let part = result_part(&d.call_id, "delegate_task", summary.map(|t| (t, false)));
+            emit_result(state, &ts, &part);
+            ts.round.get_or_insert_with(ToolRound::default).results.push(part);
+            return run_calls(state, ts, cancel).await;
         }
-        used_tools = true;
-        let ctx = ToolCtx {
-            state,
-            agent: &plan.agent,
-            session,
-            turn_id: &turn_id,
-            depth: opts.depth,
-            can_delegate: plan.can_delegate,
-        };
-        let mut results = Vec::with_capacity(calls.len());
-        for (id, name, args) in &calls {
-            block_calls += 1;
-            if !seen.insert(format!("{name} {args}")) {
-                repeats += 1;
+        if ts.round.is_some() {
+            return run_calls(state, ts, cancel).await;
+        }
+        model_step(state, ts, cancel).await
+    })
+}
+
+fn block_and_limit(state: &Shared) -> (usize, usize) {
+    // The step limit is a checkpoint, not the end: a long task carries on by
+    // itself for `auto_continue` more blocks unless it is going in circles.
+    let block = state.cfg.max_iterations.max(1);
+    (block, block * (1 + state.cfg.auto_continue))
+}
+
+async fn model_step(state: &Shared, mut ts: TurnState, cancel: &AtomicBool) -> Result<Step> {
+    let (_, limit) = block_and_limit(state);
+    if ts.iteration >= limit {
+        return finish(state, ts).await;
+    }
+    if cancel.load(Ordering::Relaxed) {
+        ts.stop_reason = "cancelled".into();
+        return finish(state, ts).await;
+    }
+    let req = ChatRequest {
+        model: ts.plan.model.clone(),
+        system: ts.plan.system.clone(),
+        messages: ts.chat.clone(),
+        tools: ts.plan.tools.clone(),
+        max_tokens: ts.params.max_tokens,
+        temperature: ts.params.temperature,
+        effort: ts.params.effort.clone(),
+    };
+    let (parts, stop, usage) = match model_round(state, &ts.session.id, &ts.turn_id, req, cancel).await {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = format!("{e:#}");
+            // Too long for the model after all: fold harder and try once more.
+            if is_context_overflow(&msg) && !ts.overflow_retried {
+                ts.overflow_retried = true;
+                tracing::warn!(session = %ts.session.id, "the model rejected the request as too long; compacting");
+                let keep = KEEP_RECENT_MESSAGES / 3;
+                let request = (ts.request_seq, ts.request_text.as_str());
+                compact_chat(state, &mut ts.session, &ts.turn_id, &ts.plan.model, keep, request, &mut ts.chat).await;
+                let fresh = ts.chat.len().saturating_sub(1);
+                shorten_tool_results(&mut ts.chat[..fresh]);
+                ts.rounds_since_compact = 0;
+                ts.iteration += 1;
+                return Ok(Step::Continue(Box::new(ts)));
             }
-            state.emit(Event::ToolCall {
-                session_id: session.id.clone(),
-                turn_id: turn_id.clone(),
+            if msg.contains("cancelled") {
+                ts.stop_reason = "cancelled".into();
+            } else {
+                ts.stop_reason = "error".into();
+                ts.error = Some(msg);
+            }
+            return finish(state, ts).await;
+        }
+    };
+    if usage.0 > 0 || usage.1 > 0 {
+        let _ =
+            state.db.record_usage(Some(&ts.session.id), Some(&ts.plan.agent.id), &ts.plan.model, usage.0, usage.1).await;
+    }
+    let used_tokens = usize::try_from(usage.0 + usage.1).unwrap_or(0);
+    let calls = parts
+        .iter()
+        .filter_map(|p| match p {
+            Part::ToolCall { id, name, args } => Some((id.clone(), name.clone(), args.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let has_text = parts.iter().any(|p| matches!(p, Part::Text { text } if !text.trim().is_empty()));
+    if !has_text && calls.is_empty() {
+        // No answer (only thinking, or nothing at all): ask once more, then
+        // say so instead of ending the turn in silence.
+        if !ts.retried_empty {
+            ts.retried_empty = true;
+            ts.iteration += 1;
+            return Ok(Step::Continue(Box::new(ts)));
+        }
+        ts.stop_reason = "error".into();
+        ts.error = Some(format!(
+            "the model ({}) returned an empty reply{}; try again, or pick a stronger model in Settings → Models",
+            ts.plan.model,
+            if ts.used_tools { " after the tool results" } else { "" }
+        ));
+        return finish(state, ts).await;
+    }
+    let assistant_msg = state.db.append_message(&ts.session.id, "assistant", &parts, Some(&ts.plan.agent.id)).await?;
+    state.emit(Event::Message { session_id: ts.session.id.clone(), message: assistant_msg });
+    for p in &parts {
+        if let Part::Text { text } = p {
+            ts.final_text = text.clone();
+        }
+    }
+    ts.chat.push(ChatMessage {
+        role: "assistant".into(),
+        parts: parts.iter().filter(|p| !matches!(p, Part::Thinking { .. })).cloned().collect(),
+    });
+
+    if calls.is_empty() {
+        ts.stop_reason = stop;
+        return finish(state, ts).await;
+    }
+    ts.used_tools = true;
+    let n = calls.len();
+    ts.round = Some(ToolRound { calls, next: 0, results: Vec::with_capacity(n), used_tokens });
+    run_calls(state, ts, cancel).await
+}
+
+fn emit_result(state: &Shared, ts: &TurnState, part: &Part) {
+    if let Part::ToolResult { id, name, content, is_error } = part {
+        state.emit(Event::ToolResult {
+            session_id: ts.session.id.clone(),
+            turn_id: ts.turn_id.clone(),
+            id: id.clone(),
+            name: name.clone(),
+            content: content.clone(),
+            is_error: *is_error,
+        });
+    }
+}
+
+/// Run the round's remaining tool calls, then close the round.
+async fn run_calls(state: &Shared, mut ts: TurnState, cancel: &AtomicBool) -> Result<Step> {
+    let mut round = ts.round.take().unwrap_or_default();
+    while round.next < round.calls.len() {
+        let (id, name, args) = round.calls[round.next].clone();
+        round.next += 1;
+        ts.block_calls += 1;
+        if !ts.seen.insert(format!("{name} {args}")) {
+            ts.repeats += 1;
+        }
+        state.emit(Event::ToolCall {
+            session_id: ts.session.id.clone(),
+            turn_id: ts.turn_id.clone(),
+            id: id.clone(),
+            name: name.clone(),
+            args: args.clone(),
+        });
+        let part = if cancel.load(Ordering::Relaxed) {
+            Part::ToolResult { id: id.clone(), name: name.clone(), content: "cancelled by user".into(), is_error: true }
+        } else if !ts.plan.tools.iter().any(|t| t.name == *name) {
+            Part::ToolResult {
                 id: id.clone(),
                 name: name.clone(),
-                args: args.clone(),
-            });
-            let part = if cancel.load(Ordering::Relaxed) {
-                Part::ToolResult {
-                    id: id.clone(),
-                    name: name.clone(),
-                    content: "cancelled by user".into(),
-                    is_error: true,
-                }
-            } else if !plan.tools.iter().any(|t| t.name == *name) {
-                Part::ToolResult {
-                    id: id.clone(),
-                    name: name.clone(),
-                    content: format!("error: unknown tool {name}: use one of the tools you were given"),
-                    is_error: true,
-                }
-            } else if let Some(problem) = check_args(plan.tools.iter().find(|t| t.name == *name), args) {
-                Part::ToolResult {
-                    id: id.clone(),
-                    name: name.clone(),
-                    content: format!("error: {problem}"),
-                    is_error: true,
-                }
-            } else {
-                execute_tool(&ctx, id, name, args).await
-            };
-            if let Part::ToolResult { content, is_error, .. } = &part {
-                state.emit(Event::ToolResult {
-                    session_id: session.id.clone(),
-                    turn_id: turn_id.clone(),
-                    id: id.clone(),
-                    name: name.clone(),
-                    content: content.clone(),
-                    is_error: *is_error,
-                });
+                content: format!("error: unknown tool {name}: use one of the tools you were given"),
+                is_error: true,
             }
-            results.push(part);
-        }
-        // A report hired this turn can take work right away.
-        let hired = results
-            .iter()
-            .any(|p| matches!(p, Part::ToolResult { name, is_error: false, .. } if name == "agent_manage"));
-        if hired && !plan.can_delegate {
-            plan.can_delegate = true;
-            plan.tools.extend(
-                tools::builtin_specs(&plan.agent, true, None).into_iter().filter(|t| t.name == "delegate_task"),
-            );
-        }
-        let tool_msg = state.db.append_message(&session.id, "tool", &results, Some(&plan.agent.id)).await?;
-        state.emit(Event::Message { session_id: session.id.clone(), message: tool_msg });
-        chat.push(ChatMessage { role: "tool".into(), parts: results });
-        rounds_since_compact += 1;
-        let need = request_tokens(&plan.system, &plan.tools, &chat).max(used_tokens);
-        if need >= state.cfg.context_tokens {
-            let compacted = rounds_since_compact >= KEEP_RECENT_MESSAGES / 2
-                && compact_chat(state, session, &turn_id, &plan.model, KEEP_RECENT_MESSAGES, request, &mut chat).await;
-            if compacted {
-                rounds_since_compact = 0;
-            } else {
-                let fresh = chat.len().saturating_sub(1);
-                shorten_tool_results(&mut chat[..fresh]);
-            }
-        }
-        let step = iteration + 1;
-        if step % block != 0 {
-            continue;
-        }
-        // Half the calls of the block were exact repeats: the model is stuck.
-        let looping = repeats * 2 >= block_calls;
-        if step < limit && !looping {
-            tracing::info!(session = %session.id, step, "step limit reached; continuing automatically");
-            shorten_tool_results(&mut chat);
-            seen.clear();
-            (block_calls, repeats) = (0, 0);
-            continue;
-        }
-        stop_reason = "max_iterations".into();
-        let note = if looping {
-            format!(
-                "I stopped after {step} steps because I kept repeating the same tool calls. Tell me how to proceed, \
-or to continue."
-            )
+        } else if let Some(problem) = check_args(ts.plan.tools.iter().find(|t| t.name == *name), &args) {
+            Part::ToolResult { id: id.clone(), name: name.clone(), content: format!("error: {problem}"), is_error: true }
         } else {
-            format!(
-                "I used all {step} steps allowed for one turn. Tell me to continue and I will pick up where I stopped."
-            )
+            let ctx = ToolCtx {
+                state,
+                agent: &ts.plan.agent,
+                session: &ts.session,
+                turn_id: &ts.turn_id,
+                depth: ts.opts.depth,
+                can_delegate: ts.plan.can_delegate,
+            };
+            if name == "delegate_task" && !ts.inline_delegation {
+                match start_delegation(&ctx, &id, &args).await {
+                    Ok(d) => {
+                        ts.delegation = Some(Box::new(d));
+                        ts.round = Some(round);
+                        return Ok(Step::Continue(Box::new(ts)));
+                    }
+                    Err(e) => result_part(&id, &name, Err(e)),
+                }
+            } else {
+                execute_tool(&ctx, &id, &name, &args).await
+            }
         };
-        let m = state
-            .db
-            .append_message(&session.id, "assistant", &[Part::Text { text: note.clone() }], Some(&plan.agent.id))
-            .await?;
-        state.emit(Event::Message { session_id: session.id.clone(), message: m });
-        final_text = note;
-        break;
+        emit_result(state, &ts, &part);
+        round.results.push(part);
     }
+    after_round(state, ts, round).await
+}
 
+/// Persist the tool results, keep the context in budget and apply the step
+/// limit.
+async fn after_round(state: &Shared, mut ts: TurnState, round: ToolRound) -> Result<Step> {
+    let used_tokens = round.used_tokens;
+    let results = round.results;
+    // A report hired this turn can take work right away.
+    let hired =
+        results.iter().any(|p| matches!(p, Part::ToolResult { name, is_error: false, .. } if name == "agent_manage"));
+    if hired && !ts.plan.can_delegate {
+        ts.plan.can_delegate = true;
+        ts.plan.tools.extend(
+            tools::builtin_specs(&ts.plan.agent, true, None).into_iter().filter(|t| t.name == "delegate_task"),
+        );
+    }
+    let tool_msg = state.db.append_message(&ts.session.id, "tool", &results, Some(&ts.plan.agent.id)).await?;
+    state.emit(Event::Message { session_id: ts.session.id.clone(), message: tool_msg });
+    ts.chat.push(ChatMessage { role: "tool".into(), parts: results });
+    ts.rounds_since_compact += 1;
+    let need = request_tokens(&ts.plan.system, &ts.plan.tools, &ts.chat).max(used_tokens);
+    if need >= state.cfg.context_tokens {
+        let compacted = ts.rounds_since_compact >= KEEP_RECENT_MESSAGES / 2 && {
+            let request = (ts.request_seq, ts.request_text.as_str());
+            compact_chat(state, &mut ts.session, &ts.turn_id, &ts.plan.model, KEEP_RECENT_MESSAGES, request, &mut ts.chat)
+                .await
+        };
+        if compacted {
+            ts.rounds_since_compact = 0;
+        } else {
+            let fresh = ts.chat.len().saturating_sub(1);
+            shorten_tool_results(&mut ts.chat[..fresh]);
+        }
+    }
+    let (block, limit) = block_and_limit(state);
+    let step = ts.iteration + 1;
+    ts.iteration = step;
+    if step % block != 0 {
+        return Ok(Step::Continue(Box::new(ts)));
+    }
+    // Half the calls of the block were exact repeats: the model is stuck.
+    let looping = ts.repeats * 2 >= ts.block_calls;
+    if step < limit && !looping {
+        tracing::info!(session = %ts.session.id, step, "step limit reached; continuing automatically");
+        shorten_tool_results(&mut ts.chat);
+        ts.seen.clear();
+        (ts.block_calls, ts.repeats) = (0, 0);
+        return Ok(Step::Continue(Box::new(ts)));
+    }
+    ts.stop_reason = "max_iterations".into();
+    let note = if looping {
+        format!(
+            "I stopped after {step} steps because I kept repeating the same tool calls. Tell me how to proceed, \
+or to continue."
+        )
+    } else {
+        format!("I used all {step} steps allowed for one turn. Tell me to continue and I will pick up where I stopped.")
+    };
+    let m = state
+        .db
+        .append_message(&ts.session.id, "assistant", &[Part::Text { text: note.clone() }], Some(&ts.plan.agent.id))
+        .await?;
+    state.emit(Event::Message { session_id: ts.session.id.clone(), message: m });
+    ts.final_text = note;
+    finish(state, ts).await
+}
+
+/// End the turn: `TurnEnd`, and a reflection pass in the background when the
+/// turn did real work.
+async fn finish(state: &Shared, ts: TurnState) -> Result<Step> {
     state.emit(Event::TurnEnd {
-        session_id: session.id.clone(),
-        turn_id: turn_id.clone(),
-        stop_reason: stop_reason.clone(),
-        error: error.clone(),
+        session_id: ts.session.id.clone(),
+        turn_id: ts.turn_id.clone(),
+        stop_reason: ts.stop_reason.clone(),
+        error: ts.error.clone(),
     });
-    let _ = state.db.touch_session(&session.id).await;
+    let _ = state.db.touch_session(&ts.session.id).await;
 
     // Reflection: learn from turns that did real work.
-    if !opts.no_reflect
-        && plan.agent.self_improve
-        && error.is_none()
-        && stop_reason != "cancelled"
-        && should_reflect(state, &session.id, used_tools, &stored_text).await
+    if !ts.opts.no_reflect
+        && ts.plan.agent.self_improve
+        && ts.error.is_none()
+        && ts.stop_reason != "cancelled"
+        && should_reflect(state, &ts.session.id, ts.used_tools, &ts.stored_text).await
     {
         let st = state.clone();
-        let agent = plan.agent.clone();
-        let sess = session.clone();
-        let model = plan.model.clone();
+        let agent = ts.plan.agent.clone();
+        let sess = ts.session.clone();
+        let model = ts.plan.model.clone();
         state.spawn(async move {
             if let Err(e) = reflect(st, agent, sess, model).await {
                 tracing::warn!("reflection failed: {e:#}");
@@ -835,8 +1056,29 @@ or to continue."
         });
     }
 
-    let _ = plan.mcp_names;
-    Ok(TurnResult { text: final_text, agent: Some(plan.agent), stop_reason, error })
+    Ok(Step::Done(TurnResult {
+        text: ts.final_text,
+        agent: Some(ts.plan.agent),
+        stop_reason: ts.stop_reason,
+        error: ts.error,
+    }))
+}
+
+/// A `delegate_task` call in a stepped turn: check it, open the task and
+/// start the delegate's turn.
+async fn start_delegation(ctx: &ToolCtx<'_>, call_id: &str, args: &Value) -> Result<Delegation> {
+    let d = tools::check_delegate(ctx, args).await?;
+    let (task_id, child, text) =
+        open_delegation(ctx.state, ctx.agent, &d.to, ctx.session, &d.task, &d.context).await?;
+    let child_id = child.id.clone();
+    let opts = TurnOptions { depth: ctx.depth + 1, no_reflect: true, agent_override: Some(d.to.clone()) };
+    match begin(ctx.state, child, text, opts, false).await {
+        Ok(child) => Ok(Delegation { call_id: call_id.to_string(), to: d.to, task_id, child }),
+        Err(e) => Err(close_delegation(ctx.state, &d.to, &task_id, &child_id, Err(e))
+            .await
+            .err()
+            .unwrap_or_else(|| anyhow!("delegation to @{} failed", d.to.handle))),
+    }
 }
 
 /// Reflect after tool-using turns, after user corrections, and every few
@@ -966,13 +1208,7 @@ pub fn run_delegation(
     depth: usize,
 ) -> futures_util::future::BoxFuture<'static, Result<String>> {
     Box::pin(async move {
-        let task_row = state.db.create_task(&parent.id, &from.id, &to.id, &task).await?;
-        let title = format!("@{} → @{}: {}", from.handle, to.handle, auto_title(&task));
-        let child = state.db.create_session(&to.id, "delegation", None, Some(&parent.id), &title).await?;
-        let mut text = format!("Task from @{} ({}):\n{}", from.handle, from.role, task);
-        if !context.trim().is_empty() {
-            text.push_str(&format!("\n\nContext:\n{}", context.trim()));
-        }
+        let (task_id, child, text) = open_delegation(&state, &from, &to, &parent, &task, &context).await?;
         let child_id = child.id.clone();
         let res = run_turn(
             state.clone(),
@@ -981,24 +1217,56 @@ pub fn run_delegation(
             TurnOptions { depth, no_reflect: true, agent_override: Some(to.clone()) },
         )
         .await;
-        match res {
-            Ok(r) => {
-                let status = if r.error.is_some() { "failed" } else { "done" };
-                let summary = if r.text.trim().is_empty() {
-                    r.error.clone().unwrap_or_else(|| "(no answer)".into())
-                } else {
-                    r.text.clone()
-                };
-                state.db.finish_task(&task_row.id, Some(&child_id), status, &summary).await?;
-                Ok(format!("Result from @{} (session {}):\n{}", to.handle, child_id, summary))
-            }
-            Err(e) => {
-                let msg = format!("{e:#}");
-                state.db.finish_task(&task_row.id, Some(&child_id), "failed", &msg).await?;
-                Err(anyhow!("delegation to @{} failed: {msg}", to.handle))
-            }
-        }
+        close_delegation(&state, &to, &task_id, &child_id, res).await
     })
+}
+
+/// Record the task and open the delegate's conversation. Returns the task id,
+/// the new session and the delegate's first message.
+async fn open_delegation(
+    state: &Shared,
+    from: &Agent,
+    to: &Agent,
+    parent: &Session,
+    task: &str,
+    context: &str,
+) -> Result<(String, Session, String)> {
+    let task_row = state.db.create_task(&parent.id, &from.id, &to.id, task).await?;
+    let title = format!("@{} → @{}: {}", from.handle, to.handle, auto_title(task));
+    let child = state.db.create_session(&to.id, "delegation", None, Some(&parent.id), &title).await?;
+    let mut text = format!("Task from @{} ({}):\n{}", from.handle, from.role, task);
+    if !context.trim().is_empty() {
+        text.push_str(&format!("\n\nContext:\n{}", context.trim()));
+    }
+    Ok((task_row.id, child, text))
+}
+
+/// Close the task with the delegate's outcome; the text is the manager's
+/// tool result.
+async fn close_delegation(
+    state: &Shared,
+    to: &Agent,
+    task_id: &str,
+    child_id: &str,
+    res: Result<TurnResult>,
+) -> Result<String> {
+    match res {
+        Ok(r) => {
+            let status = if r.error.is_some() { "failed" } else { "done" };
+            let summary = if r.text.trim().is_empty() {
+                r.error.clone().unwrap_or_else(|| "(no answer)".into())
+            } else {
+                r.text.clone()
+            };
+            state.db.finish_task(task_id, Some(child_id), status, &summary).await?;
+            Ok(format!("Result from @{} (session {}):\n{}", to.handle, child_id, summary))
+        }
+        Err(e) => {
+            let msg = format!("{e:#}");
+            state.db.finish_task(task_id, Some(child_id), "failed", &msg).await?;
+            Err(anyhow!("delegation to @{} failed: {msg}", to.handle))
+        }
+    }
 }
 
 /// Keep the start and the end of long output; the end usually holds the error.
