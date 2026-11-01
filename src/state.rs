@@ -113,6 +113,8 @@ pub struct AppState {
     pub telegram_status: Mutex<Value>,
     /// The local shell behind the `shell` tool, when one is configured.
     pub shell: Option<crate::agent::shell::Shell>,
+    /// Background jobs in flight and their last outcomes.
+    pub jobs: Jobs,
     /// Background work, extra event delivery and turn starts (see `host`).
     pub host: Arc<dyn Host>,
     /// Sessions with a turn in flight, with a cancel flag each.
@@ -121,6 +123,18 @@ pub struct AppState {
 }
 
 pub type Shared = Arc<AppState>;
+
+/// Per-instance state of the background jobs. Kept here rather than in
+/// statics so several instances (tenants) can share one process or isolate.
+#[derive(Debug, Default)]
+pub struct Jobs {
+    /// A proactive check-in is running.
+    pub checking: std::sync::atomic::AtomicBool,
+    /// An earnings scan is running.
+    pub scanning: std::sync::atomic::AtomicBool,
+    /// Last dealwork.ai heartbeat outcome, for the dashboard.
+    pub heartbeat: Mutex<Option<Value>>,
+}
 
 impl AppState {
     /// The daemon's state: reqwest (rustls) for HTTP, tokio for background work.
@@ -159,6 +173,7 @@ impl AppState {
             telegram_reload: tokio::sync::Notify::new(),
             telegram_status: Mutex::new(Value::Null),
             shell,
+            jobs: Jobs::default(),
             host,
         })
     }

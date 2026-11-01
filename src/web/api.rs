@@ -841,7 +841,7 @@ pub async fn save_earn(state: &Shared, body: &Value) -> Result<(), ApiError> {
 }
 
 pub async fn run_earn_scan(State(state): State<Shared>) -> R {
-    if crate::earn::scanning() {
+    if crate::earn::scanning(&state) {
         return Err(bad("a scan is already running"));
     }
     state.clone().spawn(async move {
@@ -861,7 +861,7 @@ pub async fn patch_earn_lead(State(state): State<Shared>, Path(id): Path<String>
     }
     state.db.update_lead(&lead.id, Some(status), None, None, None).await?;
     // A taken lead is worked on now, not at the next scheduled scan.
-    if status == "approved" && !crate::earn::scanning() {
+    if status == "approved" && !crate::earn::scanning(&state) {
         let st = state.clone();
         state.spawn(async move {
             if let Err(e) = crate::earn::scan(&st, true).await {

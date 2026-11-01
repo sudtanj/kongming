@@ -6,6 +6,7 @@
 //! (`db::SqlExecutor`), HTTP (`net::Http`) and background work (`host::Host`).
 
 pub mod agent;
+pub mod background;
 #[cfg(feature = "native")]
 pub mod cdp;
 pub mod config;

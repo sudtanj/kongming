@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::agent::tools::ToolCtx;
@@ -745,20 +746,21 @@ fn authorize(req: crate::net::RequestBuilder, p: &Provider, key: &str) -> crate:
 
 // ------------------------------------------------------------------------ scan
 
-static SCANNING: AtomicBool = AtomicBool::new(false);
+/// Clears the scan flag when the scan ends.
 
-struct Running;
-impl Drop for Running {
+struct Running<'a>(&'a AtomicBool);
+impl Drop for Running<'_> {
     fn drop(&mut self) {
-        SCANNING.store(false, Ordering::SeqCst);
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
-pub fn scanning() -> bool {
-    SCANNING.load(Ordering::SeqCst)
+pub fn scanning(state: &Shared) -> bool {
+    state.jobs.scanning.load(Ordering::SeqCst)
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScanReport {
     /// Open listings seen across providers.
     pub listed: usize,
@@ -775,13 +777,63 @@ const ACTIVE: &[&str] = &["approved", "working", "submitted"];
 /// agent rate them and follow up on work in progress. `manual` scans run even
 /// when earning is switched off and keep their conversation.
 pub async fn scan(state: &Shared, manual: bool) -> Result<ScanReport> {
-    if SCANNING.swap(true, Ordering::SeqCst) {
+    if state.jobs.scanning.swap(true, Ordering::SeqCst) {
         bail!("a scan is already running");
     }
-    let _running = Running;
+    let _running = Running(&state.jobs.scanning);
+    match prepare_scan(state, manual).await? {
+        ScanStart::Done(report) => Ok(report),
+        ScanStart::Turn(t) => {
+            let res = agent::run_turn(state.clone(), t.session.clone(), t.prompt.clone(), t.turn_options()).await;
+            finish_scan(state, *t, res).await
+        }
+    }
+}
+
+/// What the listing part of a scan led to.
+#[derive(Debug)]
+pub enum ScanStart {
+    /// Nothing for the agent to look at.
+    Done(ScanReport),
+    /// The agent's turn, then `finish_scan`.
+    Turn(Box<ScanTurn>),
+}
+
+/// A scan's turn, with what `finish_scan` needs afterwards.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanTurn {
+    pub manual: bool,
+    pub started: i64,
+    pub report: ScanReport,
+    pub agent: crate::db::Agent,
+    pub session: crate::db::Session,
+    /// The new leads put in front of the agent.
+    pub fresh: Vec<String>,
+    pub prompt: String,
+}
+
+impl ScanTurn {
+    pub fn turn_options(&self) -> TurnOptions {
+        TurnOptions { depth: 1, no_reflect: true, agent_override: Some(self.agent.clone()) }
+    }
+}
+
+/// Claim the scan slot; false when a scan is already running.
+pub(crate) fn claim_scan(state: &Shared) -> bool {
+    !state.jobs.scanning.swap(true, Ordering::SeqCst)
+}
+
+pub(crate) fn release_scan(state: &Shared) {
+    state.jobs.scanning.store(false, Ordering::SeqCst);
+}
+
+/// The listing part of a scan: one request per enabled provider (plus up to
+/// `ALGORA_CHECKS` bounty checks), new leads stored, the agent's prompt.
+pub async fn prepare_scan(state: &Shared, manual: bool) -> Result<ScanStart> {
     let s = settings(state).await;
     if !s.enabled && !manual {
-        return Ok(ScanReport::default());
+        return Ok(ScanStart::Done(ScanReport::default()));
     }
     let started = now_ms();
     let _ = state.db.set_setting(LAST_SCAN, &json!(started)).await;
@@ -834,23 +886,24 @@ pub async fn scan(state: &Shared, manual: bool) -> Result<ScanReport> {
     let active = state.db.earn_leads(ACTIVE, 20, false).await?;
     if (fresh.is_empty() && active.is_empty()) || crate::telegram::active_token(state).await.is_none() {
         tracing::info!(?report, "earn scan: nothing for the agent");
-        return Ok(report);
+        return Ok(ScanStart::Done(report));
     }
     let agent = agent::ensure_default_agent(state).await?;
     let session = state.db.create_session(&agent.id, "earn", None, None, "💰 Earnings scan").await?;
     let prompt = scan_prompt(&s, &fresh, &active, state).await;
-    let res = agent::run_turn(
-        state.clone(),
-        session.clone(),
-        prompt,
-        TurnOptions { depth: 1, no_reflect: true, agent_override: Some(agent.clone()) },
-    )
-    .await;
+    let fresh = fresh.into_iter().map(|l| l.id).collect();
+    Ok(ScanStart::Turn(Box::new(ScanTurn { manual, started, report, agent, session, fresh, prompt })))
+}
+
+/// After the scan's turn: leads left unrated are passed over, empty
+/// conversations dropped, the outcome logged.
+pub async fn finish_scan(state: &Shared, t: ScanTurn, res: Result<agent::TurnResult>) -> Result<ScanReport> {
+    let ScanTurn { manual, started, mut report, agent, session, fresh, .. } = t;
     // Leads the agent did not rate were looked at and passed over.
-    for l in &fresh {
-        if let Ok(Some(cur)) = state.db.earn_lead(&l.id).await {
+    for id in &fresh {
+        if let Ok(Some(cur)) = state.db.earn_lead(id).await {
             if cur.status == "new" {
-                let _ = state.db.update_lead(&l.id, Some("passed"), None, None, None).await;
+                let _ = state.db.update_lead(id, Some("passed"), None, None, None).await;
             }
         }
     }
@@ -883,6 +936,7 @@ pub async fn scan(state: &Shared, manual: bool) -> Result<ScanReport> {
     res?;
     Ok(report)
 }
+
 
 fn money(l: &EarnLead) -> String {
     match l.budget_usd {
@@ -968,12 +1022,12 @@ request from the user's GitHub account: prepare the fix and the steps, and send 
     p
 }
 
-async fn due(state: &Shared) -> bool {
+/// Whether a scheduled scan is due at `now`.
+pub async fn tick(state: &Shared, now: i64) -> bool {
     let s = settings(state).await;
-    if !s.enabled || s.scan_minutes == 0 || scanning() {
+    if !s.enabled || s.scan_minutes == 0 || scanning(state) {
         return false;
     }
-    let now = now_ms();
     match last_scan(state).await {
         Some(t) => now - t >= s.scan_minutes * 60_000,
         None => true,
@@ -984,10 +1038,10 @@ async fn due(state: &Shared) -> bool {
 #[cfg(feature = "native")]
 pub async fn run(state: Shared) {
     tokio::spawn(heartbeat_loop(state.clone()));
-    let mut tick = tokio::time::interval(Duration::from_secs(60));
+    let mut timer = tokio::time::interval(Duration::from_secs(60));
     loop {
-        tick.tick().await;
-        if due(&state).await {
+        timer.tick().await;
+        if tick(&state, now_ms()).await {
             if let Err(e) = scan(&state, false).await {
                 tracing::warn!("earn scan failed: {e:#}");
             }
@@ -1003,8 +1057,6 @@ pub async fn run(state: Shared) {
 /// file's current version.
 const HEARTBEAT_SECS: u64 = 60;
 const DEALWORK_SKILL_VERSION: &str = "1.6.5";
-/// Last heartbeat outcome, for the dashboard.
-static HEARTBEAT: parking_lot::Mutex<Option<Value>> = parking_lot::const_mutex(None);
 /// skill.md version and when it was read.
 static SKILL_VERSION: parking_lot::Mutex<Option<(String, i64)>> = parking_lot::const_mutex(None);
 
@@ -1046,17 +1098,17 @@ async fn dealwork_skill_version(state: &Shared, s: &Settings, p: &Provider) -> S
     v
 }
 
-/// One heartbeat to dealwork.ai when it is on with a key; the outcome lands in `HEARTBEAT`.
+/// One heartbeat to dealwork.ai when it is on with a key; the outcome lands in `AppState::jobs`.
 pub async fn heartbeat(state: &Shared) {
     let s = settings(state).await;
     let Some(p) = provider("dealwork") else { return };
     let Some(key) = s.key(p).filter(|_| s.enabled && s.on(p)) else {
-        *HEARTBEAT.lock() = None;
+        *state.jobs.heartbeat.lock() = None;
         return;
     };
     let now = now_ms();
     let Some(agent_id) = s.providers.get(p.id).and_then(|x| x.agent_id.clone()) else {
-        *HEARTBEAT.lock() = Some(
+        *state.jobs.heartbeat.lock() = Some(
             json!({"ok": false, "at": now, "error": "agent ID missing: add it (agentAccountId on dealwork.ai) so Kongming can report in"}),
         );
         return;
@@ -1093,7 +1145,7 @@ pub async fn heartbeat(state: &Shared) {
         }
         Err(e) => json!({"ok": false, "at": now, "error": format!("{e}")}),
     };
-    let mut last = HEARTBEAT.lock();
+    let mut last = state.jobs.heartbeat.lock();
     let was_ok = last.as_ref().map(|l| l["ok"] == json!(true));
     if was_ok != Some(outcome["ok"] == json!(true)) {
         match outcome["error"].as_str() {
@@ -1104,8 +1156,21 @@ pub async fn heartbeat(state: &Shared) {
     *last = Some(outcome);
 }
 
-pub fn last_heartbeat() -> Option<Value> {
-    HEARTBEAT.lock().clone()
+pub fn last_heartbeat(state: &Shared) -> Option<Value> {
+    state.jobs.heartbeat.lock().clone()
+}
+
+/// Whether the dealwork.ai heartbeat is due at `now`: every
+/// `HEARTBEAT_SECS` while it is on, once more after it was switched off.
+pub async fn heartbeat_due(state: &Shared, now: i64) -> bool {
+    let s = settings(state).await;
+    let on = provider("dealwork").is_some_and(|p| s.enabled && s.on(p) && s.key(p).is_some());
+    let last = state.jobs.heartbeat.lock().as_ref().and_then(|v| v.get("at").and_then(Value::as_i64));
+    match (on, last) {
+        (true, Some(at)) => now - at >= HEARTBEAT_SECS as i64 * 1000,
+        (true, None) => true,
+        (false, _) => state.jobs.heartbeat.lock().is_some(),
+    }
 }
 
 #[cfg(feature = "native")]
@@ -1368,7 +1433,7 @@ pub async fn dashboard_json(state: &Shared) -> Result<Value> {
                 "keySet": s.key(p).is_some(),
                 "status": status.get(p.id).cloned().unwrap_or(Value::Null),
                 "agentId": s.providers.get(p.id).and_then(|x| x.agent_id.clone()),
-                "heartbeat": if p.id == "dealwork" { last_heartbeat() } else { None },
+                "heartbeat": if p.id == "dealwork" { last_heartbeat(state) } else { None },
             })
         })
         .collect();
@@ -1378,7 +1443,7 @@ pub async fn dashboard_json(state: &Shared) -> Result<Value> {
         "providers": providers,
         "leads": leads,
         "lastScan": last_scan(state).await,
-        "scanning": scanning(),
+        "scanning": scanning(state),
     }))
 }
 
@@ -1403,7 +1468,7 @@ pub async fn status_html(state: &Shared) -> Result<String> {
         count("submitted"),
         count("paid"),
     );
-    if let Some(hb) = last_heartbeat() {
+    if let Some(hb) = last_heartbeat(state) {
         let line = match hb["error"].as_str() {
             Some(e) => format!("dealwork.ai: not reporting in ({})", crate::telegram::esc(e)),
             None => format!(

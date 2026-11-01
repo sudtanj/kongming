@@ -8,11 +8,10 @@
 #[cfg(feature = "native")]
 use std::time::Duration;
 
-#[cfg(feature = "native")]
-use serde_json::Value;
+use anyhow::{anyhow, Result};
 
-use crate::agent::{self, TurnOptions};
-use crate::db::CronJob;
+use crate::agent::{self, TurnOptions, TurnResult};
+use crate::db::{CronJob, Session};
 use crate::state::Shared;
 
 fn field_matches(field: &str, value: u32, min: u32, max: u32) -> Option<bool> {
@@ -99,31 +98,35 @@ pub fn is_one_off(schedule: &str) -> bool {
     schedule.trim().starts_with("at:")
 }
 
-pub async fn run_job(state: Shared, job: CronJob) {
+/// The conversation and options a job's turn runs with: the lead agent (the
+/// prompts come from the user) in a new session.
+pub async fn start_job(state: &Shared, job: &CronJob) -> Result<(Session, TurnOptions)> {
     tracing::info!(job = %job.name, "cron job start");
-    // Scheduled prompts come from the user, so they go to the lead agent.
-    let agent = match agent::ensure_default_agent(&state).await {
-        Ok(a) => a,
-        Err(e) => {
-            tracing::warn!("cron: no agent: {e:#}");
-            return;
-        }
-    };
+    let agent = agent::ensure_default_agent(state).await.map_err(|e| anyhow!("no agent: {e:#}"))?;
     let title = format!("⏰ {}", job.name);
-    let session = match state.db.create_session(&agent.id, "cron", Some(&job.id), None, &title).await {
-        Ok(s) => s,
+    let session = state
+        .db
+        .create_session(&agent.id, "cron", Some(&job.id), None, &title)
+        .await
+        .map_err(|e| anyhow!("session: {e:#}"))?;
+    Ok((session, TurnOptions { depth: 1, no_reflect: false, agent_override: Some(agent) }))
+}
+
+pub async fn run_job(state: Shared, job: CronJob) {
+    let (session, opts) = match start_job(&state, &job).await {
+        Ok(x) => x,
         Err(e) => {
-            tracing::warn!("cron: session: {e:#}");
+            tracing::warn!("cron: {e:#}");
             return;
         }
     };
-    let res = agent::run_turn(
-        state.clone(),
-        session,
-        job.prompt.clone(),
-        TurnOptions { depth: 1, no_reflect: false, agent_override: Some(agent) },
-    )
-    .await;
+    let res = agent::run_turn(state.clone(), session, job.prompt.clone(), opts).await;
+    finish_job(&state, &job, res).await;
+}
+
+/// After the job's turn: record the run, switch a one-off off, deliver the
+/// answer to Telegram when asked to.
+pub async fn finish_job(state: &Shared, job: &CronJob, res: Result<TurnResult>) {
     let status = match &res {
         Ok(r) if r.error.is_none() => "ok".to_string(),
         Ok(r) => format!("error: {}", r.error.clone().unwrap_or_default()),
@@ -147,48 +150,53 @@ pub async fn run_job(state: Shared, job: CronJob) {
     tracing::info!(job = %job.name, %status, "cron job done");
 }
 
-#[cfg(feature = "native")]
-pub async fn run(state: Shared) {
-    let mut tick = tokio::time::interval(Duration::from_secs(30));
-    loop {
-        tick.tick().await;
-        let jobs = match state.db.cron_jobs().await {
-            Ok(j) => j,
-            Err(e) => {
-                tracing::warn!("cron: list failed: {e:#}");
-                continue;
+/// The jobs due at `now`, each claimed (marked running with its next run) so
+/// it does not start twice. Jobs never scheduled get their first run time.
+pub async fn tick(state: &Shared, now: i64) -> Vec<CronJob> {
+    let jobs = match state.db.cron_jobs().await {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::warn!("cron: list failed: {e:#}");
+            return vec![];
+        }
+    };
+    let mut due_jobs = Vec::new();
+    for job in jobs.into_iter().filter(|j| j.enabled) {
+        let due = match job.next_run_at {
+            Some(n) => n <= now,
+            None if is_one_off(&job.schedule) => {
+                // A one-off that already ran (or is running) or whose time has passed.
+                let _ = state.db.set_cron_enabled(&job.id, false).await;
+                false
+            }
+            None => {
+                // Never scheduled: compute and store, don't run now.
+                let _ = state
+                    .db
+                    .mark_cron_run(&job.id, next_run(&job.schedule, now), job.last_status.as_deref().unwrap_or("scheduled"))
+                    .await;
+                false
             }
         };
-        let now = crate::db::now_ms();
-        for job in jobs.into_iter().filter(|j| j.enabled) {
-            let due = match job.next_run_at {
-                Some(n) => n <= now,
-                None if is_one_off(&job.schedule) => {
-                    // A one-off that already ran (or is running) or whose time has passed.
-                    let _ = state.db.set_cron_enabled(&job.id, false).await;
-                    false
-                }
-                None => {
-                    // Never scheduled: compute and store, don't run now.
-                    let _ = state
-                        .db
-                        .mark_cron_run(
-                            &job.id,
-                            next_run(&job.schedule, now),
-                            job.last_status.as_deref().unwrap_or("scheduled"),
-                        )
-                        .await;
-                    false
-                }
-            };
-            if due {
-                // Claim it first so a long run isn't started twice.
-                let _ = state.db.mark_cron_run(&job.id, next_run(&job.schedule, now), "running").await;
-                let st = state.clone();
-                tokio::spawn(async move { run_job(st, job).await });
-            }
+        if due {
+            // Claim it first so a long run isn't started twice.
+            let _ = state.db.mark_cron_run(&job.id, next_run(&job.schedule, now), "running").await;
+            due_jobs.push(job);
         }
-        let _: Option<Value> = None;
+    }
+    due_jobs
+}
+
+/// The scheduler loop: every 30 s, run what `tick` found due.
+#[cfg(feature = "native")]
+pub async fn run(state: Shared) {
+    let mut timer = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        timer.tick().await;
+        for job in tick(&state, crate::db::now_ms()).await {
+            let st = state.clone();
+            tokio::spawn(async move { run_job(st, job).await });
+        }
     }
 }
 

@@ -22,6 +22,8 @@ use crate::llm::ToolSpec;
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_RESULT_CHARS: usize = 24_000;
+/// Tool lists are re-read this often (`refresh_due`).
+const REFRESH_EVERY_MS: i64 = 30 * 60 * 1000;
 
 /// Legacy SSE transport connection: one long GET, a POST endpoint, replies
 /// matched by JSON-RPC id.
@@ -40,6 +42,8 @@ pub struct McpManager {
     sse: Mutex<HashMap<String, Arc<SseConn>>>,
     /// OAuth state param -> (server id, PKCE verifier, redirect uri)
     pending_oauth: Mutex<HashMap<String, (String, String, String)>>,
+    /// When `refresh_due` last said yes (ms).
+    last_refresh: AtomicI64,
 }
 
 /// A tool exposed to the model, with where it lives.
@@ -76,6 +80,7 @@ impl McpManager {
             sessions: Mutex::new(HashMap::new()),
             sse: Mutex::new(HashMap::new()),
             pending_oauth: Mutex::new(HashMap::new()),
+            last_refresh: AtomicI64::new(0),
         }
     }
 
@@ -521,6 +526,17 @@ impl McpManager {
                 }
             }
         }
+    }
+
+    /// Whether the periodic tool-list refresh is due at `now` (at the first
+    /// call, then every 30 minutes); claims it when it is.
+    pub fn refresh_due(&self, now: i64) -> bool {
+        let last = self.last_refresh.load(Ordering::Relaxed);
+        if last != 0 && now - last < REFRESH_EVERY_MS {
+            return false;
+        }
+        self.last_refresh.store(now, Ordering::Relaxed);
+        true
     }
 }
 
