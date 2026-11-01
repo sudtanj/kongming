@@ -1,26 +1,36 @@
 //! OpenAI chat-completions wire format with streaming tool calls. Works with
 //! any compatible endpoint (OpenAI, OpenRouter, zilong-router, Ollama, vLLM).
 
-use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 
-use super::{sse, ChatRequest, EventStream, LlmEvent, Provider};
+use super::think::{Piece, ThinkScrubber};
+use super::{repair, sse, ChatRequest, EventStream, LlmEvent, Provider};
 use crate::db::Part;
 
 pub struct OpenAi {
     http: reqwest::Client,
     base: String,
     key: Option<String>,
+    /// The server refused `tool_choice` once (vLLM started without a tool
+    /// parser): leave it out for as long as this provider lives.
+    no_tool_choice: AtomicBool,
 }
 
 impl OpenAi {
     pub fn new(http: reqwest::Client, base: Option<String>, key: Option<String>) -> OpenAi {
         let base = base.filter(|b| !b.trim().is_empty()).unwrap_or_else(|| "https://api.openai.com/v1".into());
-        OpenAi { http, base: base.trim_end_matches('/').to_string(), key: key.filter(|k| !k.trim().is_empty()) }
+        OpenAi {
+            http,
+            base: base.trim_end_matches('/').to_string(),
+            key: key.filter(|k| !k.trim().is_empty()),
+            no_tool_choice: AtomicBool::new(false),
+        }
     }
+
 
     /// Convert neutral messages into the OpenAI shape. Tool results become
     /// `role: tool` messages; assistant tool calls carry `tool_calls`.
@@ -99,13 +109,90 @@ impl OpenAi {
         }
         body
     }
+
+    async fn send(&self, body: &Value) -> Result<reqwest::Response> {
+        let mut r = self.http.post(format!("{}/chat/completions", self.base)).json(body);
+        if let Some(k) = &self.key {
+            r = r.bearer_auth(k);
+        }
+        r.send().await.context("llm request failed")
+    }
+}
+
+/// A 400 that blames `tool_choice`, e.g. vLLM's "\"auto\" tool choice
+/// requires --enable-auto-tool-choice and --tool-call-parser to be set".
+fn rejects_tool_choice(body: &str) -> bool {
+    let b = body.to_ascii_lowercase();
+    ["tool_choice", "tool choice", "tool-call-parser", "tool parser", "tool_call_parser"].iter().any(|p| b.contains(p))
 }
 
 #[derive(Default)]
 struct PendingCall {
+    index: u64,
     id: String,
     name: String,
     args: String,
+}
+
+/// What a stream has received and not handed on yet.
+#[derive(Default)]
+struct StreamState {
+    /// Tool calls being assembled, in the order they started.
+    calls: Vec<PendingCall>,
+    stop: String,
+    think: ThinkScrubber,
+}
+
+impl StreamState {
+    /// One entry of a `tool_calls` delta.
+    fn tool_delta(&mut self, c: &Value) {
+        let index = c.get("index").and_then(Value::as_u64).unwrap_or(0);
+        let id = match c.get("id") {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Number(n)) => n.to_string(),
+            _ => String::new(),
+        };
+        // A new id at an index already in use starts another call: Ollama
+        // sends every call at index 0.
+        let i = match self.calls.iter().rposition(|p| p.index == index) {
+            Some(i) if id.is_empty() || self.calls[i].id.is_empty() || self.calls[i].id == id => i,
+            _ => {
+                self.calls.push(PendingCall { index, ..Default::default() });
+                self.calls.len() - 1
+            }
+        };
+        let slot = &mut self.calls[i];
+        if !id.is_empty() {
+            slot.id = id;
+        }
+        let Some(f) = c.get("function") else { return };
+        // Some servers repeat the whole name in every chunk.
+        if let Some(n) = f.get("name").and_then(Value::as_str).filter(|n| slot.name != *n) {
+            slot.name.push_str(n);
+        }
+        match f.get("arguments") {
+            Some(Value::String(a)) => slot.args.push_str(a),
+            // Sent already parsed, as some Ollama versions do.
+            Some(v @ (Value::Object(_) | Value::Array(_))) => slot.args = v.to_string(),
+            _ => {}
+        }
+    }
+
+    /// End of the stream: held-back text, the pending calls and the Done.
+    fn finish(&mut self) -> Vec<LlmEvent> {
+        let mut batch: Vec<LlmEvent> = self.think.finish().into_iter().map(piece_event).collect();
+        batch.extend(flush_calls(&mut self.calls));
+        let stop_reason = if self.stop.is_empty() { "stop".to_string() } else { self.stop.clone() };
+        batch.push(LlmEvent::Done { stop_reason });
+        batch
+    }
+}
+
+fn piece_event(p: Piece) -> LlmEvent {
+    match p {
+        Piece::Text(t) => LlmEvent::TextDelta(t),
+        Piece::Thinking(t) => LlmEvent::ThinkingDelta(t),
+    }
 }
 
 #[async_trait::async_trait]
@@ -115,20 +202,34 @@ impl Provider for OpenAi {
     }
 
     async fn stream(&self, req: ChatRequest) -> Result<EventStream> {
-        let mut r = self.http.post(format!("{}/chat/completions", self.base)).json(&Self::body(&req));
-        if let Some(k) = &self.key {
-            r = r.bearer_auth(k);
+        let mut body = Self::body(&req);
+        if self.no_tool_choice.load(Ordering::Relaxed) {
+            if let Some(o) = body.as_object_mut() {
+                o.remove("tool_choice");
+            }
         }
-        let resp = r.send().await.context("llm request failed")?;
+        let mut resp = self.send(&body).await?;
+        if resp.status() == reqwest::StatusCode::BAD_REQUEST && body.get("tool_choice").is_some() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            if !rejects_tool_choice(&text) {
+                bail!("llm HTTP {status}: {}", short_error(&text));
+            }
+            tracing::info!("the model server refused tool_choice; sending requests without it");
+            self.no_tool_choice.store(true, Ordering::Relaxed);
+            if let Some(o) = body.as_object_mut() {
+                o.remove("tool_choice");
+            }
+            resp = self.send(&body).await?;
+        }
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
             bail!("llm HTTP {status}: {}", short_error(&text));
         }
         let events = sse::events(resp.bytes_stream());
-        let state = (BTreeMap::<u64, PendingCall>::new(), String::new(), false);
         let out = futures_util::stream::unfold(
-            (events.boxed(), state, false),
+            (events.boxed(), StreamState::default(), false),
             |(mut src, mut state, mut finished)| async move {
                 loop {
                     if finished {
@@ -137,10 +238,7 @@ impl Provider for OpenAi {
                     let Some(item) = src.next().await else {
                         finished = true;
                         // Stream ended without a finish marker: still flush tool calls and a Done.
-                        let mut batch = flush_calls(&mut state.0);
-                        batch.push(LlmEvent::Done {
-                            stop_reason: if state.1.is_empty() { "stop".into() } else { state.1.clone() },
-                        });
+                        let batch = state.finish();
                         return Some((batch.into_iter().map(Ok).collect::<Vec<_>>(), (src, state, finished)));
                     };
                     let ev = match item {
@@ -152,9 +250,7 @@ impl Provider for OpenAi {
                     };
                     if ev.data.trim() == "[DONE]" {
                         finished = true;
-                        let mut batch = flush_calls(&mut state.0);
-                        let reason = if state.1.is_empty() { "stop".to_string() } else { state.1.clone() };
-                        batch.push(LlmEvent::Done { stop_reason: reason });
+                        let batch = state.finish();
                         return Some((batch.into_iter().map(Ok).collect(), (src, state, finished)));
                     }
                     let v: Value = match serde_json::from_str(&ev.data) {
@@ -178,9 +274,8 @@ impl Provider for OpenAi {
                     if let Some(choice) = v.get("choices").and_then(Value::as_array).and_then(|c| c.first()) {
                         if let Some(delta) = choice.get("delta") {
                             if let Some(t) = delta.get("content").and_then(Value::as_str) {
-                                if !t.is_empty() {
-                                    batch.push(LlmEvent::TextDelta(t.to_string()));
-                                }
+                                // Inline <think> blocks become reasoning.
+                                batch.extend(state.think.feed(t).into_iter().map(piece_event));
                             }
                             for key in ["reasoning_content", "reasoning"] {
                                 if let Some(t) = delta.get(key).and_then(Value::as_str) {
@@ -191,31 +286,19 @@ impl Provider for OpenAi {
                             }
                             if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
                                 for c in calls {
-                                    let idx = c.get("index").and_then(Value::as_u64).unwrap_or(0);
-                                    let slot = state.0.entry(idx).or_default();
-                                    if let Some(id) = c.get("id").and_then(Value::as_str) {
-                                        slot.id = id.to_string();
-                                    }
-                                    if let Some(f) = c.get("function") {
-                                        if let Some(n) = f.get("name").and_then(Value::as_str) {
-                                            slot.name.push_str(n);
-                                        }
-                                        if let Some(a) = f.get("arguments").and_then(Value::as_str) {
-                                            slot.args.push_str(a);
-                                        }
-                                    }
+                                    state.tool_delta(c);
                                 }
                             }
                         }
                         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
-                            state.1 = match reason {
+                            state.stop = match reason {
                                 "tool_calls" | "function_call" => "tool_use".into(),
                                 "length" => "length".into(),
                                 "content_filter" => "refusal".into(),
                                 _ => "stop".into(),
                             };
-                            if state.1 == "tool_use" || !state.0.is_empty() {
-                                batch.extend(flush_calls(&mut state.0));
+                            if state.stop == "tool_use" || !state.calls.is_empty() {
+                                batch.extend(flush_calls(&mut state.calls));
                             }
                         }
                     }
@@ -231,19 +314,13 @@ impl Provider for OpenAi {
     }
 }
 
-fn flush_calls(calls: &mut BTreeMap<u64, PendingCall>) -> Vec<LlmEvent> {
-    let drained: Vec<PendingCall> = std::mem::take(calls).into_values().collect();
-    drained
+fn flush_calls(calls: &mut Vec<PendingCall>) -> Vec<LlmEvent> {
+    std::mem::take(calls)
         .into_iter()
         .filter(|c| !c.name.is_empty())
         .map(|c| {
-            let args = if c.args.trim().is_empty() {
-                json!({})
-            } else {
-                serde_json::from_str(&c.args).unwrap_or_else(|_| json!({"_raw": c.args}))
-            };
             let id = if c.id.is_empty() { format!("call_{}", crate::db::new_id()) } else { c.id };
-            LlmEvent::ToolCall { id, name: c.name, args }
+            LlmEvent::ToolCall { id, name: c.name, args: repair::parse_args(&c.args) }
         })
         .collect()
 }
@@ -259,6 +336,7 @@ pub fn short_error(text: &str) -> String {
     }
     t.chars().take(400).collect()
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -301,16 +379,77 @@ mod tests {
         assert_eq!(body["max_tokens"], 100);
     }
 
+
+    fn call(state: &mut StreamState, delta: Value) {
+        state.tool_delta(&delta);
+    }
+
+    fn flushed(state: &mut StreamState) -> Vec<(String, String, Value)> {
+        flush_calls(&mut state.calls)
+            .into_iter()
+            .filter_map(|e| match e {
+                LlmEvent::ToolCall { id, name, args } => Some((id, name, args)),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn flushes_calls_with_invalid_json_as_raw() {
-        let mut m = BTreeMap::new();
-        m.insert(0, PendingCall { id: "a".into(), name: "f".into(), args: "{bad".into() });
-        let evs = flush_calls(&mut m);
+        let mut calls = vec![PendingCall { index: 0, id: "a".into(), name: "f".into(), args: "{bad".into() }];
+        let evs = flush_calls(&mut calls);
         match &evs[0] {
             LlmEvent::ToolCall { args, .. } => assert_eq!(args["_raw"], "{bad"),
             _ => panic!(),
         }
-        assert!(m.is_empty());
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn tool_call_deltas_from_loose_servers_are_assembled() {
+        let mut st = StreamState::default();
+        // Streamed in pieces, with trailing damage the repair fixes.
+        call(&mut st, json!({"index": 0, "id": "a", "function": {"name": "f", "arguments": "{\"x\": "}}));
+        call(&mut st, json!({"index": 0, "function": {"arguments": "1,"}}));
+        // The whole name again in a later chunk, arguments as an object, a numeric id.
+        call(&mut st, json!({"index": 1, "id": 7, "function": {"name": "g", "arguments": {"y": 2}}}));
+        call(&mut st, json!({"index": 1, "function": {"name": "g"}}));
+        // Ollama: a second call at index 0 with its own id.
+        call(&mut st, json!({"index": 0, "id": "b", "function": {"name": "h", "arguments": "{}"}}));
+        let calls = flushed(&mut st);
+        assert_eq!(
+            calls,
+            vec![
+                ("a".to_string(), "f".to_string(), json!({"x": 1})),
+                ("7".to_string(), "g".to_string(), json!({"y": 2})),
+                ("b".to_string(), "h".to_string(), json!({})),
+            ]
+        );
+    }
+
+    #[test]
+    fn inline_think_blocks_become_reasoning() {
+        let mut st = StreamState::default();
+        let mut evs: Vec<LlmEvent> = Vec::new();
+        for chunk in ["<think>plan", "</think>", "Hi"] {
+            evs.extend(st.think.feed(chunk).into_iter().map(piece_event));
+        }
+        evs.extend(st.finish());
+        assert_eq!(
+            evs,
+            vec![
+                LlmEvent::ThinkingDelta("plan".into()),
+                LlmEvent::TextDelta("Hi".into()),
+                LlmEvent::Done { stop_reason: "stop".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_refused_tool_choice_is_recognized() {
+        let vllm = r#""auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set"#;
+        assert!(rejects_tool_choice(vllm));
+        assert!(!rejects_tool_choice(r#"{"error": {"message": "model not found"}}"#));
     }
 
     #[test]

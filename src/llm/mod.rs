@@ -4,7 +4,9 @@
 
 pub mod anthropic;
 pub mod openai;
+pub mod repair;
 pub mod sse;
+pub mod think;
 
 use std::pin::Pin;
 

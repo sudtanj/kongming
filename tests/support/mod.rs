@@ -187,11 +187,17 @@ impl HranaMock {
 #[derive(Debug, Clone)]
 pub enum ScriptedReply {
     Text(String),
+    /// Text cut off at the output limit (`finish_reason: length`).
+    Cut(String),
     ToolCalls(Vec<(String, Value)>),
 }
 
 pub fn text(s: &str) -> ScriptedReply {
     ScriptedReply::Text(s.to_string())
+}
+
+pub fn cut(s: &str) -> ScriptedReply {
+    ScriptedReply::Cut(s.to_string())
 }
 
 pub fn tool_call(name: &str, args: Value) -> ScriptedReply {
@@ -227,14 +233,18 @@ fn sse_line(v: &Value) -> String {
 fn sse_body(reply: &ScriptedReply) -> String {
     let mut out = String::new();
     let finish = match reply {
-        ScriptedReply::Text(t) => {
+        ScriptedReply::Text(t) | ScriptedReply::Cut(t) => {
             for piece in split_chars(t, 3) {
                 out.push_str(&sse_line(&json!({
                     "id": "chatcmpl-test", "object": "chat.completion.chunk",
                     "choices": [{"index": 0, "delta": {"role": "assistant", "content": piece}, "finish_reason": null}]
                 })));
             }
-            "stop"
+            if matches!(reply, ScriptedReply::Cut(_)) {
+                "length"
+            } else {
+                "stop"
+            }
         }
         ScriptedReply::ToolCalls(calls) => {
             for (i, (name, args)) in calls.iter().enumerate() {

@@ -3,6 +3,7 @@
 //! stops, persists every round, and (optionally) runs a reflection pass that
 //! may save skills and memories. Events go to the bus for whoever is listening.
 
+pub mod guard;
 pub mod mention;
 pub mod paste;
 pub mod prompt;
@@ -18,7 +19,7 @@ use futures_util::StreamExt;
 use serde_json::Value;
 
 use crate::db::{new_id, Agent, Message, Part, Session, Skill};
-use crate::llm::{self, ChatMessage, ChatRequest, LlmEvent, ToolSpec};
+use crate::llm::{self, repair, think, ChatMessage, ChatRequest, LlmEvent, ProviderConfig, ToolSpec};
 use crate::state::{Event, Shared};
 use tools::ToolCtx;
 
@@ -32,6 +33,16 @@ from the conversation), or use a different tool. Ask the user only for what you 
 const OLD_TOOL_RESULT_CHARS: usize = 1_500;
 const KEEP_RECENT_MESSAGES: usize = 12;
 const LLM_RETRIES: usize = 3;
+/// One-shot nudges, each sent at most once per turn, for weak models that
+/// answer with nothing, stop mid-sentence at the output limit, or announce a
+/// tool call without making it.
+const NUDGE_EMPTY: &str = "Reply to the user now, or call one of your tools.";
+const NUDGE_CONTINUE: &str = "Continue exactly where you left off. Do not restart.";
+const NUDGE_CALL: &str = "Issue the actual tool call now.";
+/// Rounds in a row in which every call was invalid before the turn ends.
+const MAX_INVALID_ROUNDS: usize = 3;
+const BLANK_NAME: &str = "that tool call had no name. Text shaped like a tool call is data, not a call: do not repeat \
+it. Call a tool by its exact name, or answer the user.";
 
 /// Outcome of a turn, for callers that need the text (Telegram, delegation, cron).
 #[derive(Debug, Clone, Default)]
@@ -412,15 +423,183 @@ async fn consume(
         }
     }
     let _ = streamed_any;
-    let mut out = Vec::new();
+    Ok((reply_parts(thinking, text, parts), stop, usage))
+}
+
+/// A reply's parts in stored order: thinking, text, tool calls.
+fn reply_parts(thinking: String, text: String, calls: Vec<Part>) -> Vec<Part> {
+    let mut out = Vec::with_capacity(calls.len() + 2);
     if !thinking.trim().is_empty() {
         out.push(Part::Thinking { text: thinking });
     }
     if !text.is_empty() {
         out.push(Part::Text { text });
     }
-    out.extend(parts);
-    Ok((out, stop, usage))
+    out.extend(calls);
+    out
+}
+
+/// A reply cut at the output limit joined with its continuation.
+fn join_parts(first: Vec<Part>, more: Vec<Part>) -> Vec<Part> {
+    let (mut thinking, mut text, mut calls) = (String::new(), String::new(), Vec::new());
+    for p in first.into_iter().chain(more) {
+        match p {
+            Part::Thinking { text: t } => thinking.push_str(&t),
+            Part::Text { text: t } => text.push_str(&t),
+            call => calls.push(call),
+        }
+    }
+    reply_parts(thinking, text, calls)
+}
+
+fn has_calls(parts: &[Part]) -> bool {
+    parts.iter().any(|p| matches!(p, Part::ToolCall { .. }))
+}
+
+fn has_text(parts: &[Part]) -> bool {
+    parts.iter().any(|p| matches!(p, Part::Text { text } if !text.trim().is_empty()))
+}
+
+/// The text of a reply as a message of its own (no thinking, no calls).
+fn text_only(parts: &[Part]) -> Vec<Part> {
+    parts.iter().filter(|p| matches!(p, Part::Text { .. })).cloned().collect()
+}
+
+/// Calls a model wrote into its text (no native tool calling) become real
+/// calls, and their spans leave the text that is shown and stored.
+fn take_text_calls(parts: &mut Vec<Part>, tools: &[ToolSpec], counter: &mut usize) {
+    let text = parts.iter().find_map(|p| match p {
+        Part::Text { text } => Some(text.as_str()),
+        _ => None,
+    });
+    let Some((rest, calls)) = text.and_then(|t| repair::extract_text_calls(t, tools)) else { return };
+    parts.retain(|p| !matches!(p, Part::Text { .. }));
+    if !rest.is_empty() {
+        parts.push(Part::Text { text: rest });
+    }
+    for (name, args) in calls {
+        *counter += 1;
+        let id = format!("call_text_{counter}_{}", &new_id()[..8]);
+        parts.push(Part::ToolCall { id, name, args });
+    }
+}
+
+/// Near-miss tool names are mapped to the offered tool and argument values
+/// brought to the schema's types, before the calls are stored and run.
+fn repair_calls(parts: &mut [Part], tools: &[ToolSpec]) {
+    for p in parts {
+        if let Part::ToolCall { name, args, .. } = p {
+            if let Some(spec) = repair::resolve_tool_name(name, tools) {
+                if spec.name != *name {
+                    tracing::info!(from = %name, to = %spec.name, "repaired a tool name");
+                    *name = spec.name.clone();
+                }
+                repair::coerce_args(spec, args);
+            }
+        }
+    }
+}
+
+/// History with tool calls and results written out as text, for a request
+/// that offers no tools (some APIs refuse tool blocks without definitions).
+fn flatten_tools(chat: &[ChatMessage]) -> Vec<ChatMessage> {
+    let mut out = Vec::with_capacity(chat.len());
+    for m in chat {
+        let mut lines = Vec::new();
+        for p in &m.parts {
+            match p {
+                Part::Text { text } => lines.push(text.clone()),
+                Part::ToolCall { name, args, .. } => {
+                    lines.push(format!("[tool call] {name} {}", crate::mcp::truncate(&args.to_string(), 300)))
+                }
+                Part::ToolResult { name, content, .. } => {
+                    lines.push(format!("[tool result {name}] {}", crate::mcp::truncate(content, 1500)))
+                }
+                Part::Thinking { .. } => {}
+            }
+        }
+        let role = if m.role == "tool" { "user" } else { m.role.as_str() };
+        out.push(ChatMessage::text(role, lines.join("\n")));
+    }
+    out
+}
+
+/// The request for one model round of a turn.
+fn chat_request(plan: &TurnPlan, pcfg: &ProviderConfig, messages: Vec<ChatMessage>) -> ChatRequest {
+    ChatRequest {
+        model: plan.model.clone(),
+        system: plan.system.clone(),
+        messages,
+        tools: plan.tools.clone(),
+        max_tokens: pcfg.max_tokens.unwrap_or(8192),
+        temperature: pcfg.temperature,
+        effort: pcfg.effort.clone(),
+    }
+}
+
+async fn record_usage(state: &Shared, session_id: &str, plan: &TurnPlan, usage: (i64, i64)) {
+    if usage.0 > 0 || usage.1 > 0 {
+        let _ = state.db.record_usage(Some(session_id), Some(&plan.agent.id), &plan.model, usage.0, usage.1).await;
+    }
+}
+
+/// Out of steps: one last request, without tools, for a summary of what was
+/// done and what is left. `None` when it fails or comes back empty.
+async fn wrap_up(
+    state: &Shared,
+    session_id: &str,
+    turn_id: &str,
+    plan: &TurnPlan,
+    req: ChatRequest,
+    cancel: &AtomicBool,
+) -> Option<String> {
+    let (parts, _, usage) = match model_round(state, session_id, turn_id, req, cancel).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(session = %session_id, "the closing summary failed: {e:#}");
+            return None;
+        }
+    };
+    record_usage(state, session_id, plan, usage).await;
+    let text: String = parts
+        .iter()
+        .filter_map(|p| match p {
+            Part::Text { text } => Some(think::strip(text)),
+            _ => None,
+        })
+        .collect();
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// Store a closing message of the agent's own and show it.
+async fn say(state: &Shared, session_id: &str, agent_id: &str, text: String) -> Result<String> {
+    let m = state
+        .db
+        .append_message(session_id, "assistant", &[Part::Text { text: text.clone() }], Some(agent_id))
+        .await?;
+    state.emit(Event::Message { session_id: session_id.into(), message: m });
+    Ok(text)
+}
+
+fn error_result(id: &str, name: &str, content: String) -> Part {
+    Part::ToolResult { id: id.to_string(), name: name.to_string(), content, is_error: true }
+}
+
+/// Why a call cannot run as sent, if it cannot: no name, a tool that was not
+/// offered, or arguments that do not fit the tool.
+fn invalid_call(name: &str, args: &Value, tools: &[ToolSpec]) -> Option<String> {
+    if name.trim().is_empty() {
+        return Some(BLANK_NAME.into());
+    }
+    match tools.iter().find(|t| t.name == name) {
+        Some(spec) => check_args(Some(spec), args),
+        None => {
+            let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+            let names = crate::mcp::truncate(&names.join(", "), 1500);
+            Some(format!("unknown tool {name}: use one of the tools you were given: {names}"))
+        }
+    }
 }
 
 /// Execute one tool call (built-in or MCP) and return the result part.
@@ -467,7 +646,8 @@ pub fn check_args(spec: Option<&ToolSpec>, args: &Value) -> Option<String> {
     };
     let strict = schema.get("additionalProperties") == Some(&Value::Bool(false));
     let all_unknown = !given.is_empty() && unknown.len() == given.len();
-    if missing.is_empty() && (unknown.is_empty() || (!strict && !all_unknown)) {
+    let enums = args.as_object().map(|a| repair::enum_problems(spec, a)).unwrap_or_default();
+    if missing.is_empty() && enums.is_empty() && (unknown.is_empty() || (!strict && !all_unknown)) {
         return None;
     }
     let mut msg = format!("invalid arguments for {}", spec.name);
@@ -476,6 +656,10 @@ pub fn check_args(spec: Option<&ToolSpec>, args: &Value) -> Option<String> {
     }
     if !unknown.is_empty() {
         msg.push_str(&format!("; unknown: {}", unknown.join(", ")));
+    }
+    for problem in &enums {
+        msg.push_str("; ");
+        msg.push_str(problem);
     }
     if let Some(other) = args.get("name").and_then(Value::as_str) {
         if ["name", "parameters", "arguments"].iter().any(|k| unknown.contains(k)) {
@@ -582,7 +766,11 @@ async fn run_turn_inner(
     let mut stop_reason = String::from("stop");
     let mut error: Option<String> = None;
     let mut used_tools = false;
-    let mut retried_empty = false;
+    let (mut nudged_empty, mut nudged_call, mut continued) = (false, false, false);
+    // Messages for the next request only (a nudge), not part of the history.
+    let mut extra: Vec<ChatMessage> = Vec::new();
+    let mut guard = guard::LoopGuard::default();
+    let (mut invalid_rounds, mut text_calls) = (0usize, 0usize);
 
     // The step limit is a checkpoint, not the end: a long task carries on by
     // itself for `auto_continue` more blocks unless it is going in circles.
@@ -596,16 +784,10 @@ async fn run_turn_inner(
             stop_reason = "cancelled".into();
             break;
         }
-        let req = ChatRequest {
-            model: plan.model.clone(),
-            system: plan.system.clone(),
-            messages: chat.clone(),
-            tools: plan.tools.clone(),
-            max_tokens: pcfg.max_tokens.unwrap_or(8192),
-            temperature: pcfg.temperature,
-            effort: pcfg.effort.clone(),
-        };
-        let (parts, stop, usage) = match model_round(state, &session.id, &turn_id, req, cancel).await {
+        let mut messages = chat.clone();
+        messages.append(&mut extra);
+        let req = chat_request(&plan, &pcfg, messages);
+        let (mut parts, mut stop, usage) = match model_round(state, &session.id, &turn_id, req, cancel).await {
             Ok(r) => r,
             Err(e) => {
                 let msg = format!("{e:#}");
@@ -629,10 +811,28 @@ async fn run_turn_inner(
                 break;
             }
         };
-        if usage.0 > 0 || usage.1 > 0 {
-            let _ = state.db.record_usage(Some(&session.id), Some(&plan.agent.id), &plan.model, usage.0, usage.1).await;
-        }
+        record_usage(state, &session.id, &plan, usage).await;
         let used_tokens = usize::try_from(usage.0 + usage.1).unwrap_or(0);
+        // Cut off at the output limit: ask once for the rest and join the two.
+        if stop == "length" && !continued && !has_calls(&parts) && has_text(&parts) {
+            continued = true;
+            let mut messages = chat.clone();
+            messages.push(ChatMessage { role: "assistant".into(), parts: text_only(&parts) });
+            messages.push(ChatMessage::text("user", NUDGE_CONTINUE));
+            let req = chat_request(&plan, &pcfg, messages);
+            match model_round(state, &session.id, &turn_id, req, cancel).await {
+                Ok((more, more_stop, more_usage)) => {
+                    record_usage(state, &session.id, &plan, more_usage).await;
+                    parts = join_parts(parts, more);
+                    stop = more_stop;
+                }
+                Err(e) => tracing::warn!(session = %session.id, "continuing a cut-off reply failed: {e:#}"),
+            }
+        }
+        if !has_calls(&parts) {
+            take_text_calls(&mut parts, &plan.tools, &mut text_calls);
+        }
+        repair_calls(&mut parts, &plan.tools);
         let calls = parts
             .iter()
             .filter_map(|p| match p {
@@ -640,12 +840,12 @@ async fn run_turn_inner(
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let has_text = parts.iter().any(|p| matches!(p, Part::Text { text } if !text.trim().is_empty()));
-        if !has_text && calls.is_empty() {
-            // No answer (only thinking, or nothing at all): ask once more, then
-            // say so instead of ending the turn in silence.
-            if !retried_empty {
-                retried_empty = true;
+        if !has_text(&parts) && calls.is_empty() {
+            // No answer (only thinking, or nothing at all): ask once more with
+            // a nudge, then say so instead of ending the turn in silence.
+            if !nudged_empty {
+                nudged_empty = true;
+                extra.push(ChatMessage::text("user", NUDGE_EMPTY));
                 continue;
             }
             stop_reason = "error".into();
@@ -655,6 +855,13 @@ async fn run_turn_inner(
                 if used_tools { " after the tool results" } else { "" }
             ));
             break;
+        }
+        // It said it was calling a tool but sent no call: ask once for the call itself.
+        if calls.is_empty() && stop == "tool_use" && !nudged_call && !plan.tools.is_empty() {
+            nudged_call = true;
+            extra.push(ChatMessage { role: "assistant".into(), parts: text_only(&parts) });
+            extra.push(ChatMessage::text("user", NUDGE_CALL));
+            continue;
         }
         let assistant_msg = state.db.append_message(&session.id, "assistant", &parts, Some(&plan.agent.id)).await?;
         state.emit(Event::Message { session_id: session.id.clone(), message: assistant_msg });
@@ -682,6 +889,7 @@ async fn run_turn_inner(
             can_delegate: plan.can_delegate,
         };
         let mut results = Vec::with_capacity(calls.len());
+        let mut invalid = 0usize;
         for (id, name, args) in &calls {
             block_calls += 1;
             if !seen.insert(format!("{name} {args}")) {
@@ -694,31 +902,23 @@ async fn run_turn_inner(
                 name: name.clone(),
                 args: args.clone(),
             });
-            let part = if cancel.load(Ordering::Relaxed) {
-                Part::ToolResult {
-                    id: id.clone(),
-                    name: name.clone(),
-                    content: "cancelled by user".into(),
-                    is_error: true,
-                }
-            } else if !plan.tools.iter().any(|t| t.name == *name) {
-                Part::ToolResult {
-                    id: id.clone(),
-                    name: name.clone(),
-                    content: format!("error: unknown tool {name}: use one of the tools you were given"),
-                    is_error: true,
-                }
-            } else if let Some(problem) = check_args(plan.tools.iter().find(|t| t.name == *name), args) {
-                Part::ToolResult {
-                    id: id.clone(),
-                    name: name.clone(),
-                    content: format!("error: {problem}"),
-                    is_error: true,
-                }
-            } else {
-                execute_tool(&ctx, id, name, args).await
+            let cancelled = cancel.load(Ordering::Relaxed);
+            let problem = invalid_call(name, args, &plan.tools);
+            let blocked = guard.blocked(name, args);
+            invalid += usize::from(problem.is_some());
+            let checked = !cancelled && blocked.is_none();
+            let mut part = match (problem, blocked) {
+                _ if cancelled => error_result(id, name, "cancelled by user".into()),
+                (Some(problem), _) => error_result(id, name, format!("error: {problem}")),
+                (None, Some(note)) => error_result(id, name, note),
+                (None, None) => execute_tool(&ctx, id, name, args).await,
             };
-            if let Part::ToolResult { content, is_error, .. } = &part {
+            if let Part::ToolResult { content, is_error, .. } = &mut part {
+                // The guardrail sees every outcome and may add a note for the model.
+                let note = if checked { guard.record(name, args, content, *is_error) } else { None };
+                if let Some(note) = note {
+                    content.push_str(&format!("\n\n[kongming] {note}"));
+                }
                 state.emit(Event::ToolResult {
                     session_id: session.id.clone(),
                     turn_id: turn_id.clone(),
@@ -729,6 +929,14 @@ async fn run_turn_inner(
                 });
             }
             results.push(part);
+        }
+        // Rounds in which every call was malformed (unknown tool, bad arguments).
+        invalid_rounds = if invalid == calls.len() { invalid_rounds + 1 } else { 0 };
+        let left = limit - iteration - 1;
+        if left == 2 {
+            if let Some(Part::ToolResult { content, .. }) = results.last_mut() {
+                content.push_str(&format!("\n\n({left} steps left: wrap up)"));
+            }
         }
         // A report hired this turn can take work right away.
         let hired = results
@@ -755,6 +963,15 @@ async fn run_turn_inner(
                 shorten_tool_results(&mut chat[..fresh]);
             }
         }
+        if invalid_rounds >= MAX_INVALID_ROUNDS {
+            stop_reason = "invalid_tool_calls".into();
+            let note = format!(
+                "I stopped: my last {invalid_rounds} rounds of tool calls were all invalid (unknown tools or wrong \
+arguments). Tell me how to proceed, or pick a stronger model in Settings → Models."
+            );
+            final_text = say(state, &session.id, &plan.agent.id, note).await?;
+            break;
+        }
         let step = iteration + 1;
         if step % block != 0 {
             continue;
@@ -775,16 +992,20 @@ async fn run_turn_inner(
 or to continue."
             )
         } else {
-            format!(
+            // Out of steps: a last request without tools sums up where things stand.
+            let ask = format!(
+                "[kongming] You have used all {step} steps of this turn and cannot call tools any more. Tell the user \
+briefly what you did, what you found, and what is left to do."
+            );
+            let mut messages = flatten_tools(&chat);
+            messages.push(ChatMessage::text("user", ask));
+            let req = ChatRequest { tools: vec![], ..chat_request(&plan, &pcfg, messages) };
+            let fallback = format!(
                 "I used all {step} steps allowed for one turn. Tell me to continue and I will pick up where I stopped."
-            )
+            );
+            wrap_up(state, &session.id, &turn_id, &plan, req, cancel).await.unwrap_or(fallback)
         };
-        let m = state
-            .db
-            .append_message(&session.id, "assistant", &[Part::Text { text: note.clone() }], Some(&plan.agent.id))
-            .await?;
-        state.emit(Event::Message { session_id: session.id.clone(), message: m });
-        final_text = note;
+        final_text = say(state, &session.id, &plan.agent.id, note).await?;
         break;
     }
 
@@ -1209,6 +1430,60 @@ mod tests {
 
         let raw = serde_json::json!({"_raw": "{bad"});
         assert!(check_args(None, &raw).expect("rejected").contains("not valid JSON"));
+    }
+
+    #[test]
+    fn invalid_calls_are_explained() {
+        let mode = serde_json::json!({"type": "string", "enum": ["a", "b"]});
+        let params = serde_json::json!({"type": "object", "properties": {"mode": mode}});
+        let tools = vec![ToolSpec { name: "f".into(), description: String::new(), parameters: params }];
+        let args = serde_json::json!({});
+        assert!(invalid_call(" ", &args, &tools).expect("blank").contains("data, not a call"));
+        let unknown = invalid_call("g", &args, &tools).expect("unknown");
+        assert_eq!(unknown, "unknown tool g: use one of the tools you were given: f");
+        let bad = invalid_call("f", &serde_json::json!({"mode": "c"}), &tools).expect("bad enum");
+        assert!(bad.contains("mode must be one of: a, b"), "{bad}");
+        assert_eq!(invalid_call("f", &serde_json::json!({"mode": "a"}), &tools), None);
+    }
+
+    #[test]
+    fn text_calls_and_cut_replies_become_one_reply() {
+        let first = vec![Part::Thinking { text: "a".into() }, Part::Text { text: "Hello wor".into() }];
+        let joined = join_parts(first, vec![Part::Text { text: "ld".into() }]);
+        let want = vec![Part::Thinking { text: "a".into() }, Part::Text { text: "Hello world".into() }];
+        assert_eq!(joined, want);
+
+        let tools = tools::builtin_specs(&lead(), false, None);
+        let text = "On it.\n```json\n{\"name\": \"current_time\", \"arguments\": {}}\n```";
+        let mut parts = vec![Part::Text { text: text.into() }];
+        let mut n = 0;
+        take_text_calls(&mut parts, &tools, &mut n);
+        assert_eq!(n, 1);
+        assert_eq!(parts[0], Part::Text { text: "On it.".into() });
+        let Part::ToolCall { id, name, .. } = &parts[1] else { panic!("not a call: {parts:?}") };
+        assert_eq!(name, "current_time");
+        assert!(id.starts_with("call_text_1_"), "{id}");
+    }
+
+    fn lead() -> Agent {
+        Agent {
+            id: "a".into(),
+            handle: "kongming".into(),
+            name: "Kongming".into(),
+            role: String::new(),
+            description: String::new(),
+            system_prompt: String::new(),
+            model: None,
+            provider: None,
+            manager_id: None,
+            tools: None,
+            mcp_servers: None,
+            pinned_skills: vec![],
+            self_improve: true,
+            is_default: true,
+            created_at: 0,
+            updated_at: 0,
+        }
     }
 
     fn session(summary_upto: i64) -> Session {

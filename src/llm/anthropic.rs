@@ -229,12 +229,7 @@ impl Provider for Anthropic {
                         "content_block_stop" => {
                             let idx = v.get("index").and_then(Value::as_u64).unwrap_or(0);
                             if let Some((id, name, raw)) = st.calls.remove(&idx) {
-                                let args = if raw.trim().is_empty() {
-                                    json!({})
-                                } else {
-                                    serde_json::from_str(&raw).unwrap_or_else(|_| json!({"_raw": raw}))
-                                };
-                                batch.push(LlmEvent::ToolCall { id, name, args });
+                                batch.push(LlmEvent::ToolCall { id, name, args: super::repair::parse_args(&raw) });
                             }
                         }
                         "message_delta" => {
