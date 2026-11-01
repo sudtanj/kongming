@@ -32,9 +32,8 @@ async fn one_model_round_per_step_and_the_delegate_steps_too() {
     let sid = app.create_session().await;
     let session = app.state.db.session(&sid).await.unwrap().expect("session");
 
-    let ts = agent::begin_turn(&app.state, session, "please find x".into(), TurnOptions::default())
-        .await
-        .expect("begin");
+    let ts =
+        agent::begin_turn(&app.state, session, "please find x".into(), TurnOptions::default()).await.expect("begin");
     assert_eq!(app.llm.request_count(), 0, "beginning a turn calls no model");
     let stored = serde_json::to_string(&ts).unwrap();
     assert!(!stored.contains("\"apiKey\""), "the provider key is not kept in the turn state");
@@ -80,10 +79,7 @@ async fn tick_claims_a_due_cron_job_whose_turn_runs_in_steps() {
     let next = job["nextRunAt"].as_i64().expect("next run");
 
     let now = kongming::db::now_ms();
-    assert!(
-        !background::tick(&app.state, now).await.iter().any(|d| matches!(d, Due::Cron { .. })),
-        "not due yet"
-    );
+    assert!(!background::tick(&app.state, now).await.iter().any(|d| matches!(d, Due::Cron { .. })), "not due yet");
     let due = background::tick(&app.state, next + 1000).await;
     let job = due
         .into_iter()
