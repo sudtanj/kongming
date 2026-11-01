@@ -31,7 +31,6 @@ impl OpenAi {
         }
     }
 
-
     /// Convert neutral messages into the OpenAI shape. Tool results become
     /// `role: tool` messages; assistant tool calls carry `tool_calls`.
     pub fn messages(req: &ChatRequest) -> Vec<Value> {
@@ -337,7 +336,6 @@ pub fn short_error(text: &str) -> String {
     t.chars().take(400).collect()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,7 +376,6 @@ mod tests {
         assert_eq!(body["tools"][0]["function"]["name"], "f");
         assert_eq!(body["max_tokens"], 100);
     }
-
 
     fn call(state: &mut StreamState, delta: Value) {
         state.tool_delta(&delta);

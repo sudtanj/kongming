@@ -574,10 +574,8 @@ async fn wrap_up(
 
 /// Store a closing message of the agent's own and show it.
 async fn say(state: &Shared, session_id: &str, agent_id: &str, text: String) -> Result<String> {
-    let m = state
-        .db
-        .append_message(session_id, "assistant", &[Part::Text { text: text.clone() }], Some(agent_id))
-        .await?;
+    let m =
+        state.db.append_message(session_id, "assistant", &[Part::Text { text: text.clone() }], Some(agent_id)).await?;
     state.emit(Event::Message { session_id: session_id.into(), message: m });
     Ok(text)
 }
