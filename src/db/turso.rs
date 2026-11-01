@@ -48,7 +48,6 @@ pub fn decode(v: &Value) -> Val {
     }
 }
 
-
 #[derive(Clone)]
 pub struct Turso {
     http: reqwest::Client,

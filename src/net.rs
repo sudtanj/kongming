@@ -14,8 +14,8 @@ use anyhow::{anyhow, bail, Result};
 use base64::Engine;
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
-pub use http::{HeaderMap, Method, StatusCode};
 use http::{header, HeaderName, HeaderValue};
+pub use http::{HeaderMap, Method, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
@@ -158,9 +158,7 @@ impl RequestBuilder {
         for (k, v) in pairs {
             ser.append_pair(k.as_ref(), v.as_ref());
         }
-        self.req
-            .headers
-            .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/x-www-form-urlencoded"));
+        self.req.headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/x-www-form-urlencoded"));
         self.req.body = Some(Bytes::from(ser.finish()));
         self
     }
@@ -276,12 +274,7 @@ mod tests {
             }
             let body = req.body.unwrap_or_default();
             let status = if req.url.ends_with("/missing") { StatusCode::NOT_FOUND } else { StatusCode::OK };
-            Ok(HttpResponse {
-                status,
-                headers,
-                url: req.url,
-                body: futures_util::stream::iter(vec![Ok(body)]).boxed(),
-            })
+            Ok(HttpResponse { status, headers, url: req.url, body: futures_util::stream::iter(vec![Ok(body)]).boxed() })
         }
     }
 

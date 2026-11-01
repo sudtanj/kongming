@@ -328,7 +328,11 @@ mod tests {
 
     #[test]
     fn base_url_strips_v1() {
-        let a = Anthropic::new(crate::net::Client::new(crate::net::Reqwest(reqwest::Client::new())), Some("https://proxy.example/v1/".into()), None);
+        let a = Anthropic::new(
+            crate::net::Client::new(crate::net::Reqwest(reqwest::Client::new())),
+            Some("https://proxy.example/v1/".into()),
+            None,
+        );
         assert_eq!(a.base, "https://proxy.example");
     }
 }

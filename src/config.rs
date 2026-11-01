@@ -7,7 +7,10 @@ use clap::Parser;
 
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "native", derive(Parser))]
-#[cfg_attr(feature = "native", command(name = "kongming", version, about = "kongming: small agentic AI daemon, all state on Turso"))]
+#[cfg_attr(
+    feature = "native",
+    command(name = "kongming", version, about = "kongming: small agentic AI daemon, all state on Turso")
+)]
 pub struct Config {
     /// Address to listen on.
     #[cfg_attr(feature = "native", arg(long, env = "KONGMING_HOST", default_value = "0.0.0.0"))]
@@ -36,7 +39,10 @@ pub struct Config {
     pub public_url: Option<String>,
 
     /// Telegram Bot API base URL (a self-hosted Bot API server, or a mock in tests).
-    #[cfg_attr(feature = "native", arg(long, env = "KONGMING_TELEGRAM_API", default_value = "https://api.telegram.org", hide = true))]
+    #[cfg_attr(
+        feature = "native",
+        arg(long, env = "KONGMING_TELEGRAM_API", default_value = "https://api.telegram.org", hide = true)
+    )]
     pub telegram_api: String,
 
     /// Tokio worker threads. 1 is right for a 1 GB board.
@@ -113,7 +119,12 @@ mod tests {
         assert_eq!(c.port, 18800);
         assert_eq!(c.telegram_api, "https://api.telegram.org");
         assert_eq!(c.workers, 1);
-        let d = Config { turso_url: c.turso_url.clone(), turso_token: c.turso_token.clone(), shell: c.shell.clone(), ..Config::default() };
+        let d = Config {
+            turso_url: c.turso_url.clone(),
+            turso_token: c.turso_token.clone(),
+            shell: c.shell.clone(),
+            ..Config::default()
+        };
         assert_eq!(c, d, "Default must match the command-line defaults");
     }
 }

@@ -212,9 +212,8 @@ impl McpManager {
             let deadline = now_ms() + CALL_TIMEOUT.as_millis() as i64;
             loop {
                 let left = Duration::from_millis((deadline - now_ms()).max(0) as u64);
-                let chunk = crate::platform::timeout(left, stream.next())
-                    .await
-                    .map_err(|_| anyhow!("mcp stream timed out"))?;
+                let chunk =
+                    crate::platform::timeout(left, stream.next()).await.map_err(|_| anyhow!("mcp stream timed out"))?;
                 let Some(chunk) = chunk else { bail!("mcp stream ended without a reply") };
                 let chunk = chunk.context("mcp stream read failed")?;
                 for ev in parser.feed(&chunk) {

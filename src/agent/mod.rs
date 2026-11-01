@@ -843,8 +843,10 @@ async fn model_step(state: &Shared, mut ts: TurnState, cancel: &AtomicBool) -> R
         }
     };
     if usage.0 > 0 || usage.1 > 0 {
-        let _ =
-            state.db.record_usage(Some(&ts.session.id), Some(&ts.plan.agent.id), &ts.plan.model, usage.0, usage.1).await;
+        let _ = state
+            .db
+            .record_usage(Some(&ts.session.id), Some(&ts.plan.agent.id), &ts.plan.model, usage.0, usage.1)
+            .await;
     }
     let used_tokens = usize::try_from(usage.0 + usage.1).unwrap_or(0);
     let calls = parts
@@ -933,7 +935,12 @@ async fn run_calls(state: &Shared, mut ts: TurnState, cancel: &AtomicBool) -> Re
                 is_error: true,
             }
         } else if let Some(problem) = check_args(ts.plan.tools.iter().find(|t| t.name == *name), &args) {
-            Part::ToolResult { id: id.clone(), name: name.clone(), content: format!("error: {problem}"), is_error: true }
+            Part::ToolResult {
+                id: id.clone(),
+                name: name.clone(),
+                content: format!("error: {problem}"),
+                is_error: true,
+            }
         } else {
             let ctx = ToolCtx {
                 state,
@@ -972,9 +979,9 @@ async fn after_round(state: &Shared, mut ts: TurnState, round: ToolRound) -> Res
         results.iter().any(|p| matches!(p, Part::ToolResult { name, is_error: false, .. } if name == "agent_manage"));
     if hired && !ts.plan.can_delegate {
         ts.plan.can_delegate = true;
-        ts.plan.tools.extend(
-            tools::builtin_specs(&ts.plan.agent, true, None).into_iter().filter(|t| t.name == "delegate_task"),
-        );
+        ts.plan
+            .tools
+            .extend(tools::builtin_specs(&ts.plan.agent, true, None).into_iter().filter(|t| t.name == "delegate_task"));
     }
     let tool_msg = state.db.append_message(&ts.session.id, "tool", &results, Some(&ts.plan.agent.id)).await?;
     state.emit(Event::Message { session_id: ts.session.id.clone(), message: tool_msg });
@@ -984,8 +991,16 @@ async fn after_round(state: &Shared, mut ts: TurnState, round: ToolRound) -> Res
     if need >= state.cfg.context_tokens {
         let compacted = ts.rounds_since_compact >= KEEP_RECENT_MESSAGES / 2 && {
             let request = (ts.request_seq, ts.request_text.as_str());
-            compact_chat(state, &mut ts.session, &ts.turn_id, &ts.plan.model, KEEP_RECENT_MESSAGES, request, &mut ts.chat)
-                .await
+            compact_chat(
+                state,
+                &mut ts.session,
+                &ts.turn_id,
+                &ts.plan.model,
+                KEEP_RECENT_MESSAGES,
+                request,
+                &mut ts.chat,
+            )
+            .await
         };
         if compacted {
             ts.rounds_since_compact = 0;
@@ -1068,8 +1083,7 @@ async fn finish(state: &Shared, ts: TurnState) -> Result<Step> {
 /// start the delegate's turn.
 async fn start_delegation(ctx: &ToolCtx<'_>, call_id: &str, args: &Value) -> Result<Delegation> {
     let d = tools::check_delegate(ctx, args).await?;
-    let (task_id, child, text) =
-        open_delegation(ctx.state, ctx.agent, &d.to, ctx.session, &d.task, &d.context).await?;
+    let (task_id, child, text) = open_delegation(ctx.state, ctx.agent, &d.to, ctx.session, &d.task, &d.context).await?;
     let child_id = child.id.clone();
     let opts = TurnOptions { depth: ctx.depth + 1, no_reflect: true, agent_override: Some(d.to.clone()) };
     match begin(ctx.state, child, text, opts, false).await {

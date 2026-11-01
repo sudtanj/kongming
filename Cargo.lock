@@ -796,8 +796,11 @@ dependencies = [
  "bytes",
  "clap",
  "futures-util",
+ "getrandom 0.2.17",
  "hmac",
+ "http",
  "http-body-util",
+ "js-sys",
  "libc",
  "parking_lot",
  "rand 0.8.8",
@@ -817,6 +820,8 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

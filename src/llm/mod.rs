@@ -164,7 +164,10 @@ mod tests {
         let cfg = ProviderConfig { kind: "nope".into(), ..Default::default() };
         assert!(build(&cfg, crate::net::Client::new(crate::net::Reqwest(reqwest::Client::new()))).is_err());
         let cfg = ProviderConfig { kind: "openai".into(), ..Default::default() };
-        assert_eq!(build(&cfg, crate::net::Client::new(crate::net::Reqwest(reqwest::Client::new()))).unwrap().name(), "openai");
+        assert_eq!(
+            build(&cfg, crate::net::Client::new(crate::net::Reqwest(reqwest::Client::new()))).unwrap().name(),
+            "openai"
+        );
     }
 
     #[test]

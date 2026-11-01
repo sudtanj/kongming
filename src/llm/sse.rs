@@ -106,10 +106,7 @@ where
                     Some(Ok(chunk)) => pending.extend(parser.feed(&chunk)),
                     Some(Err(e)) => {
                         done = true;
-                        return Some((
-                            Err(e.context("stream read failed")),
-                            (src, parser, pending, done),
-                        ));
+                        return Some((Err(e.context("stream read failed")), (src, parser, pending, done)));
                     }
                     None => {
                         done = true;
