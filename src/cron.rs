@@ -8,6 +8,7 @@
 #[cfg(feature = "native")]
 use std::time::Duration;
 
+#[cfg(feature = "native")]
 use serde_json::Value;
 
 use crate::agent::{self, TurnOptions};

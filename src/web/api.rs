@@ -128,13 +128,13 @@ pub async fn info(State(state): State<Shared>) -> R {
     let agents = state.db.agents().await?;
     let day = now_ms() - 24 * 3600 * 1000;
     let usage = state.db.usage_since(day).await.unwrap_or_default();
-    let turso_ms = state.db.turso.ping().await.ok();
+    let turso_ms = state.db.sql.ping().await.ok();
     Ok(Json(json!({
         "name": "kongming",
         "version": env!("CARGO_PKG_VERSION"),
         "startedAt": state.started_at,
         "uptimeMs": now_ms() - state.started_at,
-        "turso": {"host": state.db.turso.host(), "pingMs": turso_ms},
+        "turso": {"host": state.db.sql.host(), "pingMs": turso_ms},
         "llm": pcfg.redacted(),
         "telegram": {"enabled": state.telegram_token().await.is_some()},
         "agents": agents.len(),
