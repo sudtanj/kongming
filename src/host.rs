@@ -16,7 +16,7 @@ pub trait Host: Send + Sync + 'static {
         crate::platform::spawn(task);
     }
 
-    /// Every event, in order, as it is emitted (after the broadcast bus).
+    /// Every event, in order, as it is emitted (the broadcast bus gets it too).
     fn emit(&self, _ev: &Event) {}
 
     /// A message from the dashboard should start a turn without waiting for
