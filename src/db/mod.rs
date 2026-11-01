@@ -3,6 +3,8 @@
 //! chat turn costs a handful of round trips, not dozens.
 
 pub mod models;
+pub mod sql;
+#[cfg(feature = "native")]
 pub mod turso;
 
 use std::collections::HashMap;
@@ -13,7 +15,9 @@ use parking_lot::RwLock;
 use serde_json::{json, Value};
 
 pub use models::*;
-pub use turso::{Rows, Stmt, Turso, Val};
+pub use sql::{Exec, Row, Rows, Sql, SqlExecutor, Stmt, Val};
+#[cfg(feature = "native")]
+pub use turso::Turso;
 
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS settings (
@@ -204,13 +208,13 @@ struct Cache {
 
 #[derive(Clone)]
 pub struct Db {
-    pub turso: Turso,
+    pub sql: Sql,
     cache: Arc<RwLock<Cache>>,
 }
 
 impl std::fmt::Debug for Db {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Db").field("host", &self.turso.host()).finish()
+        f.debug_struct("Db").field("host", &self.sql.host()).finish()
     }
 }
 
@@ -226,12 +230,17 @@ fn opt_j<T: serde::Serialize>(v: &Option<T>) -> Val {
 }
 
 impl Db {
-    pub fn new(turso: Turso) -> Db {
-        Db { turso, cache: Arc::new(RwLock::new(Cache::default())) }
+    /// `exec` runs the SQL: `Turso` natively, the Durable Object's SQLite in a Worker.
+    pub fn new(exec: impl SqlExecutor + 'static) -> Db {
+        Db::with_sql(Sql::new(exec))
+    }
+
+    pub fn with_sql(sql: Sql) -> Db {
+        Db { sql, cache: Arc::new(RwLock::new(Cache::default())) }
     }
 
     pub async fn migrate(&self) -> Result<()> {
-        self.turso.sequence(SCHEMA).await?;
+        self.sql.sequence(SCHEMA).await?;
         Ok(())
     }
 
@@ -245,7 +254,7 @@ impl Db {
         if let Some(s) = &self.cache.read().settings {
             return Ok(s.clone());
         }
-        let rows = self.turso.query("SELECT key, value FROM settings", &[]).await?;
+        let rows = self.sql.query("SELECT key, value FROM settings", &[]).await?;
         let map: HashMap<String, Value> = rows.iter().map(|r| (r.str("key"), r.json("value"))).collect();
         self.cache.write().settings = Some(map.clone());
         Ok(map)
@@ -256,7 +265,7 @@ impl Db {
     }
 
     pub async fn set_setting(&self, key: &str, value: &Value) -> Result<()> {
-        self.turso
+        self.sql
             .execute(
                 "INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
                 &[key.into(), j(value), now_ms().into()],
@@ -267,7 +276,7 @@ impl Db {
     }
 
     pub async fn delete_setting(&self, key: &str) -> Result<()> {
-        self.turso.execute("DELETE FROM settings WHERE key = ?", &[key.into()]).await?;
+        self.sql.execute("DELETE FROM settings WHERE key = ?", &[key.into()]).await?;
         self.cache.write().settings = None;
         Ok(())
     }
@@ -278,7 +287,7 @@ impl Db {
         if let Some(a) = &self.cache.read().agents {
             return Ok(a.clone());
         }
-        let rows = self.turso.query("SELECT * FROM agents ORDER BY is_default DESC, created_at", &[]).await?;
+        let rows = self.sql.query("SELECT * FROM agents ORDER BY is_default DESC, created_at", &[]).await?;
         let list: Vec<Agent> = rows.iter().map(|r| Agent::from_row(&r)).collect();
         self.cache.write().agents = Some(list.clone());
         Ok(list)
@@ -304,7 +313,7 @@ impl Db {
     }
 
     pub async fn upsert_agent(&self, a: &Agent) -> Result<()> {
-        self.turso
+        self.sql
             .execute(
                 "INSERT INTO agents(id, handle, name, role, description, system_prompt, model, provider, manager_id, tools_json, mcp_json, skills_json, self_improve, is_default, created_at, updated_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -333,14 +342,14 @@ impl Db {
             )
             .await?;
         if a.is_default {
-            self.turso.execute("UPDATE agents SET is_default = 0 WHERE id != ?", &[a.id.as_str().into()]).await?;
+            self.sql.execute("UPDATE agents SET is_default = 0 WHERE id != ?", &[a.id.as_str().into()]).await?;
         }
         self.cache.write().agents = None;
         Ok(())
     }
 
     pub async fn delete_agent(&self, id: &str) -> Result<()> {
-        self.turso
+        self.sql
             .batch(&[
                 ("DELETE FROM agents WHERE id = ?".into(), vec![id.into()]),
                 ("UPDATE agents SET manager_id = NULL WHERE manager_id = ?".into(), vec![id.into()]),
@@ -354,14 +363,14 @@ impl Db {
 
     pub async fn sessions(&self, limit: i64) -> Result<Vec<Session>> {
         let rows = self
-            .turso
+            .sql
             .query("SELECT * FROM sessions WHERE archived = 0 AND channel != 'delegation' ORDER BY updated_at DESC LIMIT ?", &[limit.into()])
             .await?;
         Ok(rows.iter().map(|r| Session::from_row(&r)).collect())
     }
 
     pub async fn session(&self, id: &str) -> Result<Option<Session>> {
-        let rows = self.turso.query("SELECT * FROM sessions WHERE id = ?", &[id.into()]).await?;
+        let rows = self.sql.query("SELECT * FROM sessions WHERE id = ?", &[id.into()]).await?;
         Ok(rows.first().map(|r| Session::from_row(&r)))
     }
 
@@ -387,7 +396,7 @@ impl Db {
             created_at: now,
             updated_at: now,
         };
-        self.turso
+        self.sql
             .execute(
                 "INSERT INTO sessions(id, title, agent_id, channel, channel_ref, parent_session_id, summary, summary_upto, archived, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, NULL, 0, 0, ?, ?)",
                 &[
@@ -406,7 +415,7 @@ impl Db {
     }
 
     pub async fn update_session_title(&self, id: &str, title: &str) -> Result<()> {
-        self.turso
+        self.sql
             .execute(
                 "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?",
                 &[title.into(), now_ms().into(), id.into()],
@@ -416,7 +425,7 @@ impl Db {
     }
 
     pub async fn set_session_agent(&self, id: &str, agent_id: &str) -> Result<()> {
-        self.turso
+        self.sql
             .execute(
                 "UPDATE sessions SET agent_id = ?, updated_at = ? WHERE id = ?",
                 &[agent_id.into(), now_ms().into(), id.into()],
@@ -426,12 +435,12 @@ impl Db {
     }
 
     pub async fn touch_session(&self, id: &str) -> Result<()> {
-        self.turso.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", &[now_ms().into(), id.into()]).await?;
+        self.sql.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", &[now_ms().into(), id.into()]).await?;
         Ok(())
     }
 
     pub async fn set_session_summary(&self, id: &str, summary: &str, upto: i64) -> Result<()> {
-        self.turso
+        self.sql
             .execute(
                 "UPDATE sessions SET summary = ?, summary_upto = ? WHERE id = ?",
                 &[summary.into(), upto.into(), id.into()],
@@ -441,7 +450,7 @@ impl Db {
     }
 
     pub async fn delete_session(&self, id: &str) -> Result<()> {
-        self.turso
+        self.sql
             .batch(&[
                 ("DELETE FROM messages WHERE session_id = ?".into(), vec![id.into()]),
                 ("DELETE FROM sessions WHERE id = ?".into(), vec![id.into()]),
@@ -451,7 +460,7 @@ impl Db {
     }
 
     pub async fn clear_session(&self, id: &str) -> Result<()> {
-        self.turso
+        self.sql
             .batch(&[
                 ("DELETE FROM messages WHERE session_id = ?".into(), vec![id.into()]),
                 (
@@ -466,7 +475,7 @@ impl Db {
 
     pub async fn messages(&self, session_id: &str, from_seq: i64) -> Result<Vec<Message>> {
         let rows = self
-            .turso
+            .sql
             .query(
                 "SELECT * FROM messages WHERE session_id = ? AND seq >= ? ORDER BY seq",
                 &[session_id.into(), from_seq.into()],
@@ -477,7 +486,7 @@ impl Db {
 
     pub async fn recent_messages(&self, session_id: &str, limit: i64) -> Result<Vec<Message>> {
         let rows = self
-            .turso
+            .sql
             .query(
                 "SELECT * FROM (SELECT * FROM messages WHERE session_id = ? ORDER BY seq DESC LIMIT ?) ORDER BY seq",
                 &[session_id.into(), limit.into()],
@@ -497,7 +506,7 @@ impl Db {
     ) -> Result<Message> {
         let id = new_id();
         let now = now_ms();
-        self.turso
+        self.sql
             .batch(&[
                 (
                     "INSERT INTO messages(id, session_id, seq, role, content, agent_id, created_at)
@@ -516,13 +525,13 @@ impl Db {
                 ("UPDATE sessions SET updated_at = ? WHERE id = ?".into(), vec![now.into(), session_id.into()]),
             ])
             .await?;
-        let rows = self.turso.query("SELECT * FROM messages WHERE id = ?", &[id.as_str().into()]).await?;
+        let rows = self.sql.query("SELECT * FROM messages WHERE id = ?", &[id.as_str().into()]).await?;
         rows.first().map(|r| Message::from_row(&r)).ok_or_else(|| anyhow!("message vanished after insert"))
     }
 
     pub async fn message_count(&self, session_id: &str) -> Result<i64> {
         let rows =
-            self.turso.query("SELECT COUNT(*) AS n FROM messages WHERE session_id = ?", &[session_id.into()]).await?;
+            self.sql.query("SELECT COUNT(*) AS n FROM messages WHERE session_id = ?", &[session_id.into()]).await?;
         Ok(rows.first().map(|r| r.i64("n")).unwrap_or(0))
     }
 
@@ -532,7 +541,7 @@ impl Db {
         if let Some(s) = &self.cache.read().skills {
             return Ok(s.clone());
         }
-        let rows = self.turso.query("SELECT * FROM skills ORDER BY name", &[]).await?;
+        let rows = self.sql.query("SELECT * FROM skills ORDER BY name", &[]).await?;
         let list: Vec<Skill> = rows.iter().map(|r| Skill::from_row(&r)).collect();
         self.cache.write().skills = Some(list.clone());
         Ok(list)
@@ -560,7 +569,7 @@ impl Db {
         match existing {
             Some(old) => {
                 let version = old.version + 1;
-                self.turso
+                self.sql
                     .batch(&[
                         (
                             "INSERT OR REPLACE INTO skill_versions(skill_id, version, description, body, created_at) VALUES (?, ?, ?, ?, ?)".into(),
@@ -574,7 +583,7 @@ impl Db {
                     .await?;
             }
             None => {
-                self.turso
+                self.sql
                     .execute(
                         "INSERT INTO skills(id, name, description, body, tags, version, source, author_agent_id, enabled, uses, last_used_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, 1, 0, NULL, ?, ?)",
                         &[new_id().into(), name.as_str().into(), description.into(), body.into(), j(&tags), source.into(), author.map(str::to_string).into(), now.into(), now.into()],
@@ -587,7 +596,7 @@ impl Db {
     }
 
     pub async fn set_skill_enabled(&self, name: &str, enabled: bool) -> Result<()> {
-        self.turso
+        self.sql
             .execute(
                 "UPDATE skills SET enabled = ?, updated_at = ? WHERE name = ?",
                 &[enabled.into(), now_ms().into(), name.into()],
@@ -599,7 +608,7 @@ impl Db {
 
     pub async fn delete_skill(&self, name: &str) -> Result<()> {
         if let Some(s) = self.skill_by_name(name).await? {
-            self.turso
+            self.sql
                 .batch(&[
                     ("DELETE FROM skill_versions WHERE skill_id = ?".into(), vec![s.id.as_str().into()]),
                     ("DELETE FROM skills WHERE id = ?".into(), vec![s.id.as_str().into()]),
@@ -611,7 +620,7 @@ impl Db {
     }
 
     pub async fn mark_skill_used(&self, name: &str) -> Result<()> {
-        self.turso
+        self.sql
             .execute(
                 "UPDATE skills SET uses = uses + 1, last_used_at = ? WHERE name = ?",
                 &[now_ms().into(), name.into()],
@@ -624,7 +633,7 @@ impl Db {
     pub async fn skill_versions(&self, name: &str) -> Result<Vec<Value>> {
         let Some(s) = self.skill_by_name(name).await? else { return Ok(vec![]) };
         let rows = self
-            .turso
+            .sql
             .query("SELECT version, description, body, created_at FROM skill_versions WHERE skill_id = ? ORDER BY version DESC", &[s.id.as_str().into()])
             .await?;
         Ok(rows
@@ -638,14 +647,14 @@ impl Db {
     pub async fn memories(&self, agent_id: Option<&str>, limit: i64) -> Result<Vec<Memory>> {
         let rows = match agent_id {
             Some(a) => {
-                self.turso
+                self.sql
                     .query(
                         "SELECT * FROM memories WHERE agent_id IS NULL OR agent_id = ? ORDER BY importance DESC, updated_at DESC LIMIT ?",
                         &[a.into(), limit.into()],
                     )
                     .await?
             }
-            None => self.turso.query("SELECT * FROM memories ORDER BY importance DESC, updated_at DESC LIMIT ?", &[limit.into()]).await?,
+            None => self.sql.query("SELECT * FROM memories ORDER BY importance DESC, updated_at DESC LIMIT ?", &[limit.into()]).await?,
         };
         Ok(rows.iter().map(|r| Memory::from_row(&r)).collect())
     }
@@ -687,7 +696,7 @@ impl Db {
             created_at: now,
             updated_at: now,
         };
-        self.turso
+        self.sql
             .execute(
                 "INSERT INTO memories(id, agent_id, kind, content, keywords, importance, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 &[m.id.as_str().into(), m.agent_id.clone().into(), m.kind.as_str().into(), m.content.as_str().into(), j(&m.keywords), m.importance.into(), now.into(), now.into()],
@@ -697,7 +706,7 @@ impl Db {
     }
 
     pub async fn delete_memory(&self, id: &str) -> Result<()> {
-        self.turso.execute("DELETE FROM memories WHERE id = ?", &[id.into()]).await?;
+        self.sql.execute("DELETE FROM memories WHERE id = ?", &[id.into()]).await?;
         Ok(())
     }
 
@@ -707,7 +716,7 @@ impl Db {
         if let Some(m) = &self.cache.read().mcp {
             return Ok(m.clone());
         }
-        let rows = self.turso.query("SELECT * FROM mcp_servers ORDER BY name", &[]).await?;
+        let rows = self.sql.query("SELECT * FROM mcp_servers ORDER BY name", &[]).await?;
         let list: Vec<McpServer> = rows.iter().map(|r| McpServer::from_row(&r)).collect();
         self.cache.write().mcp = Some(list.clone());
         Ok(list)
@@ -718,7 +727,7 @@ impl Db {
     }
 
     pub async fn upsert_mcp_server(&self, s: &McpServer) -> Result<()> {
-        self.turso
+        self.sql
             .execute(
                 "INSERT INTO mcp_servers(id, name, url, transport, auth_type, token, oauth_json, headers_json, enabled, status, last_error, tools_json, created_at, updated_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -756,14 +765,14 @@ impl Db {
     ) -> Result<()> {
         match tools {
             Some(t) => self
-                .turso
+                .sql
                 .execute(
                     "UPDATE mcp_servers SET status = ?, last_error = ?, tools_json = ?, updated_at = ? WHERE id = ?",
                     &[status.into(), error.map(str::to_string).into(), j(t), now_ms().into(), id.into()],
                 )
                 .await?,
             None => {
-                self.turso
+                self.sql
                     .execute(
                         "UPDATE mcp_servers SET status = ?, last_error = ?, updated_at = ? WHERE id = ?",
                         &[status.into(), error.map(str::to_string).into(), now_ms().into(), id.into()],
@@ -776,7 +785,7 @@ impl Db {
     }
 
     pub async fn set_mcp_oauth(&self, id: &str, oauth: &OAuthState) -> Result<()> {
-        self.turso
+        self.sql
             .execute(
                 "UPDATE mcp_servers SET oauth_json = ?, updated_at = ? WHERE id = ?",
                 &[j(oauth), now_ms().into(), id.into()],
@@ -787,7 +796,7 @@ impl Db {
     }
 
     pub async fn delete_mcp_server(&self, id: &str) -> Result<()> {
-        self.turso.execute("DELETE FROM mcp_servers WHERE id = ?", &[id.into()]).await?;
+        self.sql.execute("DELETE FROM mcp_servers WHERE id = ?", &[id.into()]).await?;
         self.cache.write().mcp = None;
         Ok(())
     }
@@ -796,14 +805,14 @@ impl Db {
 
     pub async fn telegram_chat(&self, chat_id: i64) -> Result<Option<(String, String)>> {
         let rows = self
-            .turso
+            .sql
             .query("SELECT session_id, agent_id FROM telegram_chats WHERE chat_id = ?", &[chat_id.into()])
             .await?;
         Ok(rows.first().map(|r| (r.str("session_id"), r.str("agent_id"))))
     }
 
     pub async fn set_telegram_chat(&self, chat_id: i64, session_id: &str, agent_id: &str) -> Result<()> {
-        self.turso
+        self.sql
             .execute(
                 "INSERT INTO telegram_chats(chat_id, session_id, agent_id, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET session_id = excluded.session_id, agent_id = excluded.agent_id, updated_at = excluded.updated_at",
                 &[chat_id.into(), session_id.into(), agent_id.into(), now_ms().into()],
@@ -827,7 +836,7 @@ impl Db {
             created_at: now_ms(),
             finished_at: None,
         };
-        self.turso
+        self.sql
             .execute(
                 "INSERT INTO tasks(id, session_id, from_agent_id, to_agent_id, child_session_id, instruction, status, result, created_at, finished_at) VALUES (?, ?, ?, ?, NULL, ?, 'running', NULL, ?, NULL)",
                 &[t.id.as_str().into(), session_id.into(), from.into(), to.into(), instruction.into(), t.created_at.into()],
@@ -837,7 +846,7 @@ impl Db {
     }
 
     pub async fn finish_task(&self, id: &str, child_session: Option<&str>, status: &str, result: &str) -> Result<()> {
-        self.turso
+        self.sql
             .execute(
                 "UPDATE tasks SET child_session_id = COALESCE(?, child_session_id), status = ?, result = ?, finished_at = ? WHERE id = ?",
                 &[child_session.map(str::to_string).into(), status.into(), result.into(), now_ms().into(), id.into()],
@@ -847,19 +856,19 @@ impl Db {
     }
 
     pub async fn tasks(&self, limit: i64) -> Result<Vec<Task>> {
-        let rows = self.turso.query("SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", &[limit.into()]).await?;
+        let rows = self.sql.query("SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", &[limit.into()]).await?;
         Ok(rows.iter().map(|r| Task::from_row(&r)).collect())
     }
 
     // -------------------------------------------------------------------- cron
 
     pub async fn cron_jobs(&self) -> Result<Vec<CronJob>> {
-        let rows = self.turso.query("SELECT * FROM cron_jobs ORDER BY created_at", &[]).await?;
+        let rows = self.sql.query("SELECT * FROM cron_jobs ORDER BY created_at", &[]).await?;
         Ok(rows.iter().map(|r| CronJob::from_row(&r)).collect())
     }
 
     pub async fn upsert_cron_job(&self, c: &CronJob) -> Result<()> {
-        self.turso
+        self.sql
             .execute(
                 "INSERT INTO cron_jobs(id, name, agent_id, schedule, prompt, enabled, deliver_to, last_run_at, next_run_at, last_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(id) DO UPDATE SET name = excluded.name, agent_id = excluded.agent_id, schedule = excluded.schedule, prompt = excluded.prompt, enabled = excluded.enabled,
@@ -883,7 +892,7 @@ impl Db {
     }
 
     pub async fn mark_cron_run(&self, id: &str, next: Option<i64>, status: &str) -> Result<()> {
-        self.turso
+        self.sql
             .execute(
                 "UPDATE cron_jobs SET last_run_at = ?, next_run_at = ?, last_status = ? WHERE id = ?",
                 &[now_ms().into(), next.into(), status.into(), id.into()],
@@ -893,7 +902,7 @@ impl Db {
     }
 
     pub async fn set_cron_enabled(&self, id: &str, enabled: bool) -> Result<()> {
-        self.turso
+        self.sql
             .execute(
                 "UPDATE cron_jobs SET enabled = ?, next_run_at = CASE WHEN ? THEN next_run_at END WHERE id = ?",
                 &[enabled.into(), enabled.into(), id.into()],
@@ -903,7 +912,7 @@ impl Db {
     }
 
     pub async fn delete_cron_job(&self, id: &str) -> Result<()> {
-        self.turso.execute("DELETE FROM cron_jobs WHERE id = ?", &[id.into()]).await?;
+        self.sql.execute("DELETE FROM cron_jobs WHERE id = ?", &[id.into()]).await?;
         Ok(())
     }
 
@@ -917,7 +926,7 @@ impl Db {
         prompt: i64,
         completion: i64,
     ) -> Result<()> {
-        self.turso
+        self.sql
             .execute(
                 "INSERT INTO usage(ts, session_id, agent_id, model, prompt_tokens, completion_tokens) VALUES (?, ?, ?, ?, ?, ?)",
                 &[now_ms().into(), session_id.map(str::to_string).into(), agent_id.map(str::to_string).into(), model.into(), prompt.into(), completion.into()],
@@ -928,7 +937,7 @@ impl Db {
 
     pub async fn usage_since(&self, since_ms: i64) -> Result<UsageTotals> {
         let rows = self
-            .turso
+            .sql
             .query(
                 "SELECT COALESCE(SUM(prompt_tokens),0) AS p, COALESCE(SUM(completion_tokens),0) AS c, COUNT(*) AS n FROM usage WHERE ts >= ?",
                 &[since_ms.into()],
@@ -950,7 +959,7 @@ impl Db {
         ref_id: Option<&str>,
         note: &str,
     ) -> Result<()> {
-        self.turso
+        self.sql
             .execute(
                 "INSERT INTO improvements(id, agent_id, session_id, kind, ref_id, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 &[new_id().into(), agent_id.map(str::to_string).into(), session_id.map(str::to_string).into(), kind.into(), ref_id.map(str::to_string).into(), note.into(), now_ms().into()],
@@ -961,7 +970,7 @@ impl Db {
 
     pub async fn improvements(&self, limit: i64) -> Result<Vec<Improvement>> {
         let rows =
-            self.turso.query("SELECT * FROM improvements ORDER BY created_at DESC LIMIT ?", &[limit.into()]).await?;
+            self.sql.query("SELECT * FROM improvements ORDER BY created_at DESC LIMIT ?", &[limit.into()]).await?;
         Ok(rows.iter().map(|r| Improvement::from_row(&r)).collect())
     }
 
@@ -984,7 +993,7 @@ impl Db {
             delivered,
             created_at: now_ms(),
         };
-        self.turso
+        self.sql
             .execute(
                 "INSERT INTO notifications(id, agent_id, session_id, topic, text, delivered, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 &[n.id.as_str().into(), n.agent_id.clone().into(), n.session_id.clone().into(), topic.into(), text.into(), delivered.into(), n.created_at.into()],
@@ -996,7 +1005,7 @@ impl Db {
     /// Newest first, created at or after `since_ms`.
     pub async fn notifications(&self, since_ms: i64, limit: i64) -> Result<Vec<Notification>> {
         let rows = self
-            .turso
+            .sql
             .query(
                 "SELECT * FROM notifications WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?",
                 &[since_ms.into(), limit.into()],
@@ -1013,7 +1022,7 @@ impl Db {
         let id = new_id();
         let tags = json!(f.tags);
         let r = self
-            .turso
+            .sql
             .execute(
                 "INSERT OR IGNORE INTO earn_leads(id, provider, external_id, title, description, budget_usd, currency, url, bids, deadline, tags, status, note, created_at, updated_at) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', '', ?, ?)",
@@ -1042,7 +1051,7 @@ impl Db {
 
     pub async fn lead_exists(&self, provider: &str, external_id: &str) -> Result<bool> {
         let rows = self
-            .turso
+            .sql
             .query(
                 "SELECT id FROM earn_leads WHERE provider = ? AND external_id = ? LIMIT 1",
                 &[provider.into(), external_id.into()],
@@ -1065,7 +1074,7 @@ impl Db {
             " ORDER BY updated_at DESC LIMIT ?"
         });
         args.push(limit.into());
-        let rows = self.turso.query(&sql, &args).await?;
+        let rows = self.sql.query(&sql, &args).await?;
         Ok(rows.iter().map(|r| EarnLead::from_row(&r)).collect())
     }
 
@@ -1077,7 +1086,7 @@ impl Db {
             return Ok(None);
         }
         let rows =
-            self.turso.query("SELECT * FROM earn_leads WHERE id LIKE ? LIMIT 2", &[format!("{r}%").into()]).await?;
+            self.sql.query("SELECT * FROM earn_leads WHERE id LIKE ? LIMIT 2", &[format!("{r}%").into()]).await?;
         if rows.len() > 1 {
             return Err(anyhow!("ref {r} matches more than one lead; use more characters"));
         }
@@ -1092,7 +1101,7 @@ impl Db {
         note: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<()> {
-        self.turso
+        self.sql
             .execute(
                 "UPDATE earn_leads SET status = COALESCE(?, status), score = COALESCE(?, score), note = COALESCE(?, note), \
                  session_id = COALESCE(?, session_id), updated_at = ? WHERE id = ?",
@@ -1104,7 +1113,7 @@ impl Db {
 
     /// Forget leads nobody took that have not changed since `before_ms`.
     pub async fn prune_leads(&self, before_ms: i64) -> Result<()> {
-        self.turso
+        self.sql
             .execute(
                 "DELETE FROM earn_leads WHERE status IN ('new', 'passed', 'skipped', 'shortlisted', 'lost') AND updated_at < ?",
                 &[before_ms.into()],

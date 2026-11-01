@@ -29,7 +29,7 @@ fn origin(url: &str) -> Result<String> {
     Ok(u.origin().ascii_serialization())
 }
 
-async fn get_json(http: &reqwest::Client, url: &str) -> Option<Value> {
+async fn get_json(http: &crate::net::Client, url: &str) -> Option<Value> {
     let r = http.get(url).header("accept", "application/json").send().await.ok()?;
     if !r.status().is_success() {
         return None;
@@ -39,7 +39,7 @@ async fn get_json(http: &reqwest::Client, url: &str) -> Option<Value> {
 
 /// Find the authorization server for `server_url` and its endpoints. Falls back
 /// to the conventional paths on the server's origin when no metadata is served.
-pub async fn discover(http: &reqwest::Client, server_url: &str, scope_hint: Option<&str>) -> Result<OAuthState> {
+pub async fn discover(http: &crate::net::Client, server_url: &str, scope_hint: Option<&str>) -> Result<OAuthState> {
     let server_origin = origin(server_url)?;
     let path = url::Url::parse(server_url).map(|u| u.path().trim_end_matches('/').to_string()).unwrap_or_default();
 
@@ -117,7 +117,7 @@ pub async fn discover(http: &reqwest::Client, server_url: &str, scope_hint: Opti
 
 /// Dynamic client registration. On failure the state is returned unchanged so a
 /// pre-configured client id can still be used.
-pub async fn register(http: &reqwest::Client, st: &mut OAuthState, redirect_uri: &str) -> Result<()> {
+pub async fn register(http: &crate::net::Client, st: &mut OAuthState, redirect_uri: &str) -> Result<()> {
     if st.client_id.as_deref().is_some_and(|c| !c.is_empty()) {
         return Ok(());
     }
@@ -172,7 +172,7 @@ pub fn authorize_url(st: &OAuthState, redirect_uri: &str, state: &str, verifier:
     Ok(u.to_string())
 }
 
-async fn token_request(http: &reqwest::Client, st: &mut OAuthState, form: &HashMap<&str, String>) -> Result<()> {
+async fn token_request(http: &crate::net::Client, st: &mut OAuthState, form: &HashMap<&str, String>) -> Result<()> {
     let endpoint = st.token_endpoint.clone().ok_or_else(|| anyhow!("no token endpoint"))?;
     let mut req = http.post(&endpoint).header("accept", "application/json");
     if let (Some(id), Some(secret)) = (&st.client_id, &st.client_secret) {
@@ -201,7 +201,7 @@ async fn token_request(http: &reqwest::Client, st: &mut OAuthState, form: &HashM
 }
 
 pub async fn exchange_code(
-    http: &reqwest::Client,
+    http: &crate::net::Client,
     st: &mut OAuthState,
     code: &str,
     redirect_uri: &str,
@@ -221,7 +221,7 @@ pub async fn exchange_code(
     token_request(http, st, &form).await
 }
 
-pub async fn refresh(http: &reqwest::Client, st: &mut OAuthState) -> Result<()> {
+pub async fn refresh(http: &crate::net::Client, st: &mut OAuthState) -> Result<()> {
     let rt = st.refresh_token.clone().ok_or_else(|| anyhow!("no refresh token"))?;
     let mut form: HashMap<&str, String> = HashMap::new();
     form.insert("grant_type", "refresh_token".into());

@@ -54,6 +54,24 @@ jobs:
           echo "clippy=${{ steps.clippy.outcome }} tests=${{ steps.tests.outcome }} fmt=${{ steps.fmt.outcome }}"
           exit 1
 
+  wasm-check:
+    name: wasm32 core (worker feature)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm32
+      - name: Lockfile
+        run: test -f Cargo.lock || cargo generate-lockfile
+      - name: cargo check --features worker (wasm32-unknown-unknown)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check --lib --no-default-features --features worker --target wasm32-unknown-unknown
+
   build:
     name: release build (${{ matrix.target }})
     needs: test

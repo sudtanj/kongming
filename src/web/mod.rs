@@ -47,7 +47,7 @@ async fn manifest() -> Response {
     )
 }
 async fn health(axum::extract::State(state): axum::extract::State<Shared>) -> Response {
-    match state.db.turso.ping().await {
+    match state.db.sql.ping().await {
         Ok(ms) => axum::Json(serde_json::json!({"ok": true, "tursoMs": ms})).into_response(),
         Err(e) => {
             (StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({"ok": false, "error": format!("{e:#}")})))
@@ -56,6 +56,8 @@ async fn health(axum::extract::State(state): axum::extract::State<Shared>) -> Re
     }
 }
 
+/// The UI, the REST API and (natively) the WebSocket and Telegram webhook.
+/// A Worker calls it as a tower `Service` with each `http::Request`.
 pub fn router(state: Shared) -> Router {
     let protected = Router::new()
         .route("/info", get(api::info))
@@ -96,20 +98,23 @@ pub fn router(state: Shared) -> Router {
         .route("/auth/status", get(api::auth_status))
         .route("/auth/login", post(api::login))
         .route("/auth/logout", post(api::logout))
-        .route("/mcp/oauth/callback", get(api::mcp_oauth_callback))
-        // Authenticated by the secret header Telegram sends (see telegram::webhook).
-        .route("/telegram/webhook", post(crate::telegram::webhook));
+        .route("/mcp/oauth/callback", get(api::mcp_oauth_callback));
+    // Authenticated by the secret header Telegram sends (see telegram::webhook).
+    #[cfg(feature = "native")]
+    let public = public.route("/telegram/webhook", post(crate::telegram::webhook));
 
-    Router::new()
+    let app = Router::new()
         .route("/", get(index))
         .route("/index.html", get(index))
         .route("/app.js", get(app_js))
         .route("/style.css", get(style_css))
         .route("/logo.svg", get(logo_svg))
         .route("/manifest.webmanifest", get(manifest))
-        .route("/health", get(health))
-        .route("/ws", get(ws::handler))
-        .nest("/api", public.merge(protected))
+        .route("/health", get(health));
+    // A Worker serves `/ws` itself and hands client frames to `ws::handle_frame`.
+    #[cfg(feature = "native")]
+    let app = app.route("/ws", get(ws::handler));
+    app.nest("/api", public.merge(protected))
         .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024))
         .with_state(state)
 }

@@ -7,7 +7,28 @@ pub mod mention;
 pub mod paste;
 pub mod prompt;
 pub mod setup;
+#[cfg(feature = "native")]
 pub mod shell;
+/// The `shell` tool runs a local process: native builds only. Without a
+/// `Shell` the tool is left out of every tool list.
+#[cfg(not(feature = "native"))]
+pub mod shell {
+    pub const DEFAULT_TIMEOUT: u64 = 30;
+    pub const MAX_TIMEOUT: u64 = 300;
+
+    #[derive(Debug, Clone)]
+    pub struct Shell(());
+
+    impl Shell {
+        pub fn from_config(_shell: &str) -> Option<Shell> {
+            None
+        }
+
+        pub async fn run(&self, _command: &str, _timeout_secs: u64) -> anyhow::Result<(String, bool)> {
+            anyhow::bail!("there is no local shell in this build")
+        }
+    }
+}
 pub mod tools;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -67,7 +88,7 @@ pub async fn user_agent(state: &Shared, session: &Session) -> Result<Agent> {
 
 fn now_utc_string() -> String {
     let fmt = time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]");
-    time::OffsetDateTime::now_utc().format(&fmt).unwrap_or_default()
+    crate::platform::now_utc().format(&fmt).unwrap_or_default()
 }
 
 /// History as the model sees it: the rolling summary (if any) followed by the
@@ -184,7 +205,7 @@ async fn compact(state: &Shared, session: &mut Session, turn_id: &str, model: &s
         model: model.to_string(),
         system: prompt::compaction_prompt().to_string(),
         // The previous summary leads and the newest messages close it: keep both.
-        messages: vec![ChatMessage::text("user", shell::head_tail(&transcript, 60_000))],
+        messages: vec![ChatMessage::text("user", head_tail(&transcript, 60_000))],
         tools: vec![],
         max_tokens: 1500,
         temperature: Some(0.2),
@@ -343,7 +364,7 @@ async fn model_round(
                 turn_id: turn_id.into(),
                 text: format!("Model request failed, retrying ({}/{})", attempt + 1, LLM_RETRIES),
             });
-            tokio::time::sleep(wait).await;
+            crate::platform::sleep(wait).await;
         }
         let stream = match provider.stream(req.clone()).await {
             Ok(s) => s,
@@ -384,7 +405,7 @@ async fn consume(
     let mut usage = (0i64, 0i64);
     let mut streamed_any = false;
     loop {
-        let item = tokio::time::timeout(Duration::from_secs(180), stream.next())
+        let item = crate::platform::timeout(Duration::from_secs(180), stream.next())
             .await
             .map_err(|_| anyhow!("model stream stalled"))?;
         let Some(item) = item else { break };
@@ -807,7 +828,7 @@ or to continue."
         let agent = plan.agent.clone();
         let sess = session.clone();
         let model = plan.model.clone();
-        tokio::spawn(async move {
+        state.spawn(async move {
             if let Err(e) = reflect(st, agent, sess, model).await {
                 tracing::warn!("reflection failed: {e:#}");
             }
@@ -978,6 +999,17 @@ pub fn run_delegation(
             }
         }
     })
+}
+
+/// Keep the start and the end of long output; the end usually holds the error.
+pub(crate) fn head_tail(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max / 3).collect();
+    let tail: String = s.chars().skip(n - (max - max / 3)).collect();
+    format!("{head}\n…[{} characters cut]…\n{tail}", n - max)
 }
 
 /// First line of the message, trimmed, as a session title.

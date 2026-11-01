@@ -11,6 +11,7 @@ use tokio::sync::broadcast;
 
 use crate::config::Config;
 use crate::db::{Agent, Db, Message, Session};
+use crate::host::Host;
 use crate::llm::{self, Provider, ProviderConfig};
 use crate::mcp::McpManager;
 
@@ -101,7 +102,7 @@ impl Event {
 pub struct AppState {
     pub cfg: Config,
     pub db: Db,
-    pub http: reqwest::Client,
+    pub http: crate::net::Client,
     pub bus: broadcast::Sender<Event>,
     pub mcp: McpManager,
     pub secret: Vec<u8>,
@@ -112,6 +113,8 @@ pub struct AppState {
     pub telegram_status: Mutex<Value>,
     /// The local shell behind the `shell` tool, when one is configured.
     pub shell: Option<crate::agent::shell::Shell>,
+    /// Background work, extra event delivery and turn starts (see `host`).
+    pub host: Arc<dyn Host>,
     /// Sessions with a turn in flight, with a cancel flag each.
     running: Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
     provider_cache: RwLock<Option<(ProviderConfig, Arc<dyn Provider>)>>,
@@ -120,6 +123,8 @@ pub struct AppState {
 pub type Shared = Arc<AppState>;
 
 impl AppState {
+    /// The daemon's state: reqwest (rustls) for HTTP, tokio for background work.
+    #[cfg(feature = "native")]
     pub fn new(cfg: Config, db: Db) -> Shared {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
@@ -129,6 +134,12 @@ impl AppState {
             .user_agent(concat!("kongming/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("http client");
+        let http = crate::net::Client::new(crate::net::Reqwest(http));
+        AppState::with_host(cfg, db, http, Arc::new(crate::host::NativeHost))
+    }
+
+    /// State for any host: it brings the HTTP client and the `Host`.
+    pub fn with_host(cfg: Config, db: Db, http: crate::net::Client, host: Arc<dyn Host>) -> Shared {
         let (bus, _) = broadcast::channel(256);
         let secret = match &cfg.secret {
             Some(s) if !s.is_empty() => s.as_bytes().to_vec(),
@@ -148,11 +159,18 @@ impl AppState {
             telegram_reload: tokio::sync::Notify::new(),
             telegram_status: Mutex::new(Value::Null),
             shell,
+            host,
         })
     }
 
     pub fn emit(&self, ev: Event) {
+        self.host.emit(&ev);
         let _ = self.bus.send(ev);
+    }
+
+    /// Run background work through the host.
+    pub fn spawn(&self, task: impl std::future::Future<Output = ()> + Send + 'static) {
+        self.host.spawn(Box::pin(task));
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {

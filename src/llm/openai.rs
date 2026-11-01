@@ -11,13 +11,13 @@ use super::{sse, ChatRequest, EventStream, LlmEvent, Provider};
 use crate::db::Part;
 
 pub struct OpenAi {
-    http: reqwest::Client,
+    http: crate::net::Client,
     base: String,
     key: Option<String>,
 }
 
 impl OpenAi {
-    pub fn new(http: reqwest::Client, base: Option<String>, key: Option<String>) -> OpenAi {
+    pub fn new(http: crate::net::Client, base: Option<String>, key: Option<String>) -> OpenAi {
         let base = base.filter(|b| !b.trim().is_empty()).unwrap_or_else(|| "https://api.openai.com/v1".into());
         OpenAi { http, base: base.trim_end_matches('/').to_string(), key: key.filter(|k| !k.trim().is_empty()) }
     }

@@ -25,6 +25,8 @@ use anyhow::{Context, Result};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+use super::head_tail;
+
 /// Where the Docker image puts BusyBox and its applet links.
 pub const BUSYBOX_SH: &str = "/opt/busybox/bin/sh";
 pub const DEFAULT_TIMEOUT: u64 = 30;
@@ -239,17 +241,6 @@ mod landlock {
         // SAFETY: plain syscall; a bad descriptor just fails.
         unsafe { libc::syscall(RESTRICT_SELF, ruleset, 0u32) }
     }
-}
-
-/// Keep the start and the end of long output; the end usually holds the error.
-pub(crate) fn head_tail(s: &str, max: usize) -> String {
-    let n = s.chars().count();
-    if n <= max {
-        return s.to_string();
-    }
-    let head: String = s.chars().take(max / 3).collect();
-    let tail: String = s.chars().skip(n - (max - max / 3)).collect();
-    format!("{head}\n…[{} characters cut]…\n{tail}", n - max)
 }
 
 #[cfg(test)]

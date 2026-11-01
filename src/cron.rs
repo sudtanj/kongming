@@ -5,6 +5,7 @@
 //! session and can deliver the answer to a Telegram chat. A one-off job is
 //! switched off once it ran.
 
+#[cfg(feature = "native")]
 use std::time::Duration;
 
 use serde_json::Value;
@@ -145,6 +146,7 @@ pub async fn run_job(state: Shared, job: CronJob) {
     tracing::info!(job = %job.name, %status, "cron job done");
 }
 
+#[cfg(feature = "native")]
 pub async fn run(state: Shared) {
     let mut tick = tokio::time::interval(Duration::from_secs(30));
     loop {

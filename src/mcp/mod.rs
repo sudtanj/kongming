@@ -33,7 +33,7 @@ struct SseConn {
 
 pub struct McpManager {
     db: Db,
-    http: reqwest::Client,
+    http: crate::net::Client,
     next_id: AtomicI64,
     /// server id -> Mcp-Session-Id (streamable HTTP)
     sessions: Mutex<HashMap<String, String>>,
@@ -68,7 +68,7 @@ pub fn parse_tool_name(name: &str) -> Option<(&str, &str)> {
 }
 
 impl McpManager {
-    pub fn new(db: Db, http: reqwest::Client) -> McpManager {
+    pub fn new(db: Db, http: crate::net::Client) -> McpManager {
         McpManager {
             db,
             http,
@@ -152,10 +152,10 @@ impl McpManager {
 
     fn apply_headers(
         &self,
-        mut req: reqwest::RequestBuilder,
+        mut req: crate::net::RequestBuilder,
         s: &McpServer,
         auth: &Option<String>,
-    ) -> reqwest::RequestBuilder {
+    ) -> crate::net::RequestBuilder {
         if let Some(a) = auth {
             req = req.header("authorization", a);
         }
@@ -183,7 +183,7 @@ impl McpManager {
             req = req.header("mcp-session-id", sid);
         }
         let req = self.apply_headers(req, s, auth).json(&body);
-        let resp = tokio::time::timeout(CALL_TIMEOUT, req.send())
+        let resp = crate::platform::timeout(CALL_TIMEOUT, req.send())
             .await
             .map_err(|_| anyhow!("mcp request timed out"))?
             .context("mcp request failed")?;
@@ -209,9 +209,10 @@ impl McpManager {
         if ct.starts_with("text/event-stream") {
             let mut parser = SseParser::new();
             let mut stream = resp.bytes_stream();
-            let deadline = tokio::time::Instant::now() + CALL_TIMEOUT;
+            let deadline = now_ms() + CALL_TIMEOUT.as_millis() as i64;
             loop {
-                let chunk = tokio::time::timeout_at(deadline, stream.next())
+                let left = Duration::from_millis((deadline - now_ms()).max(0) as u64);
+                let chunk = crate::platform::timeout(left, stream.next())
                     .await
                     .map_err(|_| anyhow!("mcp stream timed out"))?;
                 let Some(chunk) = chunk else { bail!("mcp stream ended without a reply") };
@@ -243,7 +244,7 @@ impl McpManager {
             }
         }
         let req = self.apply_headers(self.http.get(&s.url).header("accept", "text/event-stream"), s, auth);
-        let resp = tokio::time::timeout(Duration::from_secs(20), req.send())
+        let resp = crate::platform::timeout(Duration::from_secs(20), req.send())
             .await
             .map_err(|_| anyhow!("sse connect timed out"))?
             .context("sse connect failed")?;
@@ -264,7 +265,7 @@ impl McpManager {
         // The POST endpoint arrives as the first event; the reader task owns the
         // stream and resolves replies by JSON-RPC id.
         let reader = conn.clone();
-        tokio::spawn(async move {
+        crate::platform::spawn(async move {
             let mut parser = SseParser::new();
             let mut stream = resp.bytes_stream();
             let mut tx = Some(tx);
@@ -291,7 +292,7 @@ impl McpManager {
             reader.alive.store(false, Ordering::Relaxed);
             reader.pending.lock().clear();
         });
-        tokio::time::timeout(Duration::from_secs(20), rx)
+        crate::platform::timeout(Duration::from_secs(20), rx)
             .await
             .map_err(|_| anyhow!("sse: no endpoint event"))?
             .map_err(|_| anyhow!("sse: stream closed"))?;
@@ -325,7 +326,7 @@ impl McpManager {
             bail!("sse post HTTP {}", resp.status());
         }
         match rx {
-            Some(rx) => tokio::time::timeout(CALL_TIMEOUT, rx)
+            Some(rx) => crate::platform::timeout(CALL_TIMEOUT, rx)
                 .await
                 .map_err(|_| anyhow!("mcp call timed out"))?
                 .map_err(|_| anyhow!("sse connection closed")),

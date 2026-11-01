@@ -14,33 +14,76 @@ path = "src/lib.rs"
 [[bin]]
 name = "kongming"
 path = "src/main.rs"
+required-features = ["native"]
+
+[features]
+default = ["native"]
+# The daemon: tokio runtime, axum server with WebSockets, reqwest (rustls),
+# clap, the shell tool, cdp/curl/wget, Telegram long polling and the
+# background loops.
+native = [
+    "dep:reqwest",
+    "dep:clap",
+    "dep:tracing-subscriber",
+    "dep:libc",
+    "dep:tower-http",
+    "dep:tokio-stream",
+    "tokio/rt-multi-thread",
+    "tokio/macros",
+    "tokio/net",
+    "tokio/time",
+    "tokio/signal",
+    "tokio/process",
+    "tokio/fs",
+    "tokio/io-util",
+    "axum/tokio",
+    "axum/http1",
+    "axum/ws",
+    "axum/form",
+    "axum/matched-path",
+    "axum/original-uri",
+    "axum/tower-log",
+    "axum/tracing",
+]
+# The portable core only (wasm32-unknown-unknown, e.g. a Cloudflare Worker):
+# the host supplies SQL (`db::SqlExecutor`), HTTP (`net::Http`) and
+# background work (`host::Host`).
+worker = []
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "process", "fs", "io-util"] }
-axum = { version = "0.7", features = ["json", "macros", "ws"] }
-tower-http = { version = "0.5", features = ["trace"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+tokio = { version = "1", features = ["sync"] }
+axum = { version = "0.7", default-features = false, features = ["json", "query", "macros"] }
+tower-http = { version = "0.5", features = ["trace"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"], optional = true }
+http = "1"
 futures-util = "0.3"
-tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-stream = { version = "0.1", features = ["sync"], optional = true }
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"], optional = true }
 sha2 = "0.10"
 hmac = "0.12"
 base64 = "0.22"
 rand = "0.8"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "js"] }
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 anyhow = "1"
 thiserror = "1"
 parking_lot = "0.12"
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4", features = ["derive", "env"], optional = true }
 url = "2"
 async-trait = "0.1"
 subtle = "2"
-libc = "0.2"
+libc = { version = "0.2", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Randomness (rand 0.8, uuid) and the clock/timers come from JavaScript.
+getrandom = { version = "0.2", features = ["js"] }
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
 
 [dev-dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }

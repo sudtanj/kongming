@@ -33,7 +33,7 @@ async fn migrate_is_idempotent_and_ping_works() {
     let hrana = HranaMock::start().await;
     let db = hrana.db().await;
     db.migrate().await.expect("second migrate");
-    db.turso.ping().await.expect("ping");
+    db.sql.ping().await.expect("ping");
     assert_eq!(hrana.query_i64("SELECT COUNT(*) FROM agents"), 0);
 }
 

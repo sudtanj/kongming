@@ -8,32 +8,53 @@
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
+#[cfg(feature = "native")]
 use axum::extract::State;
+#[cfg(feature = "native")]
 use axum::http::{HeaderMap, StatusCode};
+#[cfg(feature = "native")]
 use axum::Json;
 use serde_json::{json, Value};
 
-use crate::agent::{self, TurnOptions};
-use crate::state::{Event, Shared};
+use crate::agent;
+#[cfg(feature = "native")]
+use crate::agent::TurnOptions;
+#[cfg(feature = "native")]
+use crate::state::Event;
+use crate::state::Shared;
 
+#[cfg(feature = "native")]
 const EDIT_INTERVAL: Duration = Duration::from_millis(900);
 const MAX_MESSAGE: usize = 4000;
 
 #[derive(Clone)]
 pub struct Telegram {
-    http: reqwest::Client,
+    http: crate::net::Client,
     api: String,
     token: String,
 }
 
 impl Telegram {
     /// `api` is the Bot API base URL, normally `https://api.telegram.org`.
-    pub fn new(http: reqwest::Client, api: &str, token: String) -> Telegram {
+    pub fn new(http: crate::net::Client, api: &str, token: String) -> Telegram {
         Telegram { http, api: api.trim_end_matches('/').to_string(), token }
     }
 
     fn url(&self, method: &str) -> String {
         format!("{}/bot{}/{method}", self.api, self.token)
+    }
+
+    /// An error's message without the request URL, which carries the token.
+    fn redact(&self, e: &anyhow::Error) -> String {
+        let mut s = e.to_string();
+        if let Some(i) = s.find(" for url (") {
+            let end = s[i..].find(')').map_or(s.len(), |j| i + j + 1);
+            s.replace_range(i..end, "");
+        }
+        if !self.token.is_empty() {
+            s = s.replace(&self.token, "<token>");
+        }
+        s
     }
 
     pub async fn call(&self, method: &str, body: Value) -> Result<Value> {
@@ -45,9 +66,9 @@ impl Telegram {
             .send()
             .await
             // The URL carries the bot token: keep it out of errors and logs.
-            .map_err(|e| anyhow!("telegram {method} request failed: {}", e.without_url()))?;
+            .map_err(|e| anyhow!("telegram {method} request failed: {}", self.redact(&e)))?;
         let v: Value =
-            r.json().await.map_err(|e| anyhow!("telegram {method}: reply was not JSON: {}", e.without_url()))?;
+            r.json().await.map_err(|e| anyhow!("telegram {method}: reply was not JSON: {}", self.redact(&e)))?;
         if v.get("ok").and_then(Value::as_bool) != Some(true) {
             return Err(anyhow!(
                 "telegram {method}: {}",
@@ -363,6 +384,7 @@ pub async fn disconnect(state: &Shared, token: String) {
     *state.telegram_status.lock() = Value::Null;
 }
 
+#[cfg(feature = "native")]
 async fn wait(state: &Shared, d: Duration) {
     tokio::select! {
         _ = state.telegram_reload.notified() => {}
@@ -370,10 +392,12 @@ async fn wait(state: &Shared, d: Duration) {
     }
 }
 
+#[cfg(feature = "native")]
 async fn unchanged(state: &Shared, token: &str, public: &Option<String>) -> bool {
     active_token(state).await.as_deref() == Some(token) && state.public_url().await == *public
 }
 
+#[cfg(feature = "native")]
 fn dispatch(state: &Shared, tg: &Telegram, update: &Value) {
     if let Some(msg) = update.get("message") {
         let (st, tg, msg) = (state.clone(), tg.clone(), msg.clone());
@@ -385,6 +409,7 @@ fn dispatch(state: &Shared, tg: &Telegram, update: &Value) {
     }
 }
 
+#[cfg(feature = "native")]
 /// Keep Telegram connected until the process stops. In polling mode this runs
 /// getUpdates; in webhook mode updates arrive on `webhook` and this only
 /// watches for settings changes. A change in the dashboard wakes it at once.
@@ -439,6 +464,7 @@ pub async fn run(state: Shared) {
     }
 }
 
+#[cfg(feature = "native")]
 /// Webhook delivery from Telegram. The secret header, handed to Telegram in
 /// setWebhook, proves the call is genuine.
 pub async fn webhook(State(state): State<Shared>, headers: HeaderMap, Json(update): Json<Value>) -> StatusCode {
@@ -455,6 +481,7 @@ pub async fn webhook(State(state): State<Shared>, headers: HeaderMap, Json(updat
     StatusCode::OK
 }
 
+#[cfg(feature = "native")]
 /// Constant-time comparison.
 fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
@@ -475,11 +502,14 @@ pub async fn session_for_chat(state: &Shared, chat_id: i64, fresh: bool) -> Resu
     Ok(s)
 }
 
+#[cfg(feature = "native")]
 /// Reasoning shown in the thinking message: the latest part, so it fits.
 const THINKING_CHARS: usize = 2800;
+#[cfg(feature = "native")]
 /// Tool steps listed under it.
 const MAX_STEPS: usize = 12;
 
+#[cfg(feature = "native")]
 /// The message above an answer that shows the model's reasoning and the tool
 /// calls it makes, edited live like the answer.
 #[derive(Default)]
@@ -494,6 +524,7 @@ struct Progress {
     closed: bool,
 }
 
+#[cfg(feature = "native")]
 impl Progress {
     fn html(&self) -> String {
         let mut out = String::new();
@@ -553,11 +584,13 @@ impl Progress {
 }
 
 /// Settings → Channels → "Show thinking" (on unless turned off).
+#[cfg(feature = "native")]
 async fn show_thinking(state: &Shared) -> bool {
     let tg = state.db.setting("telegram").await.ok().flatten();
     tg.and_then(|v| v.get("showThinking").and_then(Value::as_bool)).unwrap_or(true)
 }
 
+#[cfg(feature = "native")]
 async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
     let chat_id = msg.pointer("/chat/id").and_then(Value::as_i64).ok_or_else(|| anyhow!("no chat id"))?;
     let user_id = msg.pointer("/from/id").and_then(Value::as_i64).unwrap_or(0);

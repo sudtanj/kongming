@@ -592,7 +592,7 @@ fn utf8_len(first: u8) -> usize {
 }
 
 fn current_time() -> String {
-    let now = time::OffsetDateTime::now_utc();
+    let now = crate::platform::now_utc();
     let fmt = time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
     format!("{} UTC (unix {})", now.format(&fmt).unwrap_or_default(), now.unix_timestamp())
 }

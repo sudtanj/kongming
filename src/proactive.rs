@@ -14,6 +14,7 @@
 //! `maxPerDay`, `quietHours` ("22-7", local), `utcOffset` ("+07:00").
 
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "native")]
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
@@ -413,6 +414,7 @@ async fn due(state: &Shared) -> bool {
 }
 
 /// The check-in loop; runs until the process stops.
+#[cfg(feature = "native")]
 pub async fn run(state: Shared) {
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     loop {

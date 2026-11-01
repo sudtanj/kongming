@@ -736,7 +736,7 @@ async fn algora_bounty(state: &Shared, s: &Settings, p: &Provider, issue_url: &s
     Ok(algora_amount(&v))
 }
 
-fn authorize(req: reqwest::RequestBuilder, p: &Provider, key: &str) -> reqwest::RequestBuilder {
+fn authorize(req: crate::net::RequestBuilder, p: &Provider, key: &str) -> crate::net::RequestBuilder {
     match p.auth {
         Auth::Bearer => req.bearer_auth(key),
         Auth::Header(h) => req.header(h, key),
@@ -981,6 +981,7 @@ async fn due(state: &Shared) -> bool {
 }
 
 /// The scan loop; runs until the process stops.
+#[cfg(feature = "native")]
 pub async fn run(state: Shared) {
     tokio::spawn(heartbeat_loop(state.clone()));
     let mut tick = tokio::time::interval(Duration::from_secs(60));
@@ -1107,6 +1108,7 @@ pub fn last_heartbeat() -> Option<Value> {
     HEARTBEAT.lock().clone()
 }
 
+#[cfg(feature = "native")]
 async fn heartbeat_loop(state: Shared) {
     let mut tick = tokio::time::interval(Duration::from_secs(HEARTBEAT_SECS));
     loop {
@@ -1287,10 +1289,10 @@ async fn request(ctx: &ToolCtx<'_>, s: &Settings, args: &Value) -> Result<String
         bail!("{} is switched off in Settings → Earnings", p.name);
     }
     let method = match arg(args, "method").to_ascii_uppercase().as_str() {
-        "" | "GET" => reqwest::Method::GET,
-        "POST" => reqwest::Method::POST,
-        "PUT" => reqwest::Method::PUT,
-        "PATCH" => reqwest::Method::PATCH,
+        "" | "GET" => crate::net::Method::GET,
+        "POST" => crate::net::Method::POST,
+        "PUT" => crate::net::Method::PUT,
+        "PATCH" => crate::net::Method::PATCH,
         m => bail!("method {m} is not allowed"),
     };
     let path = arg(args, "path");
@@ -1300,7 +1302,7 @@ async fn request(ctx: &ToolCtx<'_>, s: &Settings, args: &Value) -> Result<String
     if forbidden_path(path) {
         bail!("Kongming does not sign up, manage keys or move money; the user does that on {}", p.site);
     }
-    let write = method != reqwest::Method::GET;
+    let write = method != crate::net::Method::GET;
     if write {
         if !p.acts {
             bail!("{} work is taken by the user, not through its API: {}", p.name, p.key_help);
