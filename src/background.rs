@@ -19,6 +19,7 @@ use crate::state::Shared;
 /// Something a timer found due.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[allow(clippy::large_enum_variant)]
 pub enum Due {
     /// A scheduled prompt, already claimed (marked running).
     Cron { job: CronJob },
@@ -54,6 +55,7 @@ pub async fn tick(state: &Shared, now: i64) -> Vec<Due> {
 /// What runs after a background turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[allow(clippy::large_enum_variant)]
 pub enum Followup {
     Cron { job: CronJob },
     CheckIn { check_in: CheckInTurn },

@@ -747,7 +747,6 @@ fn authorize(req: crate::net::RequestBuilder, p: &Provider, key: &str) -> crate:
 // ------------------------------------------------------------------------ scan
 
 /// Clears the scan flag when the scan ends.
-
 struct Running<'a>(&'a AtomicBool);
 impl Drop for Running<'_> {
     fn drop(&mut self) {
@@ -936,7 +935,6 @@ pub async fn finish_scan(state: &Shared, t: ScanTurn, res: Result<agent::TurnRes
     res?;
     Ok(report)
 }
-
 
 fn money(l: &EarnLead) -> String {
     match l.budget_usd {

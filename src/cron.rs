@@ -173,7 +173,11 @@ pub async fn tick(state: &Shared, now: i64) -> Vec<CronJob> {
                 // Never scheduled: compute and store, don't run now.
                 let _ = state
                     .db
-                    .mark_cron_run(&job.id, next_run(&job.schedule, now), job.last_status.as_deref().unwrap_or("scheduled"))
+                    .mark_cron_run(
+                        &job.id,
+                        next_run(&job.schedule, now),
+                        job.last_status.as_deref().unwrap_or("scheduled"),
+                    )
                     .await;
                 false
             }

@@ -266,7 +266,6 @@ pub async fn notify(
 }
 
 /// Clears the check-in flag when the check-in ends.
-
 struct Running<'a>(&'a AtomicBool);
 impl Drop for Running<'_> {
     fn drop(&mut self) {
