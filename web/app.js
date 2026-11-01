@@ -141,6 +141,18 @@ const STRINGS = {
     'settings.earnings': 'Earnings',
     'settings.memory': 'Memory',
     'settings.activity': 'Activity',
+    'settings.usage': 'Usage',
+    'usage.desc': 'What the agents used, and what your plan allows.',
+    'usage.plan': '{{plan}} plan',
+    'usage.daily': 'Resets at 00:00 UTC.',
+    'usage.full': 'limit reached',
+    'usage.models': 'Model usage ({{days}} days)',
+    'usage.noModels': 'No model requests yet.',
+    'usage.requests': '{{n}} requests',
+    'usage.saver': 'Token saver',
+    'usage.saverDesc': 'Tool output compressed before it reaches the model.',
+    'usage.saved': '{{n}} tokens saved',
+    'usage.hits': '{{n}} outputs compressed',
     'settings.about': 'About',
     'settings.backToChat': 'Back to chat',
     'theme.title': 'Theme',
@@ -1457,7 +1469,7 @@ function toast(msg, kind) {
 /* ============================================================ views: settings */
 
 const settings = (() => {
-  const PAGES = [['overview', 'home'], ['appearance', 'palette'], ['models', 'cpu'], ['agents', 'users'], ['skills', 'skill'], ['mcp', 'plug'], ['channels', 'channel'], ['automations', 'clock'], ['earnings', 'coin'], ['memory', 'memory'], ['activity', 'pulse'], ['about', 'info']];
+  const PAGES = [['overview', 'home'], ['appearance', 'palette'], ['models', 'cpu'], ['usage', 'activity'], ['agents', 'users'], ['skills', 'skill'], ['mcp', 'plug'], ['channels', 'channel'], ['automations', 'clock'], ['earnings', 'coin'], ['memory', 'memory'], ['activity', 'pulse'], ['about', 'info']];
   const BUILTIN_TOOLS = ['skill_view', 'skill_manage', 'memory', 'delegate_task', 'agent_manage', 'web_fetch', 'shell', 'list_agents', 'list_sessions', 'read_session', 'current_time'];
   let viewEl, navEl, bodyEl, page = null, token = 0;
 
@@ -1606,6 +1618,34 @@ const settings = (() => {
         h('div', { class: 'settings-footer' }, h('div', {}, test, testOut), h('div', { class: 'acts' }, save))),
       section(t('models.reflection'), row(t('models.reflection'), t('models.reflectionDesc'), switchEl(!(st.reflection && st.reflection.enabled === false), (v) => api.put('/api/settings', { reflection: { enabled: v } }), t('models.reflection')), { switch: true })),
       section(t('models.publicUrl'), row(t('models.publicUrl'), t('models.publicUrlDesc'), publicUrl), h('div', { class: 'settings-footer' }, h('span'), h('div', { class: 'acts' }, saveBtn(null, () => api.put('/api/settings', { publicUrl: publicUrl.value.trim() }))))));
+  };
+
+  /* ---- usage ---- */
+  // kongming's own token usage; with a host that keeps a plan (kongming cloud), also the plan's
+  // limits, usage per model and the token saver's savings (`host` in GET /api/usage).
+  pages.usage = async () => {
+    const u = await api.get('/api/usage'); const hu = u.host || {};
+    const tokens = (x) => `${fmtNum((x || {}).promptTokens)} in · ${fmtNum((x || {}).completionTokens)} out`;
+    const usageRow = (label, x) => stat(label, fmtNum((x || {}).requests) + ' ' + t('overview.requests'), tokens(x));
+    const cost = (c) => (Number(c) > 0 ? ' · $' + Number(c).toFixed(4) : '');
+    const meter = (it) => {
+      const full = it.used >= it.limit;
+      return h('div', { class: 'row', style: 'flex-wrap:nowrap;width:100%;gap:0.6rem' },
+        h('progress', { max: it.limit, value: Math.min(it.used, it.limit), style: 'flex:1', 'aria-label': it.label }),
+        h('span', { class: 'r-value' + (full ? ' danger-text' : ''), title: full ? t('usage.full') : null }, `${fmtNum(it.used)} / ${fmtNum(it.limit)}`));
+    };
+    const parts = [header(t('settings.usage'), t('usage.desc'))];
+    if (Array.isArray(hu.limits) && hu.limits.length) parts.push(section(hu.plan ? t('usage.plan', { plan: hu.plan }) : null, hu.limits.map((it) => row(it.label, it.daily ? t('usage.daily') : null, meter(it)))));
+    parts.push(section(t('activity.usage'), h('div', { class: 'stat-grid' }, usageRow(t('activity.day'), u.day), usageRow(t('activity.week'), u.week), usageRow(t('activity.month'), u.month))));
+    if (Array.isArray(hu.models)) parts.push(section(t('usage.models', { days: hu.days || 7 }), hu.models.length
+      ? hu.models.map((m) => row(m.model, null, h('span', { class: 'r-value' }, t('usage.requests', { n: fmtNum(m.requests) }) + ' · ' + tokens(m) + cost(m.cost))))
+      : empty(t('usage.noModels'))));
+    const ts = hu.tokenSaver;
+    if (ts) {
+      const saved = (label, x) => stat(label, t('usage.saved', { n: fmtNum((x || {}).tokensSaved) }), t('usage.hits', { n: fmtNum((x || {}).hits) }));
+      parts.push(section(t('usage.saver'), row(t('usage.saverDesc'), null, null), h('div', { class: 'stat-grid' }, saved(t('activity.day'), ts.today), saved(t('activity.week'), ts.week))));
+    }
+    return h('div', { class: 'settings-stack' }, parts);
   };
 
   /* ---- agents ---- */

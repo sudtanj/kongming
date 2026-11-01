@@ -981,11 +981,16 @@ pub async fn list_improvements(State(state): State<Shared>, Query(q): Query<Limi
 
 pub async fn usage(State(state): State<Shared>) -> R {
     let now = now_ms();
-    Ok(Json(json!({
+    let mut out = json!({
         "day": state.db.usage_since(now - 86_400_000).await?,
         "week": state.db.usage_since(now - 7 * 86_400_000).await?,
         "month": state.db.usage_since(now - 30 * 86_400_000).await?,
-    })))
+    });
+    // Plan limits, per-model usage and Token Saver savings, when the host keeps them.
+    if let Some(h) = state.host.usage_report() {
+        out["host"] = h;
+    }
+    Ok(Json(out))
 }
 
 #[cfg(test)]

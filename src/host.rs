@@ -39,6 +39,15 @@ pub trait Host: Send + Sync + 'static {
             }
         }));
     }
+
+    /// What the host itself tracks against a plan, for Settings → Usage (`GET /api/usage`
+    /// answers it as `host`): `{plan, limits: [{label, used, limit, daily}], days, models:
+    /// [{model, requests, promptTokens, completionTokens, cost}], tokenSaver: {today, week}}`,
+    /// every key optional. The daemon has no plan: `None`, and the page shows kongming's own
+    /// token usage only.
+    fn usage_report(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 /// The daemon's host: tokio tasks and the broadcast bus.
