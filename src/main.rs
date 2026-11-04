@@ -52,6 +52,7 @@ async fn run(cfg: config::Config) -> Result<()> {
     }
 
     let state = state::AppState::new(cfg.clone(), database);
+    web::auth::load_epoch(&state).await;
     if let Some(sh) = &state.shell {
         // Shell commands run as the same user: keep them out of /proc/<pid>/environ
         // and /proc/<pid>/mem, which hold the Turso token and the password.

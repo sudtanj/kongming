@@ -107,18 +107,30 @@ pub async fn login(
     Json(body): Json<Value>,
 ) -> Result<Response, ApiError> {
     let pw = body.get("password").and_then(Value::as_str).unwrap_or("");
+    let wait = super::auth::login_wait_ms();
+    if wait > 0 {
+        let msg = format!("too many failed logins; try again in {} s", (wait + 999) / 1000);
+        return Err(ApiError(StatusCode::TOO_MANY_REQUESTS, msg));
+    }
     if !super::auth::password_ok(&state, pw) {
+        super::auth::login_failed();
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         return Err(ApiError(StatusCode::UNAUTHORIZED, "wrong password".into()));
     }
+    super::auth::login_succeeded();
     let token = super::auth::issue(&state.secret);
     let secure = headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok()) == Some("https");
     Ok(([(header::SET_COOKIE, super::auth::cookie_header(&token, secure))], Json(json!({"ok": true, "token": token})))
         .into_response())
 }
 
-pub async fn logout() -> Response {
-    ([(header::SET_COOKIE, super::auth::clear_cookie_header())], Json(json!({"ok": true}))).into_response()
+/// Ends every session, not only this browser's: tokens are stateless, so the
+/// epoch they carry is what is revoked. Only a signed-in caller can do it.
+pub async fn logout(State(state): State<Shared>, req: axum::extract::Request) -> Result<Response, ApiError> {
+    if !state.cfg.password.is_empty() && super::auth::is_authenticated(&state, &req) {
+        super::auth::revoke_all(&state).await?;
+    }
+    Ok(([(header::SET_COOKIE, super::auth::clear_cookie_header())], Json(json!({"ok": true}))).into_response())
 }
 
 // ------------------------------------------------------------------------ info
@@ -501,6 +513,12 @@ async fn mcp_from_body(existing: Option<McpServer>, body: &Value) -> Result<McpS
         if !matches!(parsed.scheme(), "http" | "https") {
             return Err(bad("only http(s) MCP servers are supported; local stdio servers are not allowed"));
         }
+        // A new address never inherits the saved token, headers or sign-in.
+        if endpoint(Some(&m.url)) != endpoint(Some(u)) {
+            m.token = None;
+            m.headers = json!({});
+            m.oauth = OAuthState::default();
+        }
         m.url = u.to_string();
     }
     if m.name.is_empty() || m.url.is_empty() {
@@ -699,9 +717,16 @@ pub async fn put_settings(State(state): State<Shared>, Json(body): Json<Value>) 
     get_settings(State(state)).await
 }
 
+/// `host:port` of a base URL, to tell whether a saved credential still goes to the same place.
+fn endpoint(url: Option<&str>) -> Option<String> {
+    let u = url::Url::parse(url?).ok()?;
+    Some(format!("{}:{}", u.host_str()?.to_ascii_lowercase(), u.port_or_known_default()?))
+}
+
 /// The LLM configuration with a change from the dashboard (or `setup`) applied.
 pub async fn merge_llm(state: &Shared, llm: &Value) -> Result<ProviderConfig, ApiError> {
     let mut cfg: ProviderConfig = state.provider_config().await.unwrap_or_default();
+    let before = cfg.base_url.clone();
     if let Some(k) = s(llm, "kind") {
         cfg.kind = k.to_string();
     }
@@ -710,6 +735,10 @@ pub async fn merge_llm(state: &Shared, llm: &Value) -> Result<ProviderConfig, Ap
     }
     if let Some(k) = s(llm, "apiKey") {
         cfg.api_key = Some(k.to_string());
+    }
+    // A new address never inherits the saved key; the caller has to give one.
+    if s(llm, "apiKey").is_none() && endpoint(cfg.base_url.as_deref()) != endpoint(before.as_deref()) {
+        cfg.api_key = None;
     }
     if llm.get("clearApiKey").and_then(Value::as_bool) == Some(true) {
         cfg.api_key = None;

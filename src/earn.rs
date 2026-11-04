@@ -846,8 +846,8 @@ pub async fn scan(state: &Shared, manual: bool) -> Result<ScanReport> {
         TurnOptions { depth: 1, no_reflect: true, agent_override: Some(agent.clone()) },
     )
     .await;
-    // Leads the agent did not rate were looked at and passed over.
-    for l in &fresh {
+    // Leads the agent did not rate were looked at and passed over (only when the turn finished).
+    for l in fresh.iter().filter(|_| res.as_ref().is_ok_and(|r| r.error.is_none())) {
         if let Ok(Some(cur)) = state.db.earn_lead(&l.id).await {
             if cur.status == "new" {
                 let _ = state.db.update_lead(&l.id, Some("passed"), None, None, None).await;
@@ -1215,6 +1215,11 @@ pub async fn tool(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
             // Only the user approves: in a conversation they are part of.
             if to == "approved" && !matches!(ctx.session.channel.as_str(), "web" | "telegram") {
                 bail!("only the user approves a lead (they reply `take <ref>`)");
+            }
+            // working and submitted unlock writes with the saved key, so they follow the same approval as a write.
+            if matches!(to, "working" | "submitted") {
+                let kind = provider(&l.provider).map_or(Kind::Bounty, |p| p.kind);
+                may_write(&s, kind, &l).map_err(|e| anyhow!(e))?;
             }
             let note = arg(args, "note");
             let note = if note.is_empty() { None } else { Some(note) };

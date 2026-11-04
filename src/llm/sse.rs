@@ -14,7 +14,7 @@ pub struct SseEvent {
 
 #[derive(Default)]
 pub struct SseParser {
-    buf: String,
+    buf: Vec<u8>,
     cur: SseEvent,
     has_data: bool,
 }
@@ -26,10 +26,11 @@ impl SseParser {
 
     /// Feed bytes; returns every complete event found so far.
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<SseEvent> {
-        self.buf.push_str(&String::from_utf8_lossy(chunk));
+        self.buf.extend_from_slice(chunk);
         let mut out = Vec::new();
-        while let Some(pos) = self.buf.find('\n') {
-            let line: String = self.buf.drain(..=pos).collect();
+        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let raw: Vec<u8> = self.buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&raw);
             let line = line.trim_end_matches(['\n', '\r']);
             if line.is_empty() {
                 if self.has_data || !self.cur.event.is_empty() {
@@ -145,5 +146,16 @@ mod tests {
         let mut p = SseParser::new();
         assert!(p.feed(b"data: [DONE]").is_empty());
         assert_eq!(p.finish().unwrap().data, "[DONE]");
+    }
+
+    #[test]
+    fn keeps_multibyte_chars_split_across_chunks() {
+        let mut p = SseParser::new();
+        let bytes = "data: héllo 世界\n\n".as_bytes();
+        let mut evs = p.feed(&bytes[..8]);
+        evs.extend(p.feed(&bytes[8..14]));
+        evs.extend(p.feed(&bytes[14..]));
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].data, "héllo 世界");
     }
 }

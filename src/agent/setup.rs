@@ -11,7 +11,7 @@ use serde_json::{json, Map, Value};
 
 use super::paste;
 use super::tools::ToolCtx;
-use crate::db::Agent;
+use crate::db::{Agent, Part};
 use crate::llm::{ChatMessage, ChatRequest, ToolSpec};
 use crate::state::{Event, Shared};
 use crate::web::api;
@@ -107,12 +107,13 @@ pub async fn run(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
     }
     let state = ctx.state;
     let op = opt(args, "op").unwrap_or("");
+    let said = if args.to_string().contains("secret:") { Some(user_said(ctx).await?) } else { None };
     let result = match op {
         "show" => show(state).await,
-        "llm" => llm(state, args).await,
+        "llm" => llm(state, args, said.as_deref()).await,
         "telegram" => telegram(state, args).await,
         "public_url" => public_url(state, args).await,
-        "mcp_add" => mcp_add(state, args).await,
+        "mcp_add" => mcp_add(state, args, said.as_deref()).await,
         "earn" => earn(state, args).await,
         "skill_import" => skill_import(state, args).await,
         other => Err(anyhow!("unknown op '{other}' (show|llm|telegram|public_url|mcp_add|earn|skill_import)")),
@@ -141,6 +142,35 @@ async fn secret(state: &Shared, args: &Value, k: &str) -> Result<Option<String>>
         Some(v) => Ok(Some(paste::resolve(state, v).await?.trim().to_string())),
         None => Ok(None),
     }
+}
+
+/// What the user wrote in this conversation lately, lowercased.
+async fn user_said(ctx: &ToolCtx<'_>) -> Result<String> {
+    let msgs = ctx.state.db.recent_messages(&ctx.session.id, 12).await?;
+    let mut said = String::new();
+    for m in msgs.iter().filter(|m| m.role == "user") {
+        for p in &m.parts {
+            if let Part::Text { text } = p {
+                said.push_str(&text.to_lowercase());
+                said.push('\n');
+            }
+        }
+    }
+    Ok(said)
+}
+
+/// A pasted key goes only to an address the user wrote themselves, so a
+/// prompt-injected address cannot collect it. `said` is `None` when the call
+/// holds no secret reference.
+fn only_where_user_wrote(said: Option<&str>, url: &str) -> Result<()> {
+    let Some(said) = said else { return Ok(()) };
+    let h = host(url).to_ascii_lowercase();
+    if h.is_empty() || !said.contains(&h) {
+        bail!(
+            "a pasted key is only sent to an address the user wrote in this conversation, and {h} is not one; ask the user where it goes"
+        );
+    }
+    Ok(())
 }
 
 fn host(url: &str) -> String {
@@ -189,7 +219,7 @@ async fn show(state: &Shared) -> Result<String> {
 
 // ------------------------------------------------------------------------ llm
 
-async fn llm(state: &Shared, args: &Value) -> Result<String> {
+async fn llm(state: &Shared, args: &Value, said: Option<&str>) -> Result<String> {
     let current = state.provider_config().await?;
     let key = secret(state, args, "api_key").await?;
     let key_kind = match opt(args, "api_key") {
@@ -198,6 +228,9 @@ async fn llm(state: &Shared, args: &Value) -> Result<String> {
     };
     let mut kind = opt(args, "kind").map(str::to_string);
     let mut base = opt(args, "base_url").map(str::to_string);
+    if let Some(b) = &base {
+        only_where_user_wrote(said, b)?;
+    }
     // What the key's shape says, unless the model said otherwise.
     match key_kind.as_deref() {
         Some("anthropic") if kind.is_none() => kind = Some("anthropic".into()),
@@ -338,7 +371,7 @@ fn transport_for(kind: Option<&str>, url: &str) -> &'static str {
 
 /// A dashboard-style server body from one entry of a pasted config, or why
 /// it cannot be used.
-async fn entry_body(state: &Shared, name: &str, e: &Value) -> Result<Value> {
+async fn entry_body(state: &Shared, name: &str, e: &Value, said: Option<&str>) -> Result<Value> {
     let url = ["url", "serverUrl", "httpUrl", "endpoint"].iter().find_map(|k| e.get(*k).and_then(Value::as_str));
     let Some(url) = url else {
         if e.get("command").is_some() {
@@ -349,6 +382,7 @@ async fn entry_body(state: &Shared, name: &str, e: &Value) -> Result<Value> {
         bail!("{name}: no url in this entry");
     };
     let url = paste::resolve(state, url).await?;
+    only_where_user_wrote(said, &url)?;
     let kind = e.get("type").or(e.get("transport")).and_then(Value::as_str);
     let mut body = json!({"name": name, "url": url, "transport": transport_for(kind, &url)});
     let mut headers = Map::new();
@@ -385,7 +419,7 @@ fn unfence(s: &str) -> &str {
     }
 }
 
-async fn mcp_bodies(state: &Shared, args: &Value) -> Result<Vec<Result<Value>>> {
+async fn mcp_bodies(state: &Shared, args: &Value, said: Option<&str>) -> Result<Vec<Result<Value>>> {
     if let Some(c) = opt(args, "config") {
         let v: Value = serde_json::from_str(unfence(c))
             .map_err(|e| anyhow!("config is not valid JSON ({e}); pass the pasted text as it is"))?;
@@ -394,7 +428,7 @@ async fn mcp_bodies(state: &Shared, args: &Value) -> Result<Vec<Result<Value>>> 
         match servers {
             Some(map) => {
                 for (name, e) in map {
-                    out.push(entry_body(state, name, e).await);
+                    out.push(entry_body(state, name, e, said).await);
                 }
             }
             None => {
@@ -403,7 +437,7 @@ async fn mcp_bodies(state: &Shared, args: &Value) -> Result<Vec<Result<Value>>> 
                     .map(str::to_string)
                     .or_else(|| v.get("name").and_then(Value::as_str).map(str::to_string))
                     .unwrap_or_else(|| name_from_url(url));
-                out.push(entry_body(state, &name, &v).await);
+                out.push(entry_body(state, &name, &v, said).await);
             }
         }
         if out.is_empty() {
@@ -413,6 +447,7 @@ async fn mcp_bodies(state: &Shared, args: &Value) -> Result<Vec<Result<Value>>> 
     }
     let url =
         paste::resolve(state, opt(args, "url").ok_or_else(|| anyhow!("give url (or the pasted config)"))?).await?;
+    only_where_user_wrote(said, &url)?;
     let name = opt(args, "name").map(str::to_string).unwrap_or_else(|| name_from_url(&url));
     let mut body = json!({"name": name, "url": url, "transport": transport_for(opt(args, "transport"), &url)});
     if let Some(t) = secret(state, args, "token").await? {
@@ -429,9 +464,9 @@ async fn mcp_bodies(state: &Shared, args: &Value) -> Result<Vec<Result<Value>>> 
     Ok(vec![Ok(body)])
 }
 
-async fn mcp_add(state: &Shared, args: &Value) -> Result<String> {
+async fn mcp_add(state: &Shared, args: &Value, said: Option<&str>) -> Result<String> {
     let mut lines = Vec::new();
-    for body in mcp_bodies(state, args).await? {
+    for body in mcp_bodies(state, args, said).await? {
         let body = match body {
             Ok(b) => b,
             Err(e) => {
@@ -579,21 +614,10 @@ fn raw_url(u: &str) -> String {
     }
 }
 
-async fn fetch_skill(state: &Shared, u: &str) -> Result<String> {
+async fn fetch_skill(u: &str) -> Result<String> {
     let url = raw_url(u);
     let parsed = url::Url::parse(&url).map_err(|_| anyhow!("invalid url"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        bail!("only http(s) urls are allowed");
-    }
-    if let Some(h) = parsed.host_str() {
-        if h == "localhost"
-            || h.ends_with(".local")
-            || h.parse::<std::net::IpAddr>().is_ok_and(|ip| !super::tools::is_public_ip(&ip))
-        {
-            bail!("refusing to fetch a private address");
-        }
-    }
-    let resp = state.http.get(parsed).timeout(Duration::from_secs(30)).send().await?;
+    let resp = crate::net::get(parsed, None, Duration::from_secs(30)).await?;
     let status = resp.status();
     if !status.is_success() {
         bail!("fetching {url} gave HTTP {status}");
@@ -608,7 +632,7 @@ async fn fetch_skill(state: &Shared, u: &str) -> Result<String> {
 async fn skill_import(state: &Shared, args: &Value) -> Result<String> {
     let md = match (opt(args, "markdown"), opt(args, "url")) {
         (Some(m), _) => m.to_string(),
-        (None, Some(u)) => fetch_skill(state, u).await?,
+        (None, Some(u)) => fetch_skill(u).await?,
         (None, None) => bail!("give markdown or url"),
     };
     let k = api::import_skill_md(state, &md).await.map_err(|e| {

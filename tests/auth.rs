@@ -37,7 +37,7 @@ async fn protected_routes_require_a_valid_session() {
     let token = body["token"].as_str().expect("token").to_string();
     assert!(kongming::web::auth::verify(&app.state.secret, &token));
 
-    // The token works as a cookie, as a bearer token and as a query parameter.
+    // The token works as a cookie and as a bearer token; the query parameter only on /ws.
     let cookie = format!("kongming_session={token}");
     let r = within(app.plain.get(app.url("/api/info")).header("cookie", &cookie).send()).await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
@@ -52,7 +52,7 @@ async fn protected_routes_require_a_valid_session() {
     let r = within(app.plain.get(app.url("/api/info")).bearer_auth(&token).send()).await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     let r = within(app.plain.get(app.url(&format!("/api/info?token={token}"))).send()).await.unwrap();
-    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
 
     // The harness client is already logged in.
     let info = app.get("/api/info").await;

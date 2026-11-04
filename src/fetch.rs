@@ -10,6 +10,7 @@
 //! accepted and ignored.
 
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use reqwest::header::{ACCEPT, CONTENT_TYPE, LOCATION, USER_AGENT};
@@ -151,6 +152,9 @@ const WGET_OPTS: &[Spec] = &[
     ("show-progress", NONE, false),
 ];
 
+/// Set by `main`: the shell's curl and wget stay off private addresses (library callers, tests, are not limited).
+static PUBLIC_ONLY: AtomicBool = AtomicBool::new(false);
+
 /// Entry point of `kongming curl|wget ...`: body to stdout, messages to stderr, returns the exit code.
 pub fn main(prog: &str, args: Vec<String>) -> i32 {
     let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -160,6 +164,7 @@ pub fn main(prog: &str, args: Vec<String>) -> i32 {
             return 1;
         }
     };
+    PUBLIC_ONLY.store(true, Ordering::Relaxed);
     let (mut out, mut err) = (std::io::stdout().lock(), std::io::stderr().lock());
     rt.block_on(run(prog, args, &mut out, &mut err))
 }
@@ -533,8 +538,16 @@ impl Opts {
     }
 
     fn client(&self) -> reqwest::Result<reqwest::Client> {
-        let policy = if self.follow { Policy::limited(self.max_redirs) } else { Policy::none() };
+        let public = PUBLIC_ONLY.load(Ordering::Relaxed);
+        let policy = match (self.follow, public) {
+            (false, _) => Policy::none(),
+            (true, true) => crate::net::redirect_policy(self.max_redirs),
+            (true, false) => Policy::limited(self.max_redirs),
+        };
         let mut b = reqwest::Client::builder().redirect(policy).danger_accept_invalid_certs(self.insecure);
+        if public {
+            b = crate::net::guard(b);
+        }
         if let Some(d) = self.connect_timeout {
             b = b.connect_timeout(d);
         }
@@ -615,6 +628,9 @@ impl Opts {
         let mut url = Url::parse(&with_scheme).map_err(|e| failure(Kind::Url, format!("bad URL {raw}: {e}")))?;
         if !matches!(url.scheme(), "http" | "https") {
             return Err(failure(Kind::Url, format!("protocol \"{}\" not supported", url.scheme())));
+        }
+        if PUBLIC_ONLY.load(Ordering::Relaxed) {
+            crate::net::check_url(&url).map_err(|e| failure(Kind::Connect, e.to_string()))?;
         }
         if let (true, Some(b)) = (self.get, body) {
             let data = String::from_utf8_lossy(b);
@@ -729,7 +745,9 @@ impl Opts {
         }
         let detail = format!("{e}{causes}");
         let lower = causes.to_lowercase();
-        if e.is_timeout() || lower.contains("timed out") {
+        if lower.contains(crate::net::BLOCKED) {
+            failure(Kind::Connect, format!("refusing to connect to {host}: a {}", crate::net::BLOCKED))
+        } else if e.is_timeout() || lower.contains("timed out") {
             failure(Kind::Timeout, format!("Operation timed out: {detail}"))
         } else if e.is_redirect() {
             failure(Kind::Redirects, format!("Maximum ({}) redirects followed", self.max_redirs))

@@ -291,7 +291,13 @@ impl Provider for OpenAi {
                     }
                     let Some(item) = src.next().await else {
                         finished = true;
-                        // Stream ended without a finish marker: still flush tool calls and a Done.
+                        // No [DONE] is fine after a finish_reason; without either the reply was cut.
+                        if state.stop.is_empty() {
+                            return Some((
+                                vec![Err(anyhow!("llm stream ended early (no finish_reason)"))],
+                                (src, state, finished),
+                            ));
+                        }
                         let batch = state.finish();
                         return Some((batch.into_iter().map(Ok).collect::<Vec<_>>(), (src, state, finished)));
                     };

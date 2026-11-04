@@ -4,11 +4,16 @@ pub mod api;
 pub mod auth;
 pub mod ws;
 
-use axum::http::{header, HeaderValue, StatusCode};
-use axum::middleware;
+use std::sync::OnceLock;
+
+use axum::extract::Request;
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
+use base64::Engine;
+use sha2::{Digest, Sha256};
 
 use crate::state::Shared;
 
@@ -54,6 +59,102 @@ async fn health(axum::extract::State(state): axum::extract::State<Shared>) -> Re
                 .into_response()
         }
     }
+}
+
+/// `host[:port]` of an origin-like value, lowercased.
+fn authority_of(v: &str) -> Option<String> {
+    let u = url::Url::parse(v).ok()?;
+    let host = u.host_str()?.to_ascii_lowercase();
+    Some(match u.port() {
+        Some(p) => format!("{host}:{p}"),
+        None => host,
+    })
+}
+
+/// The authority named by the Origin header, or the Referer when there is no
+/// Origin. `None`: the request carries neither (not from a browser page);
+/// a value that is not an address (`null`) gives an empty string, which
+/// matches nothing.
+pub fn origin_authority(headers: &HeaderMap) -> Option<String> {
+    let v = headers.get(header::ORIGIN).or_else(|| headers.get(header::REFERER))?;
+    Some(v.to_str().ok().and_then(authority_of).unwrap_or_default())
+}
+
+/// Whether `authority` is what the request was addressed to (Host, or
+/// X-Forwarded-Host behind a proxy; a browser cannot set either cross-site).
+pub fn names_this_host(headers: &HeaderMap, authority: &str) -> bool {
+    [header::HOST.as_str(), "x-forwarded-host"]
+        .iter()
+        .filter_map(|h| headers.get(*h).and_then(|v| v.to_str().ok()))
+        .any(|h| h.trim().eq_ignore_ascii_case(authority))
+}
+
+/// Whether the configured public URL is at `authority` (host and port).
+async fn is_public_authority(state: &Shared, authority: &str) -> bool {
+    state.public_url().await.and_then(|u| authority_of(&u)).is_some_and(|a| a == authority)
+}
+
+/// DNS rebinding: with no password, a Host that is a name other than
+/// localhost or the public URL's must not reach the API. Not enforced
+/// without a public URL to compare against.
+async fn rebinding(state: &Shared, headers: &HeaderMap) -> bool {
+    if !state.cfg.password.is_empty() {
+        return false;
+    }
+    let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else { return false };
+    let Ok(parsed) = url::Url::parse(&format!("http://{host}")) else { return true };
+    let Some(url::Host::Domain(name)) = parsed.host() else { return false };
+    let name = name.to_ascii_lowercase();
+    if name == "localhost" || name.ends_with(".localhost") {
+        return false;
+    }
+    match state.public_url().await.and_then(|u| url::Url::parse(&u).ok()) {
+        Some(public) => public.host_str().map(str::to_ascii_lowercase).as_deref() != Some(name.as_str()),
+        None => false,
+    }
+}
+
+fn csp() -> &'static str {
+    static CSP: OnceLock<String> = OnceLock::new();
+    CSP.get_or_init(|| {
+        // The one inline script in index.html is allowed by its hash.
+        let script =
+            INDEX_HTML.split_once("<script>").and_then(|(_, r)| r.split_once("</script>")).map_or("", |(s, _)| s);
+        let hash = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(script.as_bytes()));
+        format!(
+            "default-src 'self'; script-src 'self' 'sha256-{hash}'; style-src 'self' 'unsafe-inline'; \
+             img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; \
+             frame-ancestors 'none'; form-action 'self'"
+        )
+    })
+}
+
+/// Cross-site and rebinding guards on the way in, security headers on the way out.
+/// The Telegram webhook and the OAuth callback are called by other sites on purpose.
+async fn guard(axum::extract::State(state): axum::extract::State<Shared>, req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+    let exempt = matches!(path, "/api/telegram/webhook" | "/api/mcp/oauth/callback");
+    if !exempt {
+        let writes = !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
+        let refuse = |msg: &str| (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({"error": msg}))).into_response();
+        if let (true, Some(origin)) = (writes || path == "/ws", origin_authority(req.headers())) {
+            if !names_this_host(req.headers(), &origin) && !is_public_authority(&state, &origin).await {
+                return refuse("cross-site request refused");
+            }
+        }
+        if rebinding(&state, req.headers()).await {
+            return refuse("unexpected Host header");
+        }
+    }
+    let mut resp = next.run(req).await;
+    let h = resp.headers_mut();
+    h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    if let Ok(v) = HeaderValue::from_str(csp()) {
+        h.insert(header::CONTENT_SECURITY_POLICY, v);
+    }
+    resp
 }
 
 pub fn router(state: Shared) -> Router {
@@ -111,5 +212,6 @@ pub fn router(state: Shared) -> Router {
         .route("/ws", get(ws::handler))
         .nest("/api", public.merge(protected))
         .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024))
+        .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
 }

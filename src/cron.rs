@@ -67,13 +67,17 @@ pub fn next_run(schedule: &str, after_ms: i64) -> Option<i64> {
         .ok()?
         + time::Duration::minutes(1);
     let mut t = start;
+    // Standard cron: with both day fields restricted, either one may match.
+    let either_day = !fields[2].starts_with('*') && !fields[4].starts_with('*');
     for _ in 0..(366 * 24 * 60) {
         let dow = t.weekday().number_days_from_sunday() as u32;
+        let dom_ok = field_matches(fields[2], t.day() as u32, 1, 31)?;
+        let dow_ok = field_matches(fields[4], dow, 0, 6)? || (dow == 0 && field_matches(fields[4], 7, 0, 7)?);
+        let day_ok = if either_day { dom_ok || dow_ok } else { dom_ok && dow_ok };
         let ok = field_matches(fields[0], t.minute() as u32, 0, 59)?
             && field_matches(fields[1], t.hour() as u32, 0, 23)?
-            && field_matches(fields[2], t.day() as u32, 1, 31)?
             && field_matches(fields[3], t.month() as u8 as u32, 1, 12)?
-            && (field_matches(fields[4], dow, 0, 6)? || (dow == 0 && field_matches(fields[4], 7, 0, 7)?));
+            && day_ok;
         if ok {
             return Some(t.unix_timestamp() * 1000);
         }
@@ -145,6 +149,28 @@ pub async fn run_job(state: Shared, job: CronJob) {
     tracing::info!(job = %job.name, %status, "cron job done");
 }
 
+static RUNNING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// A job id marked as running until dropped.
+struct Running(String);
+
+impl Running {
+    fn claim(id: &str) -> Option<Running> {
+        let mut r = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+        if r.iter().any(|x| x == id) {
+            return None;
+        }
+        r.push(id.to_string());
+        Some(Running(id.to_string()))
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        RUNNING.lock().unwrap_or_else(|e| e.into_inner()).retain(|x| *x != self.0);
+    }
+}
+
 pub async fn run(state: Shared) {
     let mut tick = tokio::time::interval(Duration::from_secs(30));
     loop {
@@ -179,10 +205,14 @@ pub async fn run(state: Shared) {
                 }
             };
             if due {
-                // Claim it first so a long run isn't started twice.
+                // A run longer than the interval must not overlap the next one.
+                let Some(guard) = Running::claim(&job.id) else { continue };
                 let _ = state.db.mark_cron_run(&job.id, next_run(&job.schedule, now), "running").await;
                 let st = state.clone();
-                tokio::spawn(async move { run_job(st, job).await });
+                tokio::spawn(async move {
+                    let _guard = guard;
+                    run_job(st, job).await
+                });
             }
         }
         let _: Option<Value> = None;
@@ -222,8 +252,19 @@ mod tests {
         // 2026-01-01 is a Thursday (4); next Monday (1) is Jan 5 at 08:30.
         assert_eq!(next_run("30 8 * * 1", base), Some(base + 4 * 86_400_000 + 8 * 3_600_000 + 30 * 60_000));
         assert_eq!(next_run("0 0 1 2 *", base), Some(base + 31 * 86_400_000));
+        // Day 15 or any Monday: Monday Jan 5 comes first.
+        assert_eq!(next_run("0 0 15 * 1", base), Some(base + 4 * 86_400_000));
+        assert!(next_run("0 0 30 2 *", base).is_none(), "Feb 30 never comes");
         assert!(next_run("bad", base).is_none());
         assert!(next_run("61 * * * *", base).is_none());
+    }
+
+    #[test]
+    fn a_running_job_is_not_claimed_twice() {
+        let g = Running::claim("job-a").unwrap();
+        assert!(Running::claim("job-a").is_none());
+        drop(g);
+        assert!(Running::claim("job-a").is_some());
     }
 
     #[test]
