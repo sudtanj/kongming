@@ -500,7 +500,7 @@ impl Db {
         self.turso
             .batch(&[
                 (
-                    "INSERT INTO messages(id, session_id, seq, role, content, agent_id, created_at)
+                    "INSERT OR IGNORE INTO messages(id, session_id, seq, role, content, agent_id, created_at)
                      SELECT ?, ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ? FROM messages WHERE session_id = ?"
                         .into(),
                     vec![

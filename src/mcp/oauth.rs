@@ -29,6 +29,22 @@ fn origin(url: &str) -> Result<String> {
     Ok(u.origin().ascii_serialization())
 }
 
+/// A discovered endpoint is only used over https, or http on this machine
+/// (a `javascript:` or `file:` address would otherwise reach the browser).
+fn secure_url(what: &str, endpoint: &str) -> Result<()> {
+    let u = url::Url::parse(endpoint).with_context(|| format!("invalid {what}"))?;
+    let local = match u.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    if u.scheme() == "https" || (u.scheme() == "http" && local) {
+        return Ok(());
+    }
+    bail!("the {what} must be an https address, not {}", u.scheme())
+}
+
 async fn get_json(http: &reqwest::Client, url: &str) -> Option<Value> {
     let r = http.get(url).header("accept", "application/json").send().await.ok()?;
     if !r.status().is_success() {
@@ -112,6 +128,13 @@ pub async fn discover(http: &reqwest::Client, server_url: &str, scope_hint: Opti
     if st.registration_endpoint.is_none() {
         st.registration_endpoint = Some(format!("{auth_server}/register"));
     }
+    for (what, url) in [
+        ("authorization endpoint", &st.authorization_endpoint),
+        ("token endpoint", &st.token_endpoint),
+        ("registration endpoint", &st.registration_endpoint),
+    ] {
+        secure_url(what, url.as_deref().unwrap_or_default())?;
+    }
     Ok(st)
 }
 
@@ -124,6 +147,7 @@ pub async fn register(http: &reqwest::Client, st: &mut OAuthState, redirect_uri:
     let Some(reg) = st.registration_endpoint.clone() else {
         bail!("no registration endpoint and no client id configured")
     };
+    secure_url("registration endpoint", &reg)?;
     let body = serde_json::json!({
         "client_name": "kongming",
         "redirect_uris": [redirect_uri],
@@ -151,6 +175,7 @@ pub async fn register(http: &reqwest::Client, st: &mut OAuthState, redirect_uri:
 pub fn authorize_url(st: &OAuthState, redirect_uri: &str, state: &str, verifier: &str) -> Result<String> {
     let endpoint = st.authorization_endpoint.as_deref().ok_or_else(|| anyhow!("no authorization endpoint"))?;
     let client_id = st.client_id.as_deref().ok_or_else(|| anyhow!("no client id"))?;
+    secure_url("authorization endpoint", endpoint)?;
     let mut u = url::Url::parse(endpoint).context("invalid authorization endpoint")?;
     {
         let mut q = u.query_pairs_mut();
@@ -174,6 +199,7 @@ pub fn authorize_url(st: &OAuthState, redirect_uri: &str, state: &str, verifier:
 
 async fn token_request(http: &reqwest::Client, st: &mut OAuthState, form: &HashMap<&str, String>) -> Result<()> {
     let endpoint = st.token_endpoint.clone().ok_or_else(|| anyhow!("no token endpoint"))?;
+    secure_url("token endpoint", &endpoint)?;
     let mut req = http.post(&endpoint).header("accept", "application/json");
     if let (Some(id), Some(secret)) = (&st.client_id, &st.client_secret) {
         req = req.basic_auth(id, Some(secret));

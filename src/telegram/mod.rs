@@ -17,6 +17,7 @@ use crate::agent::{self, TurnOptions};
 use crate::state::{Event, Shared};
 
 const EDIT_INTERVAL: Duration = Duration::from_millis(900);
+const BUSY_REPLY: &str = "Still working on the previous message. Send yours again once it is answered, or /stop to cancel it.";
 const MAX_MESSAGE: usize = 4000;
 
 #[derive(Clone)]
@@ -725,7 +726,7 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
 
     let session = session_for_chat(&state, chat_id, false).await?;
     if state.is_running(&session.id) {
-        tg.send_message(chat_id, "Still working on the previous message. /stop to cancel it.").await?;
+        tg.send_message(chat_id, BUSY_REPLY).await?;
         return Ok(());
     }
     tg.typing(chat_id).await;
@@ -778,6 +779,7 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
                                     progress.steps.push((id, name, None));
                                 }
                             }
+                            Ok(Event::StreamReset { session_id, .. }) if session_id == sid => buf.clear(),
                             Ok(Event::TurnEnd { session_id, .. }) if session_id == sid => finished = true,
                             Ok(_) => {}
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
@@ -817,6 +819,13 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
         })
     };
     let result = agent::run_turn(state.clone(), session, text, TurnOptions::default()).await;
+    // Another message got the session first: this turn never started, so no
+    // TurnEnd will come for the streamer.
+    if matches!(&result, Err(e) if e.to_string() == agent::BUSY) {
+        streamer.abort();
+        tg.send_message(chat_id, BUSY_REPLY).await?;
+        return Ok(());
+    }
     let (streamed, message_id) = streamer.await.unwrap_or_default();
     match result {
         Ok(r) => {

@@ -8,7 +8,7 @@ use clap::Parser;
 #[command(name = "kongming", version, about = "kongming: small agentic AI daemon, all state on Turso")]
 pub struct Config {
     /// Address to listen on.
-    #[arg(long, env = "KONGMING_HOST", default_value = "0.0.0.0")]
+    #[arg(long, env = "KONGMING_HOST", default_value = "127.0.0.1")]
     pub host: String,
 
     #[arg(long, env = "PORT", default_value_t = 18800)]

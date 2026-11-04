@@ -64,6 +64,11 @@ pub enum Event {
         turn_id: String,
         text: String,
     },
+    /// The model request is being retried: drop the text streamed so far.
+    StreamReset {
+        session_id: String,
+        turn_id: String,
+    },
     TurnEnd {
         session_id: String,
         turn_id: String,
@@ -91,6 +96,7 @@ impl Event {
             | Event::ToolResult { session_id, .. }
             | Event::Message { session_id, .. }
             | Event::Status { session_id, .. }
+            | Event::StreamReset { session_id, .. }
             | Event::TurnEnd { session_id, .. } => Some(session_id),
             Event::SessionUpdated { session } => Some(&session.id),
             Event::Improvement { .. } => None,
@@ -102,6 +108,9 @@ pub struct AppState {
     pub cfg: Config,
     pub db: Db,
     pub http: reqwest::Client,
+    /// For long streams (LLM replies, legacy MCP SSE): no total timeout, only
+    /// connect and idle-read limits.
+    pub http_stream: reqwest::Client,
     pub bus: broadcast::Sender<Event>,
     pub mcp: McpManager,
     pub secret: Vec<u8>,
@@ -132,6 +141,14 @@ impl AppState {
             .user_agent(concat!("kongming/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("http client");
+        let http_stream = reqwest::Client::builder()
+            .read_timeout(std::time::Duration::from_secs(300))
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .pool_max_idle_per_host(2)
+            .use_rustls_tls()
+            .user_agent(concat!("kongming/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("http client");
         let (bus, _) = broadcast::channel(256);
         let secret = match &cfg.secret {
             Some(s) if !s.is_empty() => s.as_bytes().to_vec(),
@@ -139,10 +156,11 @@ impl AppState {
         };
         let shell = crate::agent::shell::Shell::from_config(&cfg.shell);
         Arc::new(AppState {
-            mcp: McpManager::new(db.clone(), http.clone()),
+            mcp: McpManager::new(db.clone(), http.clone(), http_stream.clone()),
             cfg,
             db,
             http,
+            http_stream,
             bus,
             secret,
             started_at: crate::db::now_ms(),
@@ -230,7 +248,7 @@ impl AppState {
                 return Ok((cfg, p.clone()));
             }
         }
-        let p: Arc<dyn Provider> = Arc::from(llm::build(&cfg, self.http.clone())?);
+        let p: Arc<dyn Provider> = Arc::from(llm::build(&cfg, self.http_stream.clone())?);
         *self.provider_cache.write() = Some((cfg.clone(), p.clone()));
         Ok((cfg, p))
     }

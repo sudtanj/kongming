@@ -114,13 +114,54 @@ fn history_to_chat(session: &Session, msgs: &[Message]) -> Vec<ChatMessage> {
             out.push(ChatMessage::text("assistant", "Understood, I have the summary of our earlier conversation."));
         }
     }
+    // Tool results answer the calls of the assistant message right before
+    // them. A turn cut between the two (crash, restart, error) would leave
+    // calls without results, which providers reject on every later request.
+    let mut open: Vec<(String, String)> = Vec::new();
     for m in msgs.iter().filter(|m| m.seq > session.summary_upto) {
         if m.role == "system" {
             continue;
         }
+        if m.role == "tool" {
+            let mut parts: Vec<Part> = m
+                .parts
+                .iter()
+                .filter(|p| matches!(p, Part::ToolResult { id, .. } if open.iter().any(|(c, _)| c == id)))
+                .cloned()
+                .collect();
+            open.retain(|(c, _)| !parts.iter().any(|p| matches!(p, Part::ToolResult { id, .. } if id == c)));
+            parts.extend(open.drain(..).map(|(id, name)| interrupted_result(id, name)));
+            if !parts.is_empty() {
+                out.push(ChatMessage { role: m.role.clone(), parts });
+            }
+            continue;
+        }
+        if !open.is_empty() {
+            out.push(ChatMessage {
+                role: "tool".into(),
+                parts: open.drain(..).map(|(id, name)| interrupted_result(id, name)).collect(),
+            });
+        }
+        if m.role == "assistant" {
+            open = m
+                .parts
+                .iter()
+                .filter_map(|p| match p {
+                    Part::ToolCall { id, name, .. } => Some((id.clone(), name.clone())),
+                    _ => None,
+                })
+                .collect();
+        }
         out.push(ChatMessage { role: m.role.clone(), parts: m.parts.clone() });
     }
+    if !open.is_empty() {
+        out.push(ChatMessage { role: "tool".into(), parts: open.drain(..).map(|(id, name)| interrupted_result(id, name)).collect() });
+    }
     out
+}
+
+fn interrupted_result(id: String, name: String) -> Part {
+    Part::ToolResult { id, name, content: "error: interrupted (no result recorded)".into(), is_error: true }
 }
 
 /// The model's view of the session. The request being worked on keeps its
@@ -495,6 +536,7 @@ async fn model_round(
     for attempt in 0..LLM_RETRIES {
         if attempt > 0 {
             let wait = Duration::from_millis(800 * (1 << attempt));
+            state.emit(Event::StreamReset { session_id: session_id.into(), turn_id: turn_id.into() });
             state.emit(Event::Status {
                 session_id: session_id.into(),
                 turn_id: turn_id.into(),
@@ -866,13 +908,26 @@ fn shorten_tool_results(chat: &mut [ChatMessage]) {
     }
 }
 
+/// The error of a turn refused because another one runs in the same session.
+pub const BUSY: &str = "a reply is already in progress for this conversation";
+
 /// Run one user turn end to end. The user message is persisted here.
 pub async fn run_turn(state: Shared, mut session: Session, user_text: String, opts: TurnOptions) -> Result<TurnResult> {
     let Some(cancel) = state.begin_turn(&session.id) else {
-        return Err(anyhow!("a reply is already in progress for this conversation"));
+        return Err(anyhow!(BUSY));
     };
-    let result = run_turn_inner(&state, &mut session, user_text, &opts, &cancel).await;
+    let turn_id = new_id();
+    let result = run_turn_inner(&state, &mut session, user_text, &opts, &cancel, turn_id.clone()).await;
     state.end_turn(&session.id);
+    // Whoever streams this turn (web, Telegram) waits for its end, failed or not.
+    if let Err(e) = &result {
+        state.emit(Event::TurnEnd {
+            session_id: session.id.clone(),
+            turn_id,
+            stop_reason: "error".into(),
+            error: Some(format!("{e:#}")),
+        });
+    }
     result
 }
 
@@ -882,8 +937,8 @@ async fn run_turn_inner(
     user_text: String,
     opts: &TurnOptions,
     cancel: &AtomicBool,
+    turn_id: String,
 ) -> Result<TurnResult> {
-    let turn_id = new_id();
     let agent = match &opts.agent_override {
         Some(a) => a.clone(),
         None => user_agent(state, session).await?,
@@ -929,19 +984,7 @@ async fn run_turn_inner(
         .flat_map(|m| m.parts.iter())
         .any(|p| matches!(p, Part::Text { text } if setup::wanted(text)));
 
-    let mut plan = match plan(state, session, agent, &mentions, &request_text, setup_hint).await {
-        Ok(p) => p,
-        Err(e) => {
-            let msg = format!("{e:#}");
-            state.emit(Event::TurnEnd {
-                session_id: session.id.clone(),
-                turn_id,
-                stop_reason: "error".into(),
-                error: Some(msg.clone()),
-            });
-            return Err(e);
-        }
-    };
+    let mut plan = plan(state, session, agent, &mentions, &request_text, setup_hint).await?;
     let (pcfg, _) = state.provider().await?;
     if request_tokens(&plan.system, &plan.tools, &chat) >= plan.budget.context_tokens {
         compact_chat(state, session, &turn_id, &plan, KEEP_RECENT_MESSAGES, request, &mut chat).await;
@@ -1736,9 +1779,51 @@ mod tests {
 
     #[test]
     fn summary_before_an_assistant_message_needs_no_reply() {
-        let chat = history_to_chat(&session(1), &[msg(1, "user"), msg(2, "assistant"), msg(3, "tool")]);
+        let chat = history_to_chat(&session(1), &[msg(1, "user"), with_call(msg(2, "assistant"), "c1"), result(3, "c1")]);
         let roles: Vec<&str> = chat.iter().map(|m| m.role.as_str()).collect();
         assert_eq!(roles, ["user", "assistant", "tool"]);
+    }
+
+    fn with_call(mut m: Message, id: &str) -> Message {
+        m.parts.push(Part::ToolCall { id: id.into(), name: "t".into(), args: Value::Null });
+        m
+    }
+
+    fn result(seq: i64, id: &str) -> Message {
+        let mut m = msg(seq, "tool");
+        m.parts = vec![Part::ToolResult { id: id.into(), name: "t".into(), content: "ok".into(), is_error: false }];
+        m
+    }
+
+    #[test]
+    fn interrupted_tool_calls_get_a_result_and_orphans_are_dropped() {
+        let chat = history_to_chat(
+            &Session { summary: None, ..session(0) },
+            &[
+                msg(1, "user"),
+                with_call(with_call(msg(2, "assistant"), "a"), "b"),
+                result(3, "a"),
+                result(4, "ghost"),
+                with_call(msg(5, "assistant"), "c"),
+                msg(6, "user"),
+                with_call(msg(7, "assistant"), "d"),
+            ],
+        );
+        let roles: Vec<&str> = chat.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, ["user", "assistant", "tool", "assistant", "tool", "user", "assistant", "tool"]);
+        let ids = |m: &ChatMessage| -> Vec<String> {
+            m.parts
+                .iter()
+                .filter_map(|p| match p {
+                    Part::ToolResult { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(ids(&chat[2]), ["a", "b"]);
+        assert_eq!(ids(&chat[4]), ["c"]);
+        assert_eq!(ids(&chat[7]), ["d"]);
+        assert!(matches!(&chat[4].parts[0], Part::ToolResult { is_error: true, content, .. } if content.contains("interrupted")));
     }
 
     #[test]

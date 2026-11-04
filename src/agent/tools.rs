@@ -505,53 +505,18 @@ async fn run_shell(ctx: &ToolCtx<'_>, args: &Value) -> Result<(String, bool)> {
     sh.run(command, timeout).await
 }
 
-async fn web_fetch(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
+async fn web_fetch(_ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
     let url = s(args, "url").trim().to_string();
     let parsed = url::Url::parse(&url).map_err(|_| anyhow!("invalid url"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        bail!("only http(s) urls are allowed");
-    }
-    if let Some(host) = parsed.host_str() {
-        if host == "localhost"
-            || host.ends_with(".local")
-            || host.parse::<std::net::IpAddr>().is_ok_and(|ip| !is_public_ip(&ip))
-        {
-            bail!("refusing to fetch a private address");
-        }
-    }
     let max = args.get("max_chars").and_then(Value::as_u64).unwrap_or(FETCH_LIMIT as u64).clamp(500, 20_000) as usize;
-    let resp = ctx
-        .state
-        .http
-        .get(parsed)
-        .header("accept", "text/html, application/json, text/plain, */*")
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await?;
+    let accept = "text/html, application/json, text/plain, */*";
+    let resp = crate::net::get(parsed, Some(accept), std::time::Duration::from_secs(30)).await?;
     let status = resp.status();
     let ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     let bytes = resp.bytes().await?;
     let body = String::from_utf8_lossy(&bytes[..bytes.len().min(1_500_000)]).to_string();
     let text = if ct.contains("html") { html_to_text(&body) } else { body };
     Ok(format!("HTTP {status} {ct}\n\n{}", crate::mcp::truncate(text.trim(), max)))
-}
-
-pub(crate) fn is_public_ip(ip: &std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            !(v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1]))
-        }
-        std::net::IpAddr::V6(v6) => {
-            !(v6.is_loopback()
-                || v6.is_unspecified()
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                || (v6.segments()[0] & 0xffc0) == 0xfe80)
-        }
-    }
 }
 
 /// Crude but dependency-free HTML to text: drops script/style, tags, decodes
@@ -968,15 +933,6 @@ mod tests {
         let html = "<html><head><style>a{}</style><script>x()</script></head><body><h1>Title</h1><p>Hello &amp; <b>world</b></p><!-- c --><ul><li>one</li><li>two</li></ul></body></html>";
         let t = html_to_text(html);
         assert_eq!(t, "Title\n\nHello & world\n\none\ntwo");
-    }
-
-    #[test]
-    fn private_ips_are_rejected() {
-        assert!(!is_public_ip(&"127.0.0.1".parse().unwrap()));
-        assert!(!is_public_ip(&"10.1.2.3".parse().unwrap()));
-        assert!(!is_public_ip(&"100.100.1.1".parse().unwrap()));
-        assert!(is_public_ip(&"1.1.1.1".parse().unwrap()));
-        assert!(!is_public_ip(&"fe80::1".parse().unwrap()));
     }
 
     #[test]

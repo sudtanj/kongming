@@ -10,6 +10,7 @@ pub mod earn;
 pub mod fetch;
 pub mod llm;
 pub mod mcp;
+pub mod net;
 pub mod proactive;
 pub mod state;
 pub mod telegram;

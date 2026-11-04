@@ -34,9 +34,13 @@ struct SseConn {
 pub struct McpManager {
     db: Db,
     http: reqwest::Client,
+    /// No total timeout, for the long-lived legacy SSE GET.
+    stream: reqwest::Client,
     next_id: AtomicI64,
     /// server id -> Mcp-Session-Id (streamable HTTP)
     sessions: Mutex<HashMap<String, String>>,
+    /// Servers initialized since boot (or since their last refresh).
+    ready: Mutex<std::collections::HashSet<String>>,
     sse: Mutex<HashMap<String, Arc<SseConn>>>,
     /// OAuth state param -> (server id, PKCE verifier, redirect uri)
     pending_oauth: Mutex<HashMap<String, (String, String, String)>>,
@@ -68,12 +72,14 @@ pub fn parse_tool_name(name: &str) -> Option<(&str, &str)> {
 }
 
 impl McpManager {
-    pub fn new(db: Db, http: reqwest::Client) -> McpManager {
+    pub fn new(db: Db, http: reqwest::Client, stream: reqwest::Client) -> McpManager {
         McpManager {
             db,
             http,
+            stream,
             next_id: AtomicI64::new(1),
             sessions: Mutex::new(HashMap::new()),
+            ready: Mutex::new(Default::default()),
             sse: Mutex::new(HashMap::new()),
             pending_oauth: Mutex::new(HashMap::new()),
         }
@@ -242,7 +248,7 @@ impl McpManager {
                 return Ok(c.clone());
             }
         }
-        let req = self.apply_headers(self.http.get(&s.url).header("accept", "text/event-stream"), s, auth);
+        let req = self.apply_headers(self.stream.get(&s.url).header("accept", "text/event-stream"), s, auth);
         let resp = tokio::time::timeout(Duration::from_secs(20), req.send())
             .await
             .map_err(|_| anyhow!("sse connect timed out"))?
@@ -367,6 +373,7 @@ impl McpManager {
         });
         let info = self.rpc(s, "initialize", params).await?;
         let _ = self.notify(s, "notifications/initialized").await;
+        self.ready.lock().insert(s.id.clone());
         Ok(info)
     }
 
@@ -426,15 +433,14 @@ impl McpManager {
         }
         let args = if args.is_object() { args } else { json!({}) };
         let params = json!({"name": tool, "arguments": args});
+        if s.transport != "sse" && !self.ready.lock().contains(server_id) {
+            self.initialize(&s).await?;
+        }
         let mut result = self.rpc(&s, "tools/call", params.clone()).await;
-        if let Err(e) = &result {
-            let msg = format!("{e:#}");
-            if msg.contains("session expired")
-                || (s.transport != "sse" && !self.sessions.lock().contains_key(server_id))
-            {
-                self.initialize(&s).await?;
-                result = self.rpc(&s, "tools/call", params).await;
-            }
+        // Only a 404 on a session the server issued is safe to retry: the call never ran.
+        if result.as_ref().is_err_and(|e| format!("{e:#}").contains("session expired")) {
+            self.initialize(&s).await?;
+            result = self.rpc(&s, "tools/call", params).await;
         }
         let r = result?;
         Ok(render_result(&r))
@@ -509,6 +515,7 @@ impl McpManager {
 
     pub fn forget(&self, server_id: &str) {
         self.sessions.lock().remove(server_id);
+        self.ready.lock().remove(server_id);
         self.sse.lock().remove(server_id);
     }
 

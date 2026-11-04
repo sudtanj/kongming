@@ -584,7 +584,8 @@ if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEven
 
 const md = (() => {
   const SAFE_URL = /^(https?:|mailto:|tel:|\/|#|\.\/)/i;
-  const SAFE_IMG = /^(https?:|data:image\/(png|jpe?g|gif|webp|svg\+xml);|\/)/i;
+  // Images load without a click, so a remote one would leak to its host: only same-origin or inline data loads.
+  const SAFE_IMG = /^(data:image\/(png|jpe?g|gif|webp|svg\+xml);|\/(?!\/))/i;
   function safeUrl(u) { const s = u.replace(/&amp;/g, '&').trim(); return SAFE_URL.test(s) ? esc(s) : '#'; }
   function inline(raw) {
     let s = esc(raw);
@@ -592,7 +593,7 @@ const md = (() => {
     const keep = (html) => { hold.push(html); return `\u0000${hold.length - 1}\u0000`; };
     s = s.replace(/`([^`\n]+)`/g, (_, c) => keep(`<code>${c}</code>`));
     s = s.replace(/\[secret:([A-Za-z0-9]+) ([\w-]+) …([^\]\s]{0,12})\]/g, (_, id, kind, end) => keep(`<span class="secret-chip" title="${esc(t('secret.title'))}"><svg class="i" aria-hidden="true"><use href="#i-lock"></use></svg>${kind} …${end}</span>`));
-    s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)/g, (_, alt, src) => SAFE_IMG.test(src) ? keep(`<img src="${esc(src)}" alt="${alt}" loading="lazy">`) : alt);
+    s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)/g, (_, alt, src) => SAFE_IMG.test(src) ? keep(`<img src="${esc(src)}" alt="${alt}" loading="lazy">`) : keep(`<a href="${safeUrl(src)}" target="_blank" rel="noopener noreferrer">${alt || src}</a>`));
     s = s.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)/g, (_, txt, url) => keep(`<a href="${safeUrl(url)}" target="_blank" rel="noopener noreferrer">${txt}</a>`));
     s = s.replace(/(^|[\s(])(https?:\/\/[^\s<]+?)(?=[.,;:!?)]*(?:\s|$))/g, (_, pre, url) => pre + keep(`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${url}</a>`));
     s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/__(.+?)__/g, '<strong>$1</strong>');
@@ -780,6 +781,7 @@ function handleEvent(ev) {
       return;
     }
     case 'delta': { const l = liveFor(sid, true); l.text += ev.text; if (open) thread.scheduleLive(); return; }
+    case 'stream_reset': { const l = liveFor(sid, false); if (l) { l.text = ''; l.reasoning = ''; if (open) thread.scheduleLive(); } return; }
     case 'reasoning_delta': { const l = liveFor(sid, true); l.reasoning += ev.text; if (open) thread.scheduleLive(); return; }
     case 'status': { const l = liveFor(sid, true); l.status = ev.text; if (open) thread.scheduleLive(); return; }
     case 'tool_call': {
@@ -1772,7 +1774,7 @@ const settings = (() => {
     const act = (label, fn, cls) => { const b = h('button', { class: 'btn ' + (cls || 'outline') + ' sm', type: 'button' }, label); b.addEventListener('click', async () => { b.disabled = true; try { await fn(); } catch (e) { toast(e.message, 'err'); } b.disabled = false; }); return b; };
     const actions = [
       act([icon('refresh'), t('mcp.refresh')], async () => { const r = await api.post('/api/mcp/' + m.id + '/refresh'); if (r.error) toast(r.error, 'err'); reload(); }),
-      m.authType === 'oauth' ? act([icon('link'), m.oauthConnected ? t('mcp.disconnect') : t('mcp.connect')], async () => { if (m.oauthConnected) { await api.post('/api/mcp/' + m.id + '/oauth/disconnect'); reload(); } else { const r = await api.post('/api/mcp/' + m.id + '/oauth/start'); if (r.manual) oauthPasteModal(m, r); else location.href = r.url; } }) : null,
+      m.authType === 'oauth' ? act([icon('link'), m.oauthConnected ? t('mcp.disconnect') : t('mcp.connect')], async () => { if (m.oauthConnected) { await api.post('/api/mcp/' + m.id + '/oauth/disconnect'); reload(); } else { const r = await api.post('/api/mcp/' + m.id + '/oauth/start'); if (r.manual) oauthPasteModal(m, r); else if (/^https?:\/\//i.test(r.url)) location.href = r.url; else toast(t('common.error')); } }) : null,
       h('button', { class: 'icon-btn quiet', type: 'button', title: t('common.edit'), 'aria-label': t('common.edit'), onClick: () => navigate('#/settings/mcp?edit=' + m.id) }, icon('pencil')),
       h('button', { class: 'icon-btn quiet', type: 'button', title: t('common.delete'), 'aria-label': t('common.delete'), onClick: () => modal.confirm({ title: t('mcp.deleteTitle', { name: m.name }), desc: t('mcp.deleteDesc'), confirm: t('common.delete'), danger: true, onConfirm: async () => { await api.del('/api/mcp/' + m.id); reload(); } }) }, icon('trash')),
     ];
