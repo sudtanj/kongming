@@ -158,7 +158,10 @@ impl Provider for Anthropic {
                     let Some(item) = src.next().await else {
                         finished = true;
                         if st.stop.is_empty() {
-                            return Some((vec![Err(anyhow!("llm stream ended early (no stop reason)"))], (src, st, finished)));
+                            return Some((
+                                vec![Err(anyhow!("llm stream ended early (no stop reason)"))],
+                                (src, st, finished),
+                            ));
                         }
                         let reason = st.stop.clone();
                         return Some((vec![Ok(LlmEvent::Done { stop_reason: reason })], (src, st, finished)));

@@ -155,7 +155,10 @@ fn history_to_chat(session: &Session, msgs: &[Message]) -> Vec<ChatMessage> {
         out.push(ChatMessage { role: m.role.clone(), parts: m.parts.clone() });
     }
     if !open.is_empty() {
-        out.push(ChatMessage { role: "tool".into(), parts: open.drain(..).map(|(id, name)| interrupted_result(id, name)).collect() });
+        out.push(ChatMessage {
+            role: "tool".into(),
+            parts: open.drain(..).map(|(id, name)| interrupted_result(id, name)).collect(),
+        });
     }
     out
 }
@@ -1779,7 +1782,8 @@ mod tests {
 
     #[test]
     fn summary_before_an_assistant_message_needs_no_reply() {
-        let chat = history_to_chat(&session(1), &[msg(1, "user"), with_call(msg(2, "assistant"), "c1"), result(3, "c1")]);
+        let chat =
+            history_to_chat(&session(1), &[msg(1, "user"), with_call(msg(2, "assistant"), "c1"), result(3, "c1")]);
         let roles: Vec<&str> = chat.iter().map(|m| m.role.as_str()).collect();
         assert_eq!(roles, ["user", "assistant", "tool"]);
     }
@@ -1823,7 +1827,9 @@ mod tests {
         assert_eq!(ids(&chat[2]), ["a", "b"]);
         assert_eq!(ids(&chat[4]), ["c"]);
         assert_eq!(ids(&chat[7]), ["d"]);
-        assert!(matches!(&chat[4].parts[0], Part::ToolResult { is_error: true, content, .. } if content.contains("interrupted")));
+        assert!(
+            matches!(&chat[4].parts[0], Part::ToolResult { is_error: true, content, .. } if content.contains("interrupted"))
+        );
     }
 
     #[test]

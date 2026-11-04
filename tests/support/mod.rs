@@ -458,7 +458,8 @@ pub async fn spawn_app_with(replies: Vec<ScriptedReply>, extra_args: &[&str]) ->
         "--password".into(),
         PASSWORD.into(),
         "--secret".into(),
-        "test-secret-test-secret".into(),
+        // Unique per app: the logout epoch is kept per secret, process-wide.
+        kongming::mcp::oauth::random_token(16),
         "--host".into(),
         "127.0.0.1".into(),
     ];

@@ -17,7 +17,8 @@ use crate::agent::{self, TurnOptions};
 use crate::state::{Event, Shared};
 
 const EDIT_INTERVAL: Duration = Duration::from_millis(900);
-const BUSY_REPLY: &str = "Still working on the previous message. Send yours again once it is answered, or /stop to cancel it.";
+const BUSY_REPLY: &str =
+    "Still working on the previous message. Send yours again once it is answered, or /stop to cancel it.";
 const MAX_MESSAGE: usize = 4000;
 
 #[derive(Clone)]
