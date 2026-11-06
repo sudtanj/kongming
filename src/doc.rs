@@ -184,7 +184,8 @@ async fn pdf_in_child(bytes: &Bytes) -> Result<String> {
             drop(stdin);
         };
         let mut out = Vec::new();
-        let read = (&mut stdout).take(MAX_OUTPUT as u64 + 1).read_to_end(&mut out);
+        let mut limited = (&mut stdout).take(MAX_OUTPUT as u64 + 1);
+        let read = limited.read_to_end(&mut out);
         let (_, read) = tokio::join!(feed, read);
         read.map(|_| out)
     };
