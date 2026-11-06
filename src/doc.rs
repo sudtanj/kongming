@@ -590,9 +590,7 @@ mod tests {
         for o in offsets {
             pdf.extend(format!("{o:010} 00000 n \n").bytes());
         }
-        pdf.extend(
-            format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).bytes(),
-        );
+        pdf.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).bytes());
         pdf
     }
 
