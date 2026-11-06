@@ -10,7 +10,8 @@ use kongming::{agent, config, cron, db, earn, proactive, state, telegram, web};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
-    // Commands for the shell tool, run as `kongming cdp|curl|wget ...` or through the links
+    // `kongming doc-pdf` is the PDF reader the daemon starts itself (doc.rs). The rest are commands for the
+    // shell tool, run as `kongming cdp|curl|wget ...` or through the links
     // of those names in the image: `cdp` is the browser client, `curl` and `wget` fetch URLs
     // with rustls instead of BusyBox's TLS and always write to stdout.
     let args: Vec<String> = std::env::args().collect();
@@ -22,6 +23,7 @@ fn main() -> Result<()> {
     match tool {
         "cdp" => std::process::exit(kongming::cdp::main(args[rest..].to_vec())),
         "curl" | "wget" => std::process::exit(kongming::fetch::main(tool, args[rest..].to_vec())),
+        "doc-pdf" => std::process::exit(kongming::doc::pdf_main()),
         _ => {}
     }
     let cfg = config::Config::parse();

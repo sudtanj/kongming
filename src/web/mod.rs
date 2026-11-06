@@ -165,6 +165,7 @@ pub fn router(state: Shared) -> Router {
         .route("/sessions/:id/messages", post(api::send_message))
         .route("/sessions/:id/clear", post(api::clear_session))
         .route("/sessions/:id/stop", post(api::stop_session))
+        .route("/upload", post(api::upload).layer(axum::extract::DefaultBodyLimit::max(crate::doc::MAX_UPLOAD)))
         .route("/agents", get(api::list_agents).post(api::create_agent))
         .route("/agents/:id", get(api::get_agent).put(api::update_agent).delete(api::delete_agent))
         .route("/skills", get(api::list_skills))

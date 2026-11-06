@@ -49,8 +49,13 @@ pub fn builtin_specs(agent: &Agent, can_delegate: bool, sh: Option<&shell::Shell
         },
         ToolSpec {
             name: "web_fetch".into(),
-            description: "Fetch a public http(s) URL and return its readable text (HTML is stripped). For JSON APIs the raw body is returned.".into(),
+            description: "Fetch a public http(s) URL and return its readable text (HTML is stripped). For JSON APIs the raw body is returned. For PDFs and office files use read_document.".into(),
             parameters: obj(json!({"url": {"type": "string"}, "max_chars": {"type": "integer", "minimum": 500, "maximum": 20000}}), &["url"]),
+        },
+        ToolSpec {
+            name: "read_document".into(),
+            description: "Fetch a public http(s) URL that is a document (PDF, docx, xlsx, pptx, odt, ods, odp, txt, md, csv, tsv; up to 10 MB) and return its text. Use this instead of web_fetch for PDFs and office files. offset continues a long document.".into(),
+            parameters: obj(json!({"url": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "max_chars": {"type": "integer", "minimum": 500, "maximum": 20000}}), &["url"]),
         },
         ToolSpec {
             name: "current_time".into(),
@@ -223,6 +228,7 @@ pub async fn run_builtin(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Option<
         "list_sessions" => list_sessions(ctx, args).await,
         "read_session" => read_session(ctx, args).await,
         "web_fetch" => web_fetch(ctx, args).await,
+        "read_document" => read_document(ctx, args).await,
         "current_time" => Ok(current_time()),
         "delegate_task" => delegate(ctx, args).await,
         "agent_manage" => agent_manage(ctx, args).await,
@@ -517,6 +523,48 @@ async fn web_fetch(_ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
     let body = String::from_utf8_lossy(&bytes[..bytes.len().min(1_500_000)]).to_string();
     let text = if ct.contains("html") { html_to_text(&body) } else { body };
     Ok(format!("HTTP {status} {ct}\n\n{}", crate::mcp::truncate(text.trim(), max)))
+}
+
+async fn read_document(_ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
+    let parsed = url::Url::parse(s(args, "url").trim()).map_err(|_| anyhow!("invalid url"))?;
+    let max = args.get("max_chars").and_then(Value::as_u64).unwrap_or(FETCH_LIMIT as u64).clamp(500, 20_000) as usize;
+    let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let mut resp = crate::net::get(parsed.clone(), None, std::time::Duration::from_secs(60)).await?;
+    if !resp.status().is_success() {
+        bail!("HTTP {}", resp.status());
+    }
+    let too_big = || anyhow!("the document is larger than {} MB", crate::doc::MAX_UPLOAD / 1024 / 1024);
+    if resp.content_length().is_some_and(|n| n > crate::doc::MAX_UPLOAD as u64) {
+        return Err(too_big());
+    }
+    let header = |n: &str| resp.headers().get(n).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let candidates = [
+        disposition_filename(&header("content-disposition")),
+        parsed.path_segments().and_then(|mut p| p.next_back()).map(str::to_string),
+        crate::doc::name_for_content_type(&header("content-type")).map(str::to_string),
+    ];
+    let name = candidates
+        .into_iter()
+        .flatten()
+        .find(|n| crate::doc::allowed_extension(n).is_ok())
+        .ok_or_else(|| anyhow!("this is not a supported document; supported types: {}", crate::doc::ALLOWED))?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if bytes.len() + chunk.len() > crate::doc::MAX_UPLOAD {
+            return Err(too_big());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let text = crate::doc::extract_async(name, bytes).await?;
+    let rest: String = text.chars().skip(offset).collect();
+    Ok(crate::mcp::truncate(&rest, max))
+}
+
+/// The `filename="…"` of a Content-Disposition header.
+fn disposition_filename(header: &str) -> Option<String> {
+    let at = header.to_ascii_lowercase().find("filename=")?;
+    let value = header[at + "filename=".len()..].split(';').next()?.trim().trim_matches('"');
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// Crude but dependency-free HTML to text: drops script/style, tags, decodes
