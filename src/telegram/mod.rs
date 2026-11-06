@@ -625,7 +625,8 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
         return Ok(());
     }
 
-    if let Some(cmd) = text.strip_prefix('/') {
+    // A caption that starts with a slash is text, not a command.
+    if let Some(cmd) = text.strip_prefix('/').filter(|_| msg.get("document").is_none()) {
         let name = cmd.split(char::is_whitespace).next().unwrap_or(cmd);
         let name = name.split('@').next().unwrap_or(name);
         match name {

@@ -537,10 +537,17 @@ async fn read_document(_ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
     if resp.content_length().is_some_and(|n| n > crate::doc::MAX_UPLOAD as u64) {
         return Err(too_big());
     }
-    let disposition = resp.headers().get("content-disposition").and_then(|v| v.to_str().ok()).unwrap_or("");
-    let name = disposition_filename(disposition)
-        .or_else(|| parsed.path_segments().and_then(|mut p| p.next_back()).map(str::to_string))
-        .unwrap_or_default();
+    let header = |n: &str| resp.headers().get(n).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let candidates = [
+        disposition_filename(&header("content-disposition")),
+        parsed.path_segments().and_then(|mut p| p.next_back()).map(str::to_string),
+        crate::doc::name_for_content_type(&header("content-type")).map(str::to_string),
+    ];
+    let name = candidates
+        .into_iter()
+        .flatten()
+        .find(|n| crate::doc::allowed_extension(n).is_ok())
+        .ok_or_else(|| anyhow!("this is not a supported document; supported types: {}", crate::doc::ALLOWED))?;
     let mut bytes = Vec::new();
     while let Some(chunk) = resp.chunk().await? {
         if bytes.len() + chunk.len() > crate::doc::MAX_UPLOAD {
