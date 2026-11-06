@@ -642,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn pdf_text() {
+    fn pdf_extracts_text() {
         let text = extract("a.pdf", &tiny_pdf("Hello PDF")).unwrap();
         assert!(text.contains("Hello PDF"), "{text:?}");
     }
