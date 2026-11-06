@@ -259,6 +259,21 @@ pub async fn send_message(
     Ok(Json(json!({"accepted": true})))
 }
 
+// --------------------------------------------------------------------- upload
+
+#[derive(Deserialize)]
+pub struct UploadQuery {
+    name: String,
+}
+
+/// A document as the raw request body, its name in `?name=`. The text is
+/// returned for the client to put in a message; nothing is stored.
+pub async fn upload(Query(q): Query<UploadQuery>, body: axum::body::Bytes) -> R {
+    let name = crate::doc::clean_name(&q.name);
+    let text = crate::doc::extract_async(name.clone(), body.to_vec()).await.map_err(|e| bad(format!("{e:#}")))?;
+    Ok(Json(json!({"name": name, "chars": text.chars().count(), "text": text})))
+}
+
 // ---------------------------------------------------------------------- agents
 
 pub async fn list_agents(State(state): State<Shared>) -> R {

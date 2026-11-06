@@ -6,6 +6,7 @@ pub mod cdp;
 pub mod config;
 pub mod cron;
 pub mod db;
+pub mod doc;
 pub mod earn;
 pub mod fetch;
 pub mod llm;

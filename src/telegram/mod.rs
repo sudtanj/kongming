@@ -59,6 +59,30 @@ impl Telegram {
         Ok(v.get("result").cloned().unwrap_or(Value::Null))
     }
 
+    /// A file a user sent, into memory. `max` bytes at most.
+    pub async fn download(&self, file_id: &str, max: usize) -> Result<Vec<u8>> {
+        let info = self.call("getFile", json!({"file_id": file_id})).await?;
+        let path = info
+            .get("file_path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("telegram getFile: no file path in the reply"))?;
+        let url = format!("{}/file/bot{}/{path}", self.api, self.token);
+        // The URL carries the bot token: keep it out of errors and logs.
+        let fail = |e: reqwest::Error| anyhow!("telegram file download failed: {}", e.without_url());
+        let mut r = self.http.get(url).timeout(Duration::from_secs(60)).send().await.map_err(fail)?;
+        if !r.status().is_success() {
+            return Err(anyhow!("telegram file download failed: HTTP {}", r.status()));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = r.chunk().await.map_err(fail)? {
+            if bytes.len() + chunk.len() > max {
+                return Err(anyhow!("the file is larger than {} MB", max / 1024 / 1024));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    }
+
     pub async fn send_message(&self, chat_id: i64, text: &str) -> Result<i64> {
         self.send(chat_id, text, false).await
     }
@@ -560,6 +584,20 @@ async fn show_thinking(state: &Shared) -> bool {
     tg.and_then(|v| v.get("showThinking").and_then(Value::as_bool)).unwrap_or(true)
 }
 
+/// The text of a document a user sent, as a message block. Extension and
+/// size are checked before anything is downloaded.
+async fn document_block(tg: &Telegram, doc: &Value) -> Result<String> {
+    let name = doc.get("file_name").and_then(Value::as_str).unwrap_or("");
+    crate::doc::allowed_extension(name)?;
+    if doc.get("file_size").and_then(Value::as_u64).is_some_and(|n| n > crate::doc::MAX_UPLOAD as u64) {
+        return Err(anyhow!("the file is larger than {} MB", crate::doc::MAX_UPLOAD / 1024 / 1024));
+    }
+    let file_id = doc.get("file_id").and_then(Value::as_str).ok_or_else(|| anyhow!("the document has no file id"))?;
+    let bytes = tg.download(file_id, crate::doc::MAX_UPLOAD).await?;
+    let text = crate::doc::extract_async(name.to_string(), bytes).await?;
+    Ok(crate::doc::attachment(name, &text))
+}
+
 async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
     let chat_id = msg.pointer("/chat/id").and_then(Value::as_i64).ok_or_else(|| anyhow!("no chat id"))?;
     let user_id = msg.pointer("/from/id").and_then(Value::as_i64).unwrap_or(0);
@@ -582,8 +620,8 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
         .unwrap_or("")
         .trim()
         .to_string();
-    if text.is_empty() {
-        tg.send_message(chat_id, "I can only read text for now.").await?;
+    if text.is_empty() && msg.get("document").is_none() {
+        tg.send_message(chat_id, &format!("I can only read text and documents ({}).", crate::doc::ALLOWED)).await?;
         return Ok(());
     }
 
@@ -730,6 +768,16 @@ async fn handle_message(state: Shared, tg: Telegram, msg: Value) -> Result<()> {
         tg.send_message(chat_id, BUSY_REPLY).await?;
         return Ok(());
     }
+    let text = match msg.get("document") {
+        Some(doc) => match document_block(&tg, doc).await {
+            Ok(block) => format!("{text}\n\n{block}").trim().to_string(),
+            Err(e) => {
+                tg.send_message(chat_id, &esc(&format!("{e:#}"))).await?;
+                return Ok(());
+            }
+        },
+        None => text,
+    };
     tg.typing(chat_id).await;
     // A pasted key should not stay in the chat: the vault keeps it for `setup`.
     if !agent::paste::detect(&text).is_empty() {

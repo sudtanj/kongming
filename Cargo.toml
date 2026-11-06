@@ -41,6 +41,10 @@ url = "2"
 async-trait = "0.1"
 subtle = "2"
 libc = "0.2"
+zip = { version = "2.2", default-features = false, features = ["deflate-flate2"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+quick-xml = "0.37"
+lopdf = { version = "0.34", default-features = false, features = ["nom_parser"] }
 
 [dev-dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }
