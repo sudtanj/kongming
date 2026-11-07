@@ -7,7 +7,9 @@ use std::net::SocketAddr;
 use anyhow::{Context, Result};
 use clap::Parser;
 use kongming::{agent, config, cron, db, earn, proactive, state, telegram, web};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{fmt, EnvFilter};
 
 fn main() -> Result<()> {
     // `kongming doc-pdf` is the PDF reader the daemon starts itself (doc.rs). The rest are commands for the
@@ -27,10 +29,10 @@ fn main() -> Result<()> {
         _ => {}
     }
     let cfg = config::Config::parse();
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_new(&cfg.log_level).unwrap_or_else(|_| EnvFilter::new("info")))
-        .with_target(false)
-        .compact()
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_new(&cfg.log_level).unwrap_or_else(|_| EnvFilter::new("info")))
+        .with(fmt::layer().with_target(false).compact())
+        .with(kongming::logbuf::LogLayer)
         .init();
     let workers = cfg.workers.max(1);
     tokio::runtime::Builder::new_multi_thread()

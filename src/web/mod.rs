@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod debug_mcp;
 pub mod ws;
 
 use std::sync::OnceLock;
@@ -180,6 +181,8 @@ pub fn router(state: Shared) -> Router {
         .route("/mcp/:id/oauth/start", post(api::mcp_oauth_start).get(api::mcp_oauth_start))
         .route("/mcp/:id/oauth/complete", post(api::mcp_oauth_complete))
         .route("/mcp/:id/oauth/disconnect", post(api::mcp_oauth_disconnect))
+        .route("/debug-mcp", get(api::debug_mcp_status))
+        .route("/debug-mcp/token", post(api::debug_mcp_create).delete(api::debug_mcp_revoke))
         .route("/settings", get(api::get_settings).put(api::put_settings))
         .route("/settings/test-llm", post(api::test_llm))
         .route("/proactive/run", post(api::run_check_in))
@@ -211,6 +214,8 @@ pub fn router(state: Shared) -> Router {
         .route("/manifest.webmanifest", get(manifest))
         .route("/health", get(health))
         .route("/ws", get(ws::handler))
+        // Its own bearer token, not the cookie login.
+        .route("/mcp", post(debug_mcp::handle).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)))
         .nest("/api", public.merge(protected))
         .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), guard))

@@ -197,6 +197,13 @@ const STRINGS = {
     'models.reflectionDesc': 'Reflect after turns and save lessons as skills and memories.',
     'models.publicUrl': 'Public URL',
     'models.publicUrlDesc': 'Optional. When kongming is reachable at this address, MCP OAuth returns here automatically; leave empty behind a firewall to paste the redirect URL instead.',
+    'debugMcp.title': 'Debug MCP',
+    'debugMcp.desc': 'Lets a developer\'s agent (Claude Code, for example) read this daemon\'s status, settings with secrets redacted, and recent logs. Read-only. The token is shown once.',
+    'debugMcp.create': 'Create token',
+    'debugMcp.revoke': 'Revoke',
+    'debugMcp.on': 'Enabled',
+    'debugMcp.off': 'Off',
+    'debugMcp.once': 'Copy this now; it is not shown again. Creating a new token replaces the old one.',
     'agents.title': 'Agents',
     'agents.desc': 'Kongming hires, adjusts and retires the team and hands it work. You talk to Kongming; the others are read-only here.',
     'agents.orgChart': 'Org chart',
@@ -1626,6 +1633,17 @@ const settings = (() => {
     });
     const test = h('button', { class: 'btn outline', type: 'button', onClick: async () => { test.disabled = true; testOut.textContent = t('models.testing'); try { const r = await api.post('/api/settings/test-llm'); testOut.textContent = t('models.testOk', r); } catch (e) { testOut.textContent = e.message; testOut.classList.add('danger-text'); } test.disabled = false; } }, t('models.test'));
     const publicUrl = input({ value: st.publicUrl || '', placeholder: 'https://kongming.example.com' });
+    const dbg = await api.get('/api/debug-mcp');
+    const dbgOut = h('div', { style: 'margin-top:0.5rem' });
+    const dbgCreate = h('button', { class: 'btn outline', type: 'button', onClick: async () => {
+      dbgCreate.disabled = true;
+      try {
+        const r = await api.post('/api/debug-mcp/token');
+        dbgOut.replaceChildren(h('div', { class: 'hint' }, t('debugMcp.once')), h('div', { class: 'hint' }, r.url), h('textarea', { class: 'field', rows: 4, readonly: true }, r.command), h('button', { class: 'btn outline sm', type: 'button', onClick: () => copyText(r.command) }, t('common.copy')));
+      } catch (e) { toast(e.message, 'err'); }
+      dbgCreate.disabled = false;
+    } }, t('debugMcp.create'));
+    const dbgRevoke = h('button', { class: 'btn ghost', type: 'button', disabled: !dbg.enabled, onClick: () => modal.confirm({ title: t('debugMcp.revoke'), confirm: t('debugMcp.revoke'), danger: true, onConfirm: async () => { await api.del('/api/debug-mcp/token'); reload(); } }) }, t('debugMcp.revoke'));
     return h('div', { class: 'settings-stack' }, header(t('settings.models')),
       section(t('overview.llm'),
         row(t('models.provider'), t('models.providerDesc'), kind),
@@ -1639,7 +1657,8 @@ const settings = (() => {
         row(t('models.smallModel'), t('models.smallModelDesc'), smallModel),
         h('div', { class: 'settings-footer' }, h('div', {}, test, testOut), h('div', { class: 'acts' }, save))),
       section(t('models.reflection'), row(t('models.reflection'), t('models.reflectionDesc'), switchEl(!(st.reflection && st.reflection.enabled === false), (v) => api.put('/api/settings', { reflection: { enabled: v } }), t('models.reflection')), { switch: true })),
-      section(t('models.publicUrl'), row(t('models.publicUrl'), t('models.publicUrlDesc'), publicUrl), h('div', { class: 'settings-footer' }, h('span'), h('div', { class: 'acts' }, saveBtn(null, () => api.put('/api/settings', { publicUrl: publicUrl.value.trim() }))))));
+      section(t('models.publicUrl'), row(t('models.publicUrl'), t('models.publicUrlDesc'), publicUrl), h('div', { class: 'settings-footer' }, h('span'), h('div', { class: 'acts' }, saveBtn(null, () => api.put('/api/settings', { publicUrl: publicUrl.value.trim() }))))),
+      section(t('debugMcp.title'), row(t('debugMcp.title'), t('debugMcp.desc'), h('div', { class: 'row' }, h('span', { class: 'pill ' + (dbg.enabled ? 'ok' : '') }, dbg.enabled ? t('debugMcp.on') : t('debugMcp.off')), dbgCreate, dbgRevoke)), dbgOut));
   };
 
   /* ---- agents ---- */

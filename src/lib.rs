@@ -10,6 +10,7 @@ pub mod doc;
 pub mod earn;
 pub mod fetch;
 pub mod llm;
+pub mod logbuf;
 pub mod mcp;
 pub mod net;
 pub mod proactive;
