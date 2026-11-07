@@ -94,6 +94,51 @@ pub fn buffer() -> &'static LogBuffer {
     BUFFER.get_or_init(|| LogBuffer::new(MAX_BYTES, MAX_LINES))
 }
 
+
+/// Hides credentials that error text tends to carry: the word after `Bearer`,
+/// URL userinfo and URL query strings.
+// ponytail: secrets in a URL path (`/mcp/<token>`) still show; add vault-value matching if that bites.
+pub fn scrub(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut after_bearer = false;
+    for word in s.split_inclusive(char::is_whitespace) {
+        let body = word.trim_end();
+        if after_bearer && !body.is_empty() {
+            out.push_str("[redacted]");
+        } else {
+            out.push_str(&scrub_url(body));
+        }
+        out.push_str(&word[body.len()..]);
+        after_bearer = body.eq_ignore_ascii_case("bearer") || (after_bearer && body.is_empty());
+    }
+    out
+}
+
+fn scrub_url(w: &str) -> String {
+    let Some(p) = w.find("://") else { return w.to_string() };
+    let start = p + 3;
+    let host_end = w[start..].find(['/', '?', '#', ')', '"', '\'']).map_or(w.len(), |i| start + i);
+    let mut out = w[..start].to_string();
+    match w[start..host_end].rfind('@') {
+        Some(at) => {
+            out.push_str("[redacted]");
+            out.push_str(&w[start + at..host_end]);
+        }
+        None => out.push_str(&w[start..host_end]),
+    }
+    let rest = &w[host_end..];
+    match rest.find('?') {
+        Some(q) => {
+            let q_end = rest[q..].find(['#', ')', '"', '\'']).map_or(rest.len(), |i| q + i);
+            out.push_str(&rest[..=q]);
+            out.push_str("[redacted]");
+            out.push_str(&rest[q_end..]);
+        }
+        None => out.push_str(rest),
+    }
+    out
+}
+
 /// Tracing layer that copies every event the subscriber lets through into `buffer()`.
 pub struct LogLayer;
 
@@ -117,7 +162,7 @@ impl<S: Subscriber> Layer<S> for LogLayer {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let mut f = Fields::default();
         event.record(&mut f);
-        let mut text = f.message + &f.rest;
+        let mut text = scrub(&(f.message + &f.rest)).replace('\n', "\\n");
         if let Some((i, _)) = text.char_indices().nth(MAX_LINE_CHARS) {
             text.truncate(i);
         }
@@ -170,5 +215,13 @@ mod tests {
         assert_eq!(b.query(Level::TRACE, Some("FAILED"), 0, 10).len(), 1);
         assert_eq!(b.query(Level::TRACE, None, 3, 10).len(), 2);
         assert_eq!(b.query(Level::TRACE, None, 0, 1)[0].text, "noise");
+    }
+
+    #[test]
+    fn scrub_hides_credentials() {
+        let s = "failed for url (https://u:pw@h.io/p?api_key=K1&x=2) Authorization: Bearer T0K\nok";
+        let out = scrub(s);
+        assert_eq!(out, "failed for url (https://[redacted]@h.io/p?[redacted]) Authorization: Bearer [redacted]\nok");
+        assert_eq!(scrub("see https://h.io/a b"), "see https://h.io/a b");
     }
 }

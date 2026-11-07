@@ -215,7 +215,7 @@ pub fn router(state: Shared) -> Router {
         .route("/health", get(health))
         .route("/ws", get(ws::handler))
         // Its own bearer token, not the cookie login.
-        .route("/mcp", post(debug_mcp::handle))
+        .route("/mcp", post(debug_mcp::handle).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)))
         .nest("/api", public.merge(protected))
         .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), guard))

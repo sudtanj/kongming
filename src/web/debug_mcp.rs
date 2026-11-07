@@ -148,7 +148,7 @@ async fn status(state: &Shared) -> Result<String> {
         .map(|s| {
             json!({
                 "name": s.name, "host": host_of(&s.url), "transport": s.transport, "authType": s.auth_type,
-                "enabled": s.enabled, "status": s.status, "lastError": s.last_error,
+                "enabled": s.enabled, "status": s.status, "lastError": s.last_error.as_deref().map(crate::logbuf::scrub),
                 "tools": s.tools.as_array().map_or(0, Vec::len),
             })
         })
@@ -201,6 +201,7 @@ pub fn redact(v: &Value) -> Value {
                 .collect(),
         ),
         Value::Array(a) => Value::Array(a.iter().map(redact).collect()),
+        Value::String(s) => json!(crate::logbuf::scrub(s)),
         _ => v.clone(),
     }
 }
@@ -213,8 +214,13 @@ async fn config(state: &Shared) -> Result<String> {
         .await?
         .iter()
         .map(|s| {
-            // The token and OAuth state are never serialized; headers can hold credentials.
+            // The token and OAuth state are never serialized. Header values and the URL path
+            // can hold credentials whatever they are called: show names and the host only.
             let mut v = serde_json::to_value(s).unwrap_or(Value::Null);
+            v["url"] = json!(host_of(&s.url));
+            if let Some(h) = v.get_mut("headers").and_then(Value::as_object_mut) {
+                h.values_mut().for_each(|x| *x = json!("[set]"));
+            }
             v["tokenSet"] = json!(s.token.as_deref().is_some_and(|t| !t.is_empty()));
             v
         })
