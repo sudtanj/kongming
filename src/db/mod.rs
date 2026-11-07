@@ -262,13 +262,17 @@ impl Db {
                 &[key.into(), j(value), now_ms().into()],
             )
             .await?;
-        self.cache.write().settings = None;
+        if let Some(s) = self.cache.write().settings.as_mut() {
+            s.insert(key.to_string(), value.clone());
+        }
         Ok(())
     }
 
     pub async fn delete_setting(&self, key: &str) -> Result<()> {
         self.turso.execute("DELETE FROM settings WHERE key = ?", &[key.into()]).await?;
-        self.cache.write().settings = None;
+        if let Some(s) = self.cache.write().settings.as_mut() {
+            s.remove(key);
+        }
         Ok(())
     }
 
@@ -497,11 +501,14 @@ impl Db {
     ) -> Result<Message> {
         let id = new_id();
         let now = now_ms();
-        self.turso
-            .batch(&[
+        let rows = self
+            .turso
+            .batch_last(&[
+                ("UPDATE sessions SET updated_at = ? WHERE id = ?".into(), vec![now.into(), session_id.into()]),
                 (
                     "INSERT OR IGNORE INTO messages(id, session_id, seq, role, content, agent_id, created_at)
-                     SELECT ?, ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ? FROM messages WHERE session_id = ?"
+                     SELECT ?, ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ? FROM messages WHERE session_id = ?
+                     RETURNING *"
                         .into(),
                     vec![
                         id.as_str().into(),
@@ -513,10 +520,14 @@ impl Db {
                         session_id.into(),
                     ],
                 ),
-                ("UPDATE sessions SET updated_at = ? WHERE id = ?".into(), vec![now.into(), session_id.into()]),
             ])
             .await?;
-        let rows = self.turso.query("SELECT * FROM messages WHERE id = ?", &[id.as_str().into()]).await?;
+        // A retried pipeline whose first reply was lost finds the row already there: INSERT OR IGNORE returns nothing.
+        let rows = if rows.is_empty() {
+            self.turso.query("SELECT * FROM messages WHERE id = ?", &[id.as_str().into()]).await?
+        } else {
+            rows
+        };
         rows.first().map(|r| Message::from_row(&r)).ok_or_else(|| anyhow!("message vanished after insert"))
     }
 
@@ -611,13 +622,14 @@ impl Db {
     }
 
     pub async fn mark_skill_used(&self, name: &str) -> Result<()> {
+        let now = now_ms();
         self.turso
-            .execute(
-                "UPDATE skills SET uses = uses + 1, last_used_at = ? WHERE name = ?",
-                &[now_ms().into(), name.into()],
-            )
+            .execute("UPDATE skills SET uses = uses + 1, last_used_at = ? WHERE name = ?", &[now.into(), name.into()])
             .await?;
-        self.cache.write().skills = None;
+        if let Some(s) = self.cache.write().skills.as_mut().and_then(|l| l.iter_mut().find(|s| s.name == name)) {
+            s.uses += 1;
+            s.last_used_at = Some(now);
+        }
         Ok(())
     }
 
