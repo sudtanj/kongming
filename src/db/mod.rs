@@ -522,6 +522,12 @@ impl Db {
                 ),
             ])
             .await?;
+        // A retried pipeline whose first reply was lost finds the row already there: INSERT OR IGNORE returns nothing.
+        let rows = if rows.is_empty() {
+            self.turso.query("SELECT * FROM messages WHERE id = ?", &[id.as_str().into()]).await?
+        } else {
+            rows
+        };
         rows.first().map(|r| Message::from_row(&r)).ok_or_else(|| anyhow!("message vanished after insert"))
     }
 
