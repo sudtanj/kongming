@@ -299,14 +299,20 @@ impl Turso {
         if stmts.is_empty() {
             return Ok(());
         }
+        self.batch_last(stmts).await?;
+        Ok(())
+    }
+
+    /// Like `batch`, returning the rows of the last statement (e.g. one ending in RETURNING).
+    pub async fn batch_last(&self, stmts: &[Stmt]) -> Result<Rows> {
         let mut reqs = Vec::with_capacity(stmts.len() + 2);
         reqs.push(Self::exec_req("BEGIN", &[]));
         for (sql, args) in stmts {
             reqs.push(Self::exec_req(sql, args));
         }
         reqs.push(Self::exec_req("COMMIT", &[]));
-        self.pipeline(reqs).await?;
-        Ok(())
+        let res = self.pipeline(reqs).await?;
+        Ok(parse_rows(res.get(stmts.len()).unwrap_or(&Value::Null)))
     }
 
     /// Run a multi-statement SQL script (schema setup).

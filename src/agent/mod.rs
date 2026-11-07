@@ -13,7 +13,7 @@ pub mod shell;
 pub mod tools;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
@@ -423,12 +423,21 @@ async fn plan(
     request_text: &str,
     setup_hint: bool,
 ) -> Result<TurnPlan> {
-    let team = state.db.agents().await?;
-    let skills = state.db.skills().await?;
     let (pcfg, _) = state.provider().await?;
     let model = agent.model.clone().filter(|m| !m.is_empty()).unwrap_or(pcfg.model.clone());
     let profile = llm::profile_for(&pcfg, &model);
-    let all_memories = state.db.memories(Some(&agent.id), 500).await?;
+    let (team, skills, all_memories, recent) = tokio::join!(
+        state.db.agents(),
+        state.db.skills(),
+        state.db.memories(Some(&agent.id), 500),
+        async {
+            match session.channel.as_str() {
+                "web" | "telegram" => recent_lines(state, session, &agent.id, profile.small).await,
+                _ => vec![],
+            }
+        }
+    );
+    let (team, skills, all_memories) = (team?, skills?, all_memories?);
     let memories = recall(&all_memories, request_text, profile.small);
     let can_delegate = team.iter().any(|t| t.manager_id.as_deref() == Some(agent.id.as_str()));
 
@@ -492,10 +501,6 @@ async fn plan(
     } else {
         tool_specs.extend(mcp_tools.into_iter().map(|t| t.spec));
     }
-    let recent = match session.channel.as_str() {
-        "web" | "telegram" => recent_lines(state, session, &agent.id, profile.small).await,
-        _ => vec![],
-    };
 
     let proactive = crate::proactive::settings(state).await;
     let local_time = match proactive.utc_offset_minutes {
@@ -547,10 +552,12 @@ async fn model_round(
             });
             tokio::time::sleep(wait).await;
         }
+        let sent = Instant::now();
         let stream = match provider.stream(req.clone()).await {
             Ok(s) => s,
             Err(e) => {
                 let msg = format!("{e:#}");
+                tracing::warn!(session = %session_id, model = %req.model, attempt = attempt + 1, after_ms = sent.elapsed().as_millis() as u64, reason = %retry_reason(&e), "model request failed");
                 if msg.contains("HTTP 4") && !msg.contains("HTTP 429") && !msg.contains("HTTP 408") {
                     return Err(e);
                 }
@@ -558,18 +565,32 @@ async fn model_round(
                 continue;
             }
         };
+        // The stream call returns once the response headers are in.
+        let ttfb_ms = sent.elapsed().as_millis() as u64;
         match consume(state, session_id, turn_id, stream, cancel).await {
-            Ok(r) => return Ok(r),
+            Ok(r) => {
+                tracing::info!(session = %session_id, model = %req.model, attempt = attempt + 1, ttfb_ms, total_ms = sent.elapsed().as_millis() as u64, "model round");
+                return Ok(r);
+            }
             Err(e) => {
                 let msg = format!("{e:#}");
                 if msg.contains("cancelled") {
                     return Err(e);
                 }
+                tracing::warn!(session = %session_id, model = %req.model, attempt = attempt + 1, after_ms = sent.elapsed().as_millis() as u64, reason = %retry_reason(&e), "model stream failed");
                 last_err = Some(e);
             }
         }
     }
     Err(last_err.unwrap_or_else(|| anyhow!("model unavailable")))
+}
+
+/// Why a model call failed, safe to log: a reqwest error carries the URL, so only its kind is shown.
+fn retry_reason(e: &anyhow::Error) -> String {
+    match e.downcast_ref::<reqwest::Error>() {
+        Some(r) => format!("transport error (timeout: {}, connect: {})", r.is_timeout(), r.is_connect()),
+        None => e.to_string(),
+    }
 }
 
 async fn consume(
@@ -942,6 +963,7 @@ async fn run_turn_inner(
     cancel: &AtomicBool,
     turn_id: String,
 ) -> Result<TurnResult> {
+    let turn_started = Instant::now();
     let agent = match &opts.agent_override {
         Some(a) => a.clone(),
         None => user_agent(state, session).await?,
@@ -967,9 +989,8 @@ async fn run_turn_inner(
         state.db.update_session_title(&session.id, &title).await?;
         session.title = title;
     }
-    if let Ok(Some(s)) = state.db.session(&session.id).await {
-        state.emit(Event::SessionUpdated { session: s });
-    }
+    session.updated_at = user_msg.created_at;
+    state.emit(Event::SessionUpdated { session: session.clone() });
     state.emit(Event::TurnStart { session_id: session.id.clone(), turn_id: turn_id.clone(), agent: agent.clone() });
 
     // Context: load, and fold older messages into the summary when the request
@@ -1022,6 +1043,9 @@ async fn run_turn_inner(
         let mut messages = chat.clone();
         messages.append(&mut extra);
         let req = chat_request(&plan, &pcfg, messages);
+        if iteration == 0 {
+            tracing::info!(session = %session.id, prep_ms = turn_started.elapsed().as_millis() as u64, "turn prep done");
+        }
         let (mut parts, mut stop, usage) = match model_round(state, &session.id, &turn_id, req, cancel).await {
             Ok(r) => r,
             Err(e) => {
