@@ -72,10 +72,10 @@ pub struct Config {
     #[cfg_attr(feature = "native", arg(long, env = "KONGMING_SHELL", default_value = ""))]
     pub shell: String,
 
-    /// An LLM gateway the host runs itself (kongming-cloud: its in-process router at
-    /// `http://zilong.internal/v1`, speaking both the OpenAI and Anthropic formats).
-    /// When set, Settings → Models offers it as a "Gateway" provider choice. Not on the
-    /// command line: the daemon has none.
+    /// An LLM gateway the host suggests (kongming-cloud: zilong at
+    /// `https://zilong.tanoitcorp.com/v1`, OpenAI and Anthropic formats). When set,
+    /// Settings → Models offers it as a provider choice with this base URL filled in;
+    /// the key is the person's own.
     #[cfg_attr(feature = "native", arg(skip))]
     pub gateway_url: Option<String>,
 }

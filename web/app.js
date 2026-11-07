@@ -180,9 +180,9 @@ const STRINGS = {
     'overview.auth': 'Password protected',
     'models.provider': 'Provider',
     'models.providerDesc': 'OpenAI-compatible or Anthropic Messages API.',
-    'models.gatewayOpenai': 'Gateway (OpenAI-compatible)',
-    'models.gatewayAnthropic': 'Gateway (Anthropic-compatible)',
-    'models.gatewayDesc': 'The built-in model gateway: no key needed. Model auto picks a free OpenCode model; for your own provider, choose OpenAI-compatible or Anthropic and add its key.',
+    'models.gatewayOpenai': 'zilong (OpenAI-compatible)',
+    'models.gatewayAnthropic': 'zilong (Anthropic-compatible)',
+    'models.gatewayDesc': 'The base URL is filled in. Paste your own zilong key (zk_…) below.',
     'models.baseUrl': 'Base URL',
     'models.baseUrlDesc': 'Leave empty for the provider default.',
     'models.apiKey': 'API key',
@@ -1573,7 +1573,7 @@ const settings = (() => {
   /* ---- models ---- */
   pages.models = async () => {
     const st = await api.get('/api/settings'); const llm = st.llm || {};
-    // The host's own gateway (kongming cloud): the same openai / anthropic kinds, its base URL filled in.
+    // The host's suggested gateway (zilong): the same openai / anthropic kinds, its base URL filled in, your own key.
     const gw = st.gateway && st.gateway.baseUrl;
     const kinds = [['openai', 'OpenAI-compatible'], ['anthropic', 'Anthropic']];
     if (gw) kinds.unshift(['gateway-openai', t('models.gatewayOpenai')], ['gateway-anthropic', t('models.gatewayAnthropic')]);
@@ -1592,15 +1592,15 @@ const settings = (() => {
     let wasGw = !!onGw;
     const syncGw = () => {
       const g = gwKind();
-      baseUrl.disabled = !!g; apiKey.disabled = !!g; gwHint.hidden = !g;
-      if (g) { baseUrl.value = gw; if (!wasGw) model.value = 'auto'; } else if (wasGw) baseUrl.value = '';
+      baseUrl.disabled = !!g; gwHint.hidden = !g;
+      if (g) baseUrl.value = gw; else if (wasGw) baseUrl.value = '';
       wasGw = !!g;
     };
     kind.addEventListener('change', syncGw); syncGw();
     const save = saveBtn(null, async () => {
       const g = gwKind();
       const body = { kind: g || kind.value, baseUrl: g ? gw : baseUrl.value.trim(), model: model.value.trim(), maxTokens: maxTokens.value ? Number(maxTokens.value) : null, temperature: temperature.value !== '' ? Number(temperature.value) : null, effort: effort.value || null };
-      if (apiKey.value && !g) body.apiKey = apiKey.value;
+      if (apiKey.value) body.apiKey = apiKey.value;
       const res = await api.put('/api/settings', { llm: body }); apiKey.value = '';
       keyState.textContent = res.llm.apiKeySet ? t('models.apiKeySet') : t('models.apiKeyNone'); keyState.className = 'pill ' + (res.llm.apiKeySet ? 'ok' : 'warn');
     });
