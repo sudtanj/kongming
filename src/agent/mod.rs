@@ -426,17 +426,13 @@ async fn plan(
     let (pcfg, _) = state.provider().await?;
     let model = agent.model.clone().filter(|m| !m.is_empty()).unwrap_or(pcfg.model.clone());
     let profile = llm::profile_for(&pcfg, &model);
-    let (team, skills, all_memories, recent) = tokio::join!(
-        state.db.agents(),
-        state.db.skills(),
-        state.db.memories(Some(&agent.id), 500),
-        async {
+    let (team, skills, all_memories, recent) =
+        tokio::join!(state.db.agents(), state.db.skills(), state.db.memories(Some(&agent.id), 500), async {
             match session.channel.as_str() {
                 "web" | "telegram" => recent_lines(state, session, &agent.id, profile.small).await,
                 _ => vec![],
             }
-        }
-    );
+        });
     let (team, skills, all_memories) = (team?, skills?, all_memories?);
     let memories = recall(&all_memories, request_text, profile.small);
     let can_delegate = team.iter().any(|t| t.manager_id.as_deref() == Some(agent.id.as_str()));
