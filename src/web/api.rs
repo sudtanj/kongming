@@ -12,6 +12,7 @@ use crate::agent::{self, TurnOptions};
 use crate::db::{new_id, now_ms, Agent, CronJob, McpServer, OAuthState};
 use crate::llm::ProviderConfig;
 use crate::state::Shared;
+use crate::web::debug_mcp;
 
 #[derive(Debug)]
 pub struct ApiError(StatusCode, String);
@@ -154,6 +155,34 @@ pub async fn info(State(state): State<Shared>) -> R {
         "authRequired": !state.cfg.password.is_empty(),
         "publicUrl": state.public_url().await,
     })))
+}
+
+// ------------------------------------------------------------------- debug MCP
+
+pub async fn debug_mcp_status(State(state): State<Shared>) -> R {
+    let enabled = state.db.setting(debug_mcp::HASH_KEY).await?.is_some();
+    Ok(Json(json!({"enabled": enabled})))
+}
+
+/// Replaces any earlier token. The token is returned this once; only its hash is kept.
+pub async fn debug_mcp_create(State(state): State<Shared>, headers: HeaderMap) -> R {
+    let token = crate::mcp::oauth::random_token(32);
+    state.db.set_setting(debug_mcp::HASH_KEY, &json!(debug_mcp::hash_token(&token))).await?;
+    let base = match state.public_url().await {
+        Some(u) => u,
+        None => {
+            let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+            format!("{}://{}", header("x-forwarded-proto").unwrap_or("http"), header("host").unwrap_or("localhost"))
+        }
+    };
+    let url = format!("{base}/mcp");
+    let command = format!("claude mcp add --transport http kongming {url} --header \"Authorization: Bearer {token}\"");
+    Ok(Json(json!({"token": token, "url": url, "command": command})))
+}
+
+pub async fn debug_mcp_revoke(State(state): State<Shared>) -> R {
+    state.db.delete_setting(debug_mcp::HASH_KEY).await?;
+    Ok(Json(json!({"enabled": false})))
 }
 
 // -------------------------------------------------------------------- sessions
