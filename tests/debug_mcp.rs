@@ -78,9 +78,7 @@ async fn debug_mcp_is_off_until_a_token_exists_and_never_shows_secrets() {
     let unknown = rpc(&app, &token, json!({"jsonrpc": "2.0", "id": 3, "method": "nope"})).await;
     assert_eq!(unknown["error"]["code"], json!(-32601));
 
-    let call = |name: &str, args: Value| {
-        json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": name, "arguments": args}})
-    };
+    let call = |name: &str, args: Value| json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": name, "arguments": args}});
     let config = rpc(&app, &token, call("get_config", json!({}))).await;
     let text = tool_text(&config);
     assert!(text.contains("[redacted, 18 chars]"), "{text}");

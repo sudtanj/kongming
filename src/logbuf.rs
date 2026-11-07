@@ -72,18 +72,17 @@ impl LogBuffer {
     pub fn query(&self, max_level: Level, contains: Option<&str>, since_ms: i64, limit: usize) -> Vec<Entry> {
         let needle = contains.map(str::to_lowercase);
         let g = self.entries.lock();
-        let mut out: Vec<Entry> = g
-            .0
-            .iter()
-            .rev()
-            .filter(|e| e.level <= max_level && e.at_ms >= since_ms)
-            .filter(|e| {
-                let hit = |s: &str| s.to_lowercase().contains(needle.as_deref().unwrap_or_default());
-                needle.is_none() || hit(&e.text) || hit(&e.target)
-            })
-            .take(limit)
-            .cloned()
-            .collect();
+        let mut out: Vec<Entry> =
+            g.0.iter()
+                .rev()
+                .filter(|e| e.level <= max_level && e.at_ms >= since_ms)
+                .filter(|e| {
+                    let hit = |s: &str| s.to_lowercase().contains(needle.as_deref().unwrap_or_default());
+                    needle.is_none() || hit(&e.text) || hit(&e.target)
+                })
+                .take(limit)
+                .cloned()
+                .collect();
         out.reverse();
         out
     }
@@ -93,7 +92,6 @@ pub fn buffer() -> &'static LogBuffer {
     static BUFFER: OnceLock<LogBuffer> = OnceLock::new();
     BUFFER.get_or_init(|| LogBuffer::new(MAX_BYTES, MAX_LINES))
 }
-
 
 /// Hides credentials that error text tends to carry: the word after `Bearer`,
 /// URL userinfo and URL query strings.

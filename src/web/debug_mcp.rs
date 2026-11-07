@@ -23,8 +23,7 @@ pub const HASH_KEY: &str = "debug_mcp_token_hash";
 const VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const MAX_TEXT: usize = 60_000;
 const LOG_BUDGET: usize = 50_000;
-const SECRET_WORDS: [&str; 9] =
-    ["key", "token", "secret", "password", "vault", "auth", "cookie", "hash", "credential"];
+const SECRET_WORDS: [&str; 9] = ["key", "token", "secret", "password", "vault", "auth", "cookie", "hash", "credential"];
 
 pub fn hash_token(token: &str) -> String {
     Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
