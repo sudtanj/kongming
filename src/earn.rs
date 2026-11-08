@@ -199,6 +199,24 @@ off, use POST /agent/contracts/<contractId>/submissions {notes: the deliverable,
 Payment goes straight to the user's wallet; never touch payment, payout or wallet endpoints. Mark the lead submitted after \
 delivery and paid only when the contract shows verified payment."
         }
+        "dealwork" => {
+            "dealwork.ai API steps (paths after the base; the job id is the last part of the lead's URL):
+1. GET /jobs/<jobId>: read description, acceptanceCriteria, budgetMin/budgetMax, jobMode and claimable.
+2. Bid jobs (jobMode bid): POST /jobs/<jobId>/bids {proposedAmount: \"20.00\" (within the budget), estimatedHours, \
+proposalText: how you will do this job, naming its details, an ETA, one question if the scope is unclear; no filler like \
+\"high-quality results\"}. One bid per job: a 4xx (duplicate, unfunded, bidding closed) will not change on retry, and 429 \
+means stop for now. Open tasks (jobMode open, claimable true): POST /jobs/<jobId>/claim {acceptedCriteriaIds: every \
+criterion id}; it returns the contract. Note the bid or contract id on the lead.
+3. Follow up: GET /bids/mine (pending, accepted, rejected); GET /contracts?role=worker&state=escrow_locked,in_progress,in_review \
+lists your contracts; GET /contracts/<contractId> for one.
+4. Contract escrow_locked: POST /contracts/<contractId>/events {type: START_WORK}, then POST /contracts/<contractId>/messages \
+{content: plan and ETA}. Do the work, message once more before submitting.
+5. Deliver in two steps: POST /contracts/<contractId>/deliverables {description, outputData: {files: {\"name.md\": the full \
+text}}} returns its id; then POST /contracts/<contractId>/events {type: SUBMIT_WORK, deliverableId}.
+6. Revision requested: read GET /contracts/<contractId>/messages and /deliverables, fix every point, deliver again (steps 5).
+Never call wallet, withdraw or buyer endpoints (APPROVE, RELEASE_ESCROW). Mark the lead submitted after SUBMIT_WORK and \
+paid when the contract state is paid."
+        }
         _ => "",
     }
 }
@@ -513,6 +531,8 @@ pub fn parse(id: &str, body: &Value) -> Vec<Found> {
             .collect(),
         "dealwork" => items(body, &["data", "jobs"])
             .iter()
+            // Unfunded posts take no bids; nearly all are other agents advertising.
+            .filter(|j| j.get("posterFunded") != Some(&Value::Bool(false)))
             .map(|j| {
                 let mut t = tags(j.get("tags"));
                 t.extend(opt_text(j, "category"));
@@ -1297,6 +1317,8 @@ pub fn forbidden_path(path: &str) -> bool {
     ]
     .iter()
     .any(|x| p.contains(x))
+        // dealwork.ai open tasks are taken with POST /jobs/<id>/claim (it creates the contract).
+        && !(p.starts_with("/jobs/") && p.ends_with("/claim") && p.matches('/').count() == 3)
 }
 
 /// Whether a write for this lead is allowed now.
@@ -1505,6 +1527,8 @@ mod tests {
         assert_eq!(f[0].bids, Some(3));
         let dw = json!({"data": [{"id": "d1", "title": "Landing page", "description": "x", "budgetMin": "20.0000", "budgetMax": "80.0000", "fixedPrice": null, "bidCount": 0}], "meta": {}});
         assert_eq!(parse("dealwork", &dw)[0].budget_usd, Some(80.0));
+        let ad = json!({"data": [{"id": "d2", "title": "Agent for hire", "budgetMax": "40", "posterFunded": false}]});
+        assert!(parse("dealwork", &ad).is_empty());
     }
 
     #[test]
@@ -1584,6 +1608,9 @@ mod tests {
         assert!(forbidden_path("/v1/wallet/withdraw"));
         assert!(forbidden_path("/api/agents/register"));
         assert!(!forbidden_path("/api/agents/jobs/x/bids"));
+        assert!(!forbidden_path("/jobs/x/claim"));
+        assert!(forbidden_path("/agents/x/claim"));
+        assert!(forbidden_path("/jobs/x/y/claim"));
     }
 
     #[test]
