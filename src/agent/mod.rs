@@ -478,7 +478,11 @@ async fn plan(
     if let Some(a) = &mut allowed {
         a.extend(mentions.mcp.iter().cloned());
     }
-    let mcp_tools = state.mcp.tools(allowed.as_deref()).await.unwrap_or_default();
+    let mut mcp_tools = state.mcp.tools(allowed.as_deref()).await.unwrap_or_default();
+    let restricted = earn_restricted(state, session).await;
+    if restricted {
+        mcp_tools.retain(|t| crate::earn::mcp_tool_allowed(&t.server_name, &t.tool));
+    }
     let mut mcp_names: Vec<String> = mcp_tools.iter().map(|t| t.server_name.clone()).collect();
     mcp_names.sort();
     mcp_names.dedup();
@@ -496,6 +500,9 @@ async fn plan(
         tool_specs.extend(bridge::specs());
     } else {
         tool_specs.extend(mcp_tools.into_iter().map(|t| t.spec));
+    }
+    if restricted {
+        tool_specs.retain(|t| !crate::earn::builtin_denied(&t.name));
     }
 
     let proactive = crate::proactive::settings(state).await;
@@ -844,12 +851,25 @@ async fn run_call(ctx: &ToolCtx<'_>, plan: &TurnPlan, id: &str, name: &str, args
     }
 }
 
+/// Earnings turns, and the delegations they start, read text written by strangers: their tools are limited
+/// (`earn::builtin_denied`, `earn::mcp_tool_allowed`). A delegation whose parent cannot be read counts as one.
+pub(crate) async fn earn_restricted(state: &Shared, session: &Session) -> bool {
+    match (session.channel.as_str(), &session.parent_session_id) {
+        ("earn", _) => true,
+        ("delegation", Some(parent)) => !matches!(state.db.session(parent).await, Ok(Some(p)) if p.channel != "earn"),
+        _ => false,
+    }
+}
+
 /// Execute one tool call (built-in or MCP) and return the result part, its
 /// content cut to `max_chars`.
 async fn execute_tool(ctx: &ToolCtx<'_>, id: &str, name: &str, args: &Value, max_chars: usize) -> Part {
     let result: Result<(String, bool)> = match tools::run_builtin(ctx, name, args).await {
         Some(r) => r,
         None => match ctx.state.mcp.find_tool(name).await {
+            Ok(Some(t)) if earn_restricted(ctx.state, ctx.session).await && !crate::earn::mcp_tool_allowed(&t.server_name, &t.tool) => {
+                Err(anyhow!("{} is not available while earning: only reading, forking, branching, committing and opening a pull request are", t.tool))
+            }
             Ok(Some(t)) => ctx.state.mcp.call(&t.server_id, &t.tool, args.clone()).await,
             Ok(None) => Err(anyhow!("unknown tool '{name}'")),
             Err(e) => Err(e),

@@ -73,8 +73,7 @@ and the earnings options. skill_import: a SKILL.md from a url or pasted as markd
                 "provider": {"type": "string", "description": "earn: provider id (toku, dealwork, opentask, moltjobs, hyrve, clawearn, opire, algora)"},
                 "agent_id": {"type": "string", "description": "earn: the agent account id on the provider (dealwork.ai agentAccountId); not a secret"},
                 "enabled": {"type": "boolean", "description": "earn: switch earnings on or off, or with provider that provider"},
-                "auto": {"type": "boolean", "description": "earn: bid on small marketplace jobs without asking"},
-                "auto_max_usd": {"type": "number", "description": "earn: the auto mode limit"},
+                "auto": {"type": "boolean", "description": "earn: bid, work and deliver without asking"},
                 "min_usd": {"type": "number", "description": "earn: ignore work paying less"},
                 "scan_minutes": {"type": "integer", "description": "earn: minutes between scans (0 = on demand)"},
                 "profile": {"type": "string", "description": "earn: what work the user wants to take on"},
@@ -558,13 +557,9 @@ async fn earn(state: &Shared, args: &Value) -> Result<String> {
     } else if opt(args, "api_key").is_some() || opt(args, "agent_id").is_some() {
         bail!("say which provider the key or agent ID is for (provider)");
     }
-    for (arg, field) in [
-        ("auto", "auto"),
-        ("auto_max_usd", "autoMaxUsd"),
-        ("min_usd", "minUsd"),
-        ("scan_minutes", "scanMinutes"),
-        ("profile", "profile"),
-    ] {
+    for (arg, field) in
+        [("auto", "auto"), ("min_usd", "minUsd"), ("scan_minutes", "scanMinutes"), ("profile", "profile")]
+    {
         if let Some(v) = args.get(arg) {
             body.insert(field.into(), v.clone());
         }
