@@ -54,7 +54,7 @@ pub fn builtin_specs(agent: &Agent, can_delegate: bool, sh: Option<&shell::Shell
         },
         ToolSpec {
             name: "read_document".into(),
-            description: "Fetch a public http(s) URL that is a document (PDF, docx, xlsx, pptx, odt, ods, odp, txt, md, csv, tsv; up to 10 MB) and return its text. Scanned or image-only PDFs are OCRed here (built-in OCR, first 5 pages), so never use an MCP or Composio OCR/PDF service, web_fetch or `curl | strings` for these files. For an email attachment, pass the download link from the mail tool (e.g. Gmail GMAIL_GET_ATTACHMENT `s3url`). offset continues a long document.".into(),
+            description: "Fetch a public http(s) URL that is a document (PDF, docx, xlsx, pptx, odt, ods, odp, txt, md, csv, tsv; up to 10 MB) and return its text. Scanned or image-only PDFs are OCRed here (built-in OCR, first 5 pages), so never use an MCP or Composio OCR/PDF service, web_fetch or `curl | strings` for these files, and never judge a PDF unreadable from its raw bytes: call this first. For an email attachment, pass the download link from the mail tool (e.g. Gmail GMAIL_GET_ATTACHMENT `s3url`). offset continues a long document.".into(),
             parameters: obj(json!({"url": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "max_chars": {"type": "integer", "minimum": 500, "maximum": 20000}}), &["url"]),
         },
         ToolSpec {
@@ -541,6 +541,16 @@ async fn read_document(_ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
     let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
     let mut resp = crate::net::get(parsed.clone(), None, std::time::Duration::from_secs(60)).await?;
     if !resp.status().is_success() {
+        let signed = parsed.query().is_some_and(|q| {
+            let q = q.to_ascii_lowercase();
+            q.contains("signature") || q.contains("expires")
+        });
+        if signed && matches!(resp.status().as_u16(), 401 | 403) {
+            bail!(
+                "HTTP {}: this signed download link has probably expired (they last about an hour). Get a fresh link from the tool that gave it (e.g. GMAIL_GET_ATTACHMENT again) and call read_document with it right away.",
+                resp.status()
+            );
+        }
         bail!("HTTP {}", resp.status());
     }
     let too_big = || anyhow!("the document is larger than {} MB", crate::doc::MAX_UPLOAD / 1024 / 1024);
