@@ -557,12 +557,9 @@ async fn earn(state: &Shared, args: &Value) -> Result<String> {
     } else if opt(args, "api_key").is_some() || opt(args, "agent_id").is_some() {
         bail!("say which provider the key or agent ID is for (provider)");
     }
-    for (arg, field) in [
-        ("auto", "auto"),
-        ("min_usd", "minUsd"),
-        ("scan_minutes", "scanMinutes"),
-        ("profile", "profile"),
-    ] {
+    for (arg, field) in
+        [("auto", "auto"), ("min_usd", "minUsd"), ("scan_minutes", "scanMinutes"), ("profile", "profile")]
+    {
         if let Some(v) = args.get(arg) {
             body.insert(field.into(), v.clone());
         }

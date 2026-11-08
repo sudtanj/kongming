@@ -1452,12 +1452,14 @@ async fn request(ctx: &ToolCtx<'_>, s: &Settings, args: &Value) -> Result<String
             bail!("no API key for {} yet: {}", p.name, p.key_help);
         }
         if !write_allowed(p.id, path, args.get("body").unwrap_or(&Value::Null)) {
-            bail!("{} does not take {path} from Kongming: it bids, starts work, delivers and messages as the worker", p.name);
+            bail!(
+                "{} does not take {path} from Kongming: it bids, starts work, delivers and messages as the worker",
+                p.name
+            );
         }
         // A contract the buyer opened has no lead.
         if !(arg(args, "ref").is_empty() && s.auto && contract_path(p.id, path)) {
-            let l =
-                lead(ctx.state, args).await.map_err(|e| anyhow!("{e:#}; pass the ref of the lead this is for"))?;
+            let l = lead(ctx.state, args).await.map_err(|e| anyhow!("{e:#}; pass the ref of the lead this is for"))?;
             if l.provider != p.id {
                 bail!("lead {} is on {}, not {}", l.reference(), l.provider, p.id);
             }
