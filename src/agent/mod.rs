@@ -1578,6 +1578,36 @@ The browser address (`http://<ip>:9222`) comes from another skill or from the us
         &["tools", "browser"],
     ),
     (
+        "reading-documents",
+        "Use when asked to read a PDF, Word, Excel or PowerPoint file, including email attachments (Gmail, Outlook) and files from a connected app: how to get a download link and read it.",
+        r##"# Reading documents and attachments
+
+`read_document` reads PDF, docx, xlsx, pptx, odt, ods, odp, txt, md, csv and tsv from an http(s) link, up to 10 MB. Scanned PDFs are OCRed (first 5 pages; the text starts with "[OCR text, may contain errors]"). Use `offset` to read on when the text is cut. Never use `web_fetch` for these files.
+
+## Email attachments through an MCP app (Composio and similar)
+1. Find the message and its attachment: Gmail `GMAIL_FETCH_EMAILS` with a query like `has:attachment filename:pdf from:sender newer_than:30d`, or `GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID` with `format: "full"`. Note the `messageId`, the attachment `filename` and `attachmentId`.
+2. Get a download link: `GMAIL_GET_ATTACHMENT` with `message_id`, `attachment_id` and `file_name`. Its result has `file.s3url`.
+3. Call `read_document` with that `s3url` as `url`. The link expires in about an hour: read it right away.
+
+## When an ID ends in "..." it was cut
+Large tool results come back as a `data_preview` with long strings shortened: an `attachmentId` ending in `...` is not usable (Gmail answers "Invalid attachment token"). Do not retry with it. Run both steps inside the gateway's workbench instead, where results are complete, and print only the link. For Composio, call `COMPOSIO_REMOTE_WORKBENCH` with `code_to_execute`:
+
+```python
+r, e = run_composio_tool('GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID', {'message_id': 'MESSAGE_ID', 'format': 'full'})
+att = [a for a in r['data']['attachmentList'] if a['filename'].lower().endswith('.pdf')][0]
+r2, e2 = run_composio_tool('GMAIL_GET_ATTACHMENT', {'message_id': 'MESSAGE_ID', 'attachment_id': att['attachmentId'], 'file_name': att['filename']})
+print(e2 or r2['data']['file']['s3url'])
+```
+
+Then `read_document` the printed link. Change the `endswith` test for other file types.
+
+## Pitfalls
+- `read_document` says "not a supported document": the link's file name and content type gave no known extension. Use the `s3url`, not a Gmail web link (`mail.google.com` needs a login).
+- "no text found in the file" on a PDF: the scan is too faint or not on the first 5 pages; tell the user what you got.
+- Never paste the file's base64 into a tool call; always pass a link."##,
+        &["tools", "documents"],
+    ),
+    (
         "setup-from-paste",
         "Use when the user pastes a key, token, config, URL or skill file: recognize what it is and configure it with setup.",
         r##"# Setting kongming up from a paste
