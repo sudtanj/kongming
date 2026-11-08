@@ -1740,8 +1740,6 @@ mod tests {
         assert!(!contract_path("opentask", "/agent/tasks/t1/bids"));
         assert!(!contract_path("toku", "/contracts/c1/events"));
     }
-        assert!(forbidden_path("/jobs/x/y/claim"));
-    }
 
     #[test]
     fn dealwork_heartbeat_details() {
