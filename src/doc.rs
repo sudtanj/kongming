@@ -29,7 +29,14 @@ const MAX_OUTPUT: usize = MAX_CHARS * 4;
 /// Zip bomb guards: entries in the archive and bytes read out of all of them.
 const MAX_ENTRIES: usize = 2000;
 const MAX_UNZIPPED: u64 = 20 * 1024 * 1024;
-const PDF_TIMEOUT: Duration = Duration::from_secs(30);
+/// A scanned PDF is OCRed in the child, which is slow on a small board.
+const PDF_TIMEOUT: Duration = Duration::from_secs(120);
+// ponytail: first 5 pages only; longer side shrunk to 2000 px; images over 16 Mpx skipped.
+const OCR_PAGES: usize = 5;
+const OCR_SIDE: usize = 2000;
+const OCR_MAX_PIXELS: i64 = 16_000_000;
+static DETECTION_MODEL: &[u8] = include_bytes!("../models/text-detection.onnx");
+static RECOGNITION_MODEL: &[u8] = include_bytes!("../models/text-recognition.onnx");
 const PDF_FAILED: &str = "could not read this PDF";
 
 /// One extraction at a time: a parse can use a lot of memory on a small board.
@@ -162,7 +169,7 @@ fn check_pdf(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Run `kongming doc-pdf` on the bytes: killed after 30 s, output capped, any
+/// Run `kongming doc-pdf` on the bytes: killed after 2 minutes, output capped, any
 /// failure (exit code, signal, limit) is the one generic error.
 async fn pdf_in_child(bytes: &Bytes) -> Result<String> {
     check_pdf(bytes)?;
@@ -205,7 +212,9 @@ pub fn pdf_main() -> i32 {
         // SAFETY: setrlimit reads a stack value.
         unsafe { libc::setrlimit(resource, &l) == 0 }
     };
-    if !limit(libc::RLIMIT_AS, 256 * 1024 * 1024) || !limit(libc::RLIMIT_CPU, 20) {
+    std::env::set_var("RTEN_NUM_THREADS", "1");
+    std::env::set_var("RAYON_NUM_THREADS", "1");
+    if !limit(libc::RLIMIT_AS, 512 * 1024 * 1024) || !limit(libc::RLIMIT_CPU, 90) {
         return 1;
     }
     let mut bytes = Vec::new();
@@ -234,7 +243,111 @@ fn pdf_text(bytes: &[u8]) -> Result<String> {
             break;
         }
     }
+    if out.trim().is_empty() {
+        let ocr = ocr_pdf(&doc)?;
+        if !ocr.trim().is_empty() {
+            out = format!("[OCR text, may contain errors]\n{ocr}");
+        }
+    }
     Ok(cap(out))
+}
+
+fn ocr_pdf(doc: &lopdf::Document) -> Result<String> {
+    let engine = ocrs::OcrEngine::new(ocrs::OcrEngineParams {
+        detection_model: Some(rten::Model::load_static_slice(DETECTION_MODEL)?),
+        recognition_model: Some(rten::Model::load_static_slice(RECOGNITION_MODEL)?),
+        ..Default::default()
+    })?;
+    let mut out = String::new();
+    for page in doc.get_pages().into_values().take(OCR_PAGES) {
+        for (w, h, rgb) in page_images(doc, page) {
+            let input = engine.prepare_input(ocrs::ImageSource::from_bytes(&rgb, (w as u32, h as u32))?)?;
+            out.push_str(&engine.get_text(&input)?);
+            out.push('\n');
+        }
+        if out.len() > MAX_OUTPUT {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// The page's image XObjects as RGB (width, height, pixels), shrunk to `OCR_SIDE`.
+fn page_images(doc: &lopdf::Document, page: lopdf::ObjectId) -> Vec<(usize, usize, Vec<u8>)> {
+    let Ok(page) = doc.get_dictionary(page) else { return Vec::new() };
+    let Ok(xobjects) = doc.get_dict_in_dict(page, b"Resources").and_then(|r| doc.get_dict_in_dict(r, b"XObject"))
+    else {
+        return Vec::new();
+    };
+    xobjects.iter().filter_map(|(_, x)| image_rgb(doc.dereference(x).ok()?.1.as_stream().ok()?)).collect()
+}
+
+// ponytail: only DCTDecode (JPEG) and raw or Flate 8-bit DeviceGray/DeviceRGB; JBIG2, CCITT and the rest are skipped.
+fn image_rgb(stream: &lopdf::Stream) -> Option<(usize, usize, Vec<u8>)> {
+    use lopdf::Object;
+    let dict = &stream.dict;
+    if dict.get(b"Subtype").and_then(Object::as_name).ok()? != b"Image" {
+        return None;
+    }
+    let (w, h) =
+        (dict.get(b"Width").and_then(Object::as_i64).ok()?, dict.get(b"Height").and_then(Object::as_i64).ok()?);
+    if w <= 0 || h <= 0 || w.checked_mul(h)? > OCR_MAX_PIXELS {
+        return None;
+    }
+    let filters = if dict.has(b"Filter") { stream.filters().ok()? } else { Vec::new() };
+    let (w, h, channels, pixels) = if filters.len() == 1 && filters[0] == "DCTDecode" {
+        let mut decoder = zune_jpeg::JpegDecoder::new(zune_core::bytestream::ZCursor::new(&stream.content));
+        let pixels = decoder.decode().ok()?;
+        let (w, h) = decoder.dimensions()?;
+        if w == 0 || h == 0 || w * h > OCR_MAX_PIXELS as usize || pixels.len() % (w * h) != 0 {
+            return None;
+        }
+        (w, h, pixels.len() / (w * h), pixels)
+    } else if filters.is_empty() || (filters.len() == 1 && filters[0] == "FlateDecode") {
+        let channels = match dict.get(b"ColorSpace").and_then(Object::as_name).ok()? {
+            b"DeviceGray" => 1,
+            b"DeviceRGB" => 3,
+            _ => return None,
+        };
+        if dict.get(b"BitsPerComponent").and_then(Object::as_i64).ok()? != 8 || dict.has(b"DecodeParms") {
+            return None;
+        }
+        let pixels = if filters.is_empty() { stream.content.clone() } else { stream.decompressed_content().ok()? };
+        if pixels.len() != w as usize * h as usize * channels {
+            return None;
+        }
+        (w as usize, h as usize, channels, pixels)
+    } else {
+        return None;
+    };
+    if channels != 1 && channels != 3 {
+        return None;
+    }
+    let scale = (w.max(h) as f32 / OCR_SIDE as f32).max(1.0);
+    let (dw, dh) = (((w as f32 / scale) as usize).max(1), ((h as f32 / scale) as usize).max(1));
+    let mut rgb = Vec::with_capacity(dw * dh * 3);
+    for y in 0..dh {
+        let (y0, y1) = (y * h / dh, ((y + 1) * h / dh).max(y * h / dh + 1));
+        for x in 0..dw {
+            let (x0, x1) = (x * w / dw, ((x + 1) * w / dw).max(x * w / dw + 1));
+            let mut sum = [0u32; 3];
+            for sy in y0..y1 {
+                for sx in x0..x1 {
+                    let at = (sy * w + sx) * channels;
+                    for (c, s) in sum.iter_mut().enumerate().take(channels) {
+                        *s += u32::from(pixels[at + c]);
+                    }
+                }
+            }
+            let n = ((y1 - y0) * (x1 - x0)) as u32;
+            if channels == 1 {
+                rgb.extend([(sum[0] / n) as u8; 3]);
+            } else {
+                rgb.extend(sum.map(|s| (s / n) as u8));
+            }
+        }
+    }
+    Some((dw, dh, rgb))
 }
 
 /// A zip whose total decompressed reads are bounded.
@@ -579,6 +692,10 @@ mod tests {
             format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
             "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
         ];
+        assemble(&objs)
+    }
+
+    fn assemble(objs: &[String]) -> Vec<u8> {
         let mut pdf = b"%PDF-1.4\n".to_vec();
         let mut offsets = Vec::new();
         for (i, o) in objs.iter().enumerate() {
@@ -592,6 +709,27 @@ mod tests {
         }
         pdf.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).bytes());
         pdf
+    }
+
+    #[test]
+    fn pdf_page_images_become_rgb() {
+        let gray = "\x00\x20\x40\x60\x10\x30\x50\x70";
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 4 2] /Resources << /XObject << /Im0 4 0 R >> >> >>".to_string(),
+            format!(
+                "<< /Type /XObject /Subtype /Image /Width 4 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length {} >>\nstream\n{gray}\nendstream",
+                gray.len()
+            ),
+        ];
+        let doc = lopdf::Document::load_mem(&assemble(&objs)).unwrap();
+        let page = *doc.get_pages().values().next().unwrap();
+        let images = page_images(&doc, page);
+        assert_eq!(images.len(), 1);
+        let (w, h, rgb) = &images[0];
+        assert_eq!((*w, *h, rgb.len()), (4, 2, 24));
+        assert_eq!(&rgb[3..9], &[0x20, 0x20, 0x20, 0x40, 0x40, 0x40]);
     }
 
     #[test]
