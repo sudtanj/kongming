@@ -481,7 +481,7 @@ async fn plan(
     let mut mcp_tools = state.mcp.tools(allowed.as_deref()).await.unwrap_or_default();
     let restricted = earn_restricted(state, session).await;
     if restricted {
-        mcp_tools.retain(|t| crate::earn::mcp_tool_allowed(&t.tool));
+        mcp_tools.retain(|t| crate::earn::mcp_tool_allowed(&t.server_name, &t.tool));
     }
     let mut mcp_names: Vec<String> = mcp_tools.iter().map(|t| t.server_name.clone()).collect();
     mcp_names.sort();
@@ -867,7 +867,7 @@ async fn execute_tool(ctx: &ToolCtx<'_>, id: &str, name: &str, args: &Value, max
     let result: Result<(String, bool)> = match tools::run_builtin(ctx, name, args).await {
         Some(r) => r,
         None => match ctx.state.mcp.find_tool(name).await {
-            Ok(Some(t)) if earn_restricted(ctx.state, ctx.session).await && !crate::earn::mcp_tool_allowed(&t.tool) => {
+            Ok(Some(t)) if earn_restricted(ctx.state, ctx.session).await && !crate::earn::mcp_tool_allowed(&t.server_name, &t.tool) => {
                 Err(anyhow!("{} is not available while earning: only reading, forking, branching, committing and opening a pull request are", t.tool))
             }
             Ok(Some(t)) => ctx.state.mcp.call(&t.server_id, &t.tool, args.clone()).await,
