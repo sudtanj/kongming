@@ -855,7 +855,7 @@ async function onRoute() {
   else {
     settings.hide();
     if (S.route.id) { if (!S.current || S.current.id !== S.route.id) await openSession(S.route.id); else thread.show(); }
-    else { S.current = null; thread.show(); }
+    else { composer.voice.off(); S.current = null; thread.show(); }
     renderTopbar(); composer.reset(); renderSidebarList();
   }
 }
