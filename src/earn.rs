@@ -990,7 +990,8 @@ request from the user's GitHub account: prepare the fix and the steps, and send 
         }
         p.push('\n');
     }
-    let mut ids: Vec<&str> = active.iter().chain(fresh.iter().filter(|_| s.auto)).map(|l| l.provider.as_str()).collect();
+    let mut ids: Vec<&str> =
+        active.iter().chain(fresh.iter().filter(|_| s.auto)).map(|l| l.provider.as_str()).collect();
     ids.sort_unstable();
     ids.dedup();
     for book in ids.into_iter().map(playbook).filter(|b| !b.is_empty()) {
