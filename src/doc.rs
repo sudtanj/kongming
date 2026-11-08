@@ -279,10 +279,7 @@ fn page_images(doc: &lopdf::Document, page: lopdf::ObjectId) -> Vec<(usize, usiz
     else {
         return Vec::new();
     };
-    xobjects
-        .iter()
-        .filter_map(|(_, x)| image_rgb(doc.dereference(x).ok()?.1.as_stream().ok()?))
-        .collect()
+    xobjects.iter().filter_map(|(_, x)| image_rgb(doc.dereference(x).ok()?.1.as_stream().ok()?)).collect()
 }
 
 // ponytail: only DCTDecode (JPEG) and raw or Flate 8-bit DeviceGray/DeviceRGB; JBIG2, CCITT and the rest are skipped.
@@ -292,7 +289,8 @@ fn image_rgb(stream: &lopdf::Stream) -> Option<(usize, usize, Vec<u8>)> {
     if dict.get(b"Subtype").and_then(Object::as_name).ok()? != b"Image" {
         return None;
     }
-    let (w, h) = (dict.get(b"Width").and_then(Object::as_i64).ok()?, dict.get(b"Height").and_then(Object::as_i64).ok()?);
+    let (w, h) =
+        (dict.get(b"Width").and_then(Object::as_i64).ok()?, dict.get(b"Height").and_then(Object::as_i64).ok()?);
     if w <= 0 || h <= 0 || w.checked_mul(h)? > OCR_MAX_PIXELS {
         return None;
     }
