@@ -283,7 +283,13 @@ pub fn resolve_tool_name<'a>(name: &str, tools: &'a [ToolSpec]) -> Option<&'a To
 /// to offered tools count. Returns the text without the matched spans and
 /// the calls with their resolved names.
 pub fn extract_text_calls(text: &str, tools: &[ToolSpec]) -> Option<(String, Vec<(String, Value)>)> {
-    if tools.is_empty() || !text.contains('{') {
+    if tools.is_empty() {
+        return None;
+    }
+    if let Some(found) = dsml_calls(text, tools) {
+        return Some(found);
+    }
+    if !text.contains('{') {
         return None;
     }
     let mut spans = tagged_spans(text);
@@ -318,6 +324,40 @@ pub fn extract_text_calls(text: &str, tools: &[ToolSpec]) -> Option<(String, Vec
     Some((rest.trim().to_string(), calls))
 }
 
+
+/// DeepSeek's own call markup when it leaks into the text instead of coming
+/// back as tool calls: `<｜DSML｜invoke name="t"><｜DSML｜parameter name="k"
+/// string="true">v</｜DSML｜parameter></｜DSML｜invoke>`, usually inside a
+/// `function_calls` wrapper; `string="false"` values are JSON.
+fn dsml_calls(text: &str, tools: &[ToolSpec]) -> Option<(String, Vec<(String, Value)>)> {
+    let first = text.find("DSML")?;
+    let start = text[..first].rfind('<')?;
+    let last = text.rfind("DSML")?;
+    let end = text[last..].find('>').map_or(text.len(), |i| last + i + 1);
+    let mut calls = Vec::new();
+    for invoke in text[start..end].split("invoke name=\"").skip(1) {
+        let Some(q) = invoke.find('"') else { continue };
+        let mut args = serde_json::Map::new();
+        for param in invoke.split("parameter name=\"").skip(1) {
+            let (Some(q), Some(gt)) = (param.find('"'), param.find('>')) else { continue };
+            let body = &param[gt + 1..];
+            let value = &body[..body.find("DSML").and_then(|i| body[..i].rfind('<')).unwrap_or(body.len())];
+            let value = if param[q..gt].contains("string=\"false\"") {
+                serde_json::from_str(value.trim()).unwrap_or_else(|_| Value::String(value.to_string()))
+            } else {
+                Value::String(value.to_string())
+            };
+            args.insert(param[..q].to_string(), value);
+        }
+        if let Some(t) = resolve_tool_name(&invoke[..q], tools) {
+            calls.push((t.name.clone(), Value::Object(args)));
+        }
+    }
+    if calls.is_empty() {
+        return None;
+    }
+    Some((format!("{}{}", &text[..start], &text[end..]).trim().to_string(), calls))
+}
 /// `<tool_call>…</tool_call>` blocks as (start, end, body); a last block may
 /// be left unclosed.
 fn tagged_spans(text: &str) -> Vec<(usize, usize, &str)> {
@@ -616,6 +656,12 @@ mod tests {
         // An unclosed tag at the end of the reply.
         let (_, calls) = extract_text_calls(r#"<tool_call>{"name": "current_time", "arguments": {}"#, &t).unwrap();
         assert_eq!(calls.len(), 1);
+
+        // DeepSeek markup leaked into the text.
+        let text = "\n\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"web_fetch\">\n<｜｜DSML｜｜ parameter name=\"url\" string=\"true\">https://x/a?b=1</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name=\"max_chars\" string=\"false\">6000</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+        let (rest, calls) = extract_text_calls(text, &t).expect("dsml call");
+        assert_eq!(rest, "");
+        assert_eq!(calls, vec![("web_fetch".to_string(), json!({"url": "https://x/a?b=1", "max_chars": 6000}))]);
     }
 
     #[test]
