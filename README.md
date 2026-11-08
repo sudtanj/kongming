@@ -46,7 +46,7 @@ kongming runs no model locally; it is a small HTTP client and server, so the dev
 | OS | Linux with Docker 20.10+, or any Linux for the static release binary | Armbian / Debian 12 |
 | Clock | NTP-synced (TLS, OAuth token expiry and cron need correct time) | |
 
-32-bit ARM (armv7, e.g. the original Orange Pi Zero) is not built. <!-- bench:summary -->Measured: a 19.1 MiB binary that is ready 15 ms after start and idles at 7.5 MiB RSS; 50 concurrent chats peak at 26.8 MiB (1 worker thread(s); see [Benchmark](#benchmark)).<!-- /bench:summary --> Measure on your device with `docker stats kongming`.
+32-bit ARM (armv7, e.g. the original Orange Pi Zero) is not built. <!-- bench:summary -->Measured: a 19.1 MiB binary that is ready 15 ms after start and idles at 7.6 MiB RSS; 50 concurrent chats peak at 27.0 MiB (1 worker thread(s); see [Benchmark](#benchmark)).<!-- /bench:summary --> Measure on your device with `docker stats kongming`.
 
 External services:
 
@@ -140,7 +140,7 @@ work, and a real Turso adds its round trips to every turn. Expect the Orange Pi'
 cores to add latency under load; memory carries over.
 
 <!-- bench:report -->
-Measured 2026-11-08 on aarch64 at commit `0319c4b`. Binary 19.1 MiB. Each chat is a new session and one message answered in full by the default agent (system prompt, skills index and tool schemas included). The mock model streams 8 chunks 25 ms apart (about 200 ms per reply); the Turso mock runs on the same machine, so a real Turso adds its round trips to every turn.
+Measured 2026-11-08 on aarch64 at commit `dbbec7f`. Binary 19.1 MiB. Each chat is a new session and one message answered in full by the default agent (system prompt, skills index and tool schemas included). The mock model streams 8 chunks 25 ms apart (about 200 ms per reply); the Turso mock runs on the same machine, so a real Turso adds its round trips to every turn.
 
 ### 1 worker thread(s)
 
@@ -148,17 +148,17 @@ Ready 15 ms after spawn (schema and starter skills applied).
 
 | State | RSS | Threads |
 |---|---:|---:|
-| Idle, 2 s after start | 7.5 MiB | 2 |
-| Idle after 10 sequential chats | 8.2 MiB | 2 |
-| Idle, 5 s after the load runs | 26.8 MiB | 2 |
-| Peak for the whole run (VmHWM) | 26.8 MiB | |
+| Idle, 2 s after start | 7.6 MiB | 2 |
+| Idle after 10 sequential chats | 8.3 MiB | 2 |
+| Idle, 5 s after the load runs | 26.9 MiB | 2 |
+| Peak for the whole run (VmHWM) | 26.9 MiB | |
 
 | Concurrent chats | Chats | Errors | Chats/s | p50 | p99 | Peak RSS |
 |---:|---:|---:|---:|---:|---:|---:|
-| 1 | 10 | 0 | 5 | 212 ms | 213 ms | 8.2 MiB |
-| 5 | 300 | 0 | 23 | 212 ms | 214 ms | 9.6 MiB |
-| 20 | 300 | 0 | 91 | 212 ms | 238 ms | 15.8 MiB |
-| 50 | 300 | 0 | 200 | 217 ms | 295 ms | 26.8 MiB |
+| 1 | 10 | 0 | 5 | 212 ms | 213 ms | 8.3 MiB |
+| 5 | 300 | 0 | 23 | 212 ms | 216 ms | 9.8 MiB |
+| 20 | 300 | 0 | 92 | 212 ms | 240 ms | 15.5 MiB |
+| 50 | 300 | 0 | 204 | 214 ms | 295 ms | 27.0 MiB |
 <!-- /bench:report -->
 
 ## License
