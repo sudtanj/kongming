@@ -1,5 +1,5 @@
 //! Read-only MCP server at `POST /mcp` so a developer's agent can inspect this
-//! daemon: status, settings with secrets redacted, and recent logs. No tool
+//! daemon: status, settings with secrets redacted, recent logs and chats. No tool
 //! changes anything. Authenticated by its own bearer token (only the SHA-256
 //! is stored, in the `debug_mcp_token_hash` setting); without a token the
 //! endpoint does not exist. JSON responses only, no SSE.
@@ -108,7 +108,34 @@ fn tool_list() -> Value {
                 "since_seconds": {"type": "number", "description": "Only lines from the last N seconds"},
             }},
         },
+        {
+            "name": "get_sessions",
+            "description": "Without session_id: recent chats (id, title, channel). With it: that chat's newest messages including tool calls and results, fields named like secrets redacted.",
+            "inputSchema": {"type": "object", "properties": {
+                "session_id": {"type": "string"},
+                "limit": {"type": "integer", "description": "Chats to list (default 20) or newest messages to show (default 30), max 100"},
+            }},
+        },
     ])
+}
+
+async fn sessions(state: &Shared, args: &Value) -> Result<String> {
+    let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(0).clamp(0, 100);
+    let Some(id) = args.get("session_id").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
+        let list = state.db.sessions(if limit == 0 { 20 } else { limit }).await?;
+        let out: Vec<Value> = list
+            .iter()
+            .map(|s| json!({"id": s.id, "title": s.title, "channel": s.channel, "updatedAt": s.updated_at}))
+            .collect();
+        return Ok(serde_json::to_string_pretty(&out)?);
+    };
+    let session = state.db.session(id).await?.ok_or_else(|| anyhow!("no session {id}"))?;
+    let mut out = format!("# {} ({})\n", session.title, session.channel);
+    for m in state.db.recent_messages(id, if limit == 0 { 30 } else { limit }).await? {
+        let parts = redact(&serde_json::to_value(&m.parts)?).to_string();
+        out.push_str(&format!("[{} {} {}] {}\n", m.seq, m.created_at, m.role, truncate(&parts, 3000)));
+    }
+    Ok(out)
 }
 
 async fn call_tool(state: &Shared, params: &Value) -> Result<Value, (i32, String)> {
@@ -117,6 +144,7 @@ async fn call_tool(state: &Shared, params: &Value) -> Result<Value, (i32, String
         Some("get_status") => status(state).await,
         Some("get_config") => config(state).await,
         Some("get_logs") => logs(&args),
+        Some("get_sessions") => sessions(state, &args).await,
         other => return Err((-32602, format!("unknown tool: {}", other.unwrap_or("")))),
     };
     Ok(match out {

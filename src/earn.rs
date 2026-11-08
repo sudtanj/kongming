@@ -177,6 +177,32 @@ pub fn provider(id: &str) -> Option<&'static Provider> {
     PROVIDERS.iter().find(|p| p.id == id)
 }
 
+/// The API steps for bidding and delivering on a provider whose docs are too
+/// long to read in full every time. Checked against its OpenAPI document.
+pub fn playbook(id: &str) -> &'static str {
+    match id {
+        "opentask" => {
+            "OpenTask API steps (paths after the base; the task id is the last part of the lead's URL):
+1. GET /agent/tasks/<taskId>: read executionMode, availableActions and updatedAt. Pitch tasks take bids; Bounty and \
+Benchmark tasks take entries (GET/POST /agent/tasks/<taskId>/entries) instead.
+2. Bid: POST /agent/tasks/<taskId>/bids {expectedTaskUpdatedAt: <exact updatedAt>, priceAmount, priceCurrency: \"USDC\", \
+etaDays, approach: how you will do it, assumptions, how the buyer can verify it}. On bid_task_scope_changed reload the \
+task first. At most 20 new bids a day. Note the bid id on the lead.
+3. Follow up: GET /agent/bids?status=active and GET /agent/bids/<bidId>; GET /agent/contracts lists contracts once the \
+buyer hires. Read and answer messages: GET/POST /agent/contracts/<contractId>/messages {body} (bids: /agent/bids/<bidId>/messages).
+4. Deliver: do the work, then POST /agent/contracts/<contractId>/deliveries {title, summary: the full deliverable text \
+(up to 20000 chars), verificationInstructions}. GET /agent/contracts/<contractId>/deliveries/<packageId> for its \
+criteria and version; PATCH it {expectedVersion, criteria: [{criterionId, claim: satisfied, note}] for every criterion}; then POST \
+/agent/contracts/<contractId>/deliveries/<packageId>/submit {expectedVersion, confirmed: true}. If native delivery is \
+off, use POST /agent/contracts/<contractId>/submissions {notes: the deliverable, deliverableUrl if there is one}.
+5. On changes requested: a new draft with basedOnDeliveryPackageId and a changeSummary, then submit again.
+Payment goes straight to the user's wallet; never touch payment, payout or wallet endpoints. Mark the lead submitted after \
+delivery and paid only when the contract shows verified payment."
+        }
+        _ => "",
+    }
+}
+
 // -------------------------------------------------------------------- settings
 
 #[derive(Clone, Debug, PartialEq)]
@@ -940,9 +966,9 @@ I'll bid and do it, or `skip <ref>`. No message if nothing made the shortlist.\n
         ));
         if s.auto {
             p.push_str(&format!(
-                "Auto mode is on: for shortlisted marketplace leads up to ${:.2} on a provider with a key, you may bid \
-right away (read the provider docs with web_fetch first, then `earn` op `request`), mark them `working`, and say so in \
-the message.\n\n",
+                "Auto mode is on: for shortlisted marketplace leads up to ${:.2} on a provider with a key, bid right \
+away with `earn` op `request` (follow the provider's API steps below, or read its docs with web_fetch), note the bid id, \
+and say so in the message. Once the buyer hires you, do the work and deliver it without asking the user.\n\n",
                 s.auto_max_usd
             ));
         }
@@ -963,6 +989,13 @@ request from the user's GitHub account: prepare the fix and the steps, and send 
             p.push('\n');
         }
         p.push('\n');
+    }
+    let mut ids: Vec<&str> = active.iter().chain(fresh.iter().filter(|_| s.auto)).map(|l| l.provider.as_str()).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    for book in ids.into_iter().map(playbook).filter(|b| !b.is_empty()) {
+        p.push_str(book);
+        p.push_str("\n\n");
     }
     p.push_str("Finish with one line for the log: what you shortlisted, bid on or delivered, or `nothing to report`.");
     p
@@ -1184,7 +1217,7 @@ pub async fn tool(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
             let l = lead(state, args).await?;
             let p = provider(&l.provider);
             Ok(format!(
-                "{}\nscore {} | note: {}\ntags: {}\n\n{}\n\nProvider: {} ({}), payout {}. Docs: {}. Key saved: {}. Kongming can act through the API: {}.",
+                "{}\nscore {} | note: {}\ntags: {}\n\n{}\n\nProvider: {} ({}), payout {}. Docs: {}. Key saved: {}. Kongming can act through the API: {}.\n\n{}",
                 line(&l),
                 l.score.map(|x| x.to_string()).unwrap_or_else(|| "-".into()),
                 if l.note.is_empty() { "-" } else { l.note.as_str() },
@@ -1196,6 +1229,7 @@ pub async fn tool(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
                 p.map(|p| p.docs).unwrap_or("?"),
                 p.is_some_and(|p| s.key(p).is_some()),
                 p.is_some_and(|p| p.acts),
+                playbook(&l.provider),
             ))
         }
         "rate" => {
