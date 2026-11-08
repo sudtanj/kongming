@@ -882,7 +882,11 @@ pub async fn scan(state: &Shared, manual: bool) -> Result<ScanReport> {
     let fresh = state.db.earn_leads(&["new"], RATE_PER_SCAN, true).await?;
     let active = state.db.earn_leads(ACTIVE, 20, false).await?;
     // Shortlisted in an earlier scan whose turn did not get to the bid (model or network failure).
-    let pending = if s.auto { open_shortlisted(state.db.earn_leads(&["shortlisted"], 10, false).await?, now_ms()) } else { vec![] };
+    let pending = if s.auto {
+        open_shortlisted(state.db.earn_leads(&["shortlisted"], 10, false).await?, now_ms())
+    } else {
+        vec![]
+    };
     let mut contracts = Vec::new();
     let mut contracts_failed = false;
     if s.auto {
@@ -1800,11 +1804,10 @@ mod tests {
             ],
             now,
         );
-        assert_eq!(out.iter().map(|l| l.deadline.as_deref()).collect::<Vec<_>>(), [
-            None,
-            Some("2099-01-01T00:00:00.000Z"),
-            Some("someday")
-        ]);
+        assert_eq!(
+            out.iter().map(|l| l.deadline.as_deref()).collect::<Vec<_>>(),
+            [None, Some("2099-01-01T00:00:00.000Z"), Some("someday")]
+        );
     }
 
     #[test]
