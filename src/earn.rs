@@ -743,7 +743,7 @@ pub fn keep(f: &Found, s: &Settings) -> bool {
 async fn fetch(state: &Shared, s: &Settings, p: &Provider) -> Result<Vec<Found>> {
     let url = list_url(p.id, &s.base(p));
     let accept = if p.id == "algora" { "application/vnd.github+json" } else { "application/json" };
-    let mut req = state.http.get(&url).header("accept", accept).timeout(Duration::from_secs(30));
+    let mut req = state.earn_http.get(&url).header("accept", accept).timeout(Duration::from_secs(30));
     if let Some(k) = s.key(p) {
         req = authorize(req, p, k);
     }
@@ -772,7 +772,7 @@ pub fn algora_amount(comments: &Value) -> Option<f64> {
 async fn algora_bounty(state: &Shared, s: &Settings, p: &Provider, issue_url: &str) -> Result<Option<f64>> {
     let path = issue_url.strip_prefix("https://github.com/").ok_or_else(|| anyhow!("not a GitHub issue"))?;
     let url = format!("{}/repos/{path}/comments?per_page=50", s.base(p));
-    let mut req = state.http.get(&url).header("accept", "application/vnd.github+json").timeout(Duration::from_secs(20));
+    let mut req = state.earn_http.get(&url).header("accept", "application/vnd.github+json").timeout(Duration::from_secs(20));
     if let Some(k) = s.key(p) {
         req = authorize(req, p, k);
     }
@@ -878,16 +878,21 @@ pub async fn scan(state: &Shared, manual: bool) -> Result<ScanReport> {
     let fresh = state.db.earn_leads(&["new"], RATE_PER_SCAN, true).await?;
     let active = state.db.earn_leads(ACTIVE, 20, false).await?;
     let mut contracts = Vec::new();
+    let mut contracts_failed = false;
     if s.auto {
         for p in PROVIDERS.iter().filter(|p| s.on(p) && s.key(p).is_some()) {
             match worker_contracts(state, &s, p).await {
                 Ok(Some(list)) => contracts.push((p, list)),
                 Ok(None) => {}
-                Err(e) => tracing::warn!("earn: contracts on {}: {e:#}", p.name),
+                Err(e) => {
+                    contracts_failed = true;
+                    tracing::warn!("earn: contracts on {}: {e:#}", p.name);
+                }
             }
         }
     }
-    let hash: String = if contracts.is_empty() {
+    // After a failed fetch the list is incomplete: it neither triggers a turn nor changes the stored hash.
+    let hash: String = if contracts.is_empty() || contracts_failed {
         String::new()
     } else {
         let all: String = contracts.iter().map(|(p, list)| format!("{}{list}", p.id)).collect();
@@ -895,16 +900,13 @@ pub async fn scan(state: &Shared, manual: bool) -> Result<ScanReport> {
     };
     let last_hash = state.db.setting(CONTRACTS_KEY).await.ok().flatten().and_then(|v| v.as_str().map(str::to_string));
     let last_hash = last_hash.unwrap_or_default();
-    if hash.is_empty() && !last_hash.is_empty() {
+    if hash.is_empty() && !contracts_failed && !last_hash.is_empty() {
         let _ = state.db.set_setting(CONTRACTS_KEY, &json!("")).await;
     }
     let has_leads = !fresh.is_empty() || !active.is_empty();
     if !wants_turn(has_leads, &hash, &last_hash) || crate::telegram::active_token(state).await.is_none() {
         tracing::info!(?report, "earn scan: nothing for the agent");
         return Ok(report);
-    }
-    if !hash.is_empty() {
-        let _ = state.db.set_setting(CONTRACTS_KEY, &json!(hash)).await;
     }
     let agent = agent::ensure_default_agent(state).await?;
     let session = state.db.create_session(&agent.id, "earn", None, None, "💰 Earnings scan").await?;
@@ -916,6 +918,9 @@ pub async fn scan(state: &Shared, manual: bool) -> Result<ScanReport> {
         TurnOptions { depth: 1, no_reflect: true, agent_override: Some(agent.clone()) },
     )
     .await;
+    if !hash.is_empty() && res.as_ref().is_ok_and(|r| r.error.is_none()) {
+        let _ = state.db.set_setting(CONTRACTS_KEY, &json!(hash)).await;
+    }
     // Leads the agent did not rate were looked at and passed over (only when the turn finished).
     for l in fresh.iter().filter(|_| res.as_ref().is_ok_and(|r| r.error.is_none())) {
         if let Ok(Some(cur)) = state.db.earn_lead(&l.id).await {
@@ -1019,7 +1024,7 @@ fn wants_turn(has_leads: bool, contracts_hash: &str, last_hash: &str) -> bool {
 /// The agent's open contracts, `None` when it has none.
 async fn worker_contracts(state: &Shared, s: &Settings, p: &Provider) -> Result<Option<String>> {
     let (Some(url), Some(key)) = (contracts_url(p.id, &s.base(p)), s.key(p)) else { return Ok(None) };
-    let req = authorize(state.http.get(&url), p, key);
+    let req = authorize(state.earn_http.get(&url), p, key);
     let req = req.header("accept", "application/json").timeout(Duration::from_secs(60));
     let resp = req.send().await?;
     let status = resp.status();
@@ -1246,7 +1251,7 @@ pub async fn heartbeat(state: &Shared) {
     };
     let version = dealwork_skill_version(state, &s, p).await;
     let url = format!("{}{}", s.base(p), heartbeat_path(&agent_id));
-    let req = authorize(state.http.post(&url).timeout(Duration::from_secs(30)), p, key)
+    let req = authorize(state.earn_http.post(&url).timeout(Duration::from_secs(30)), p, key)
         .header("accept", "application/json")
         .json(&json!({ "skillVersion": version }));
     let outcome = match req.send().await {
@@ -1427,7 +1432,7 @@ pub async fn tool(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
 /// Paths the agent never calls: money out, accounts and keys.
 pub fn forbidden_path(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
-    [
+    let named = [
         "withdraw",
         "payout",
         "transfer",
@@ -1448,7 +1453,23 @@ pub fn forbidden_path(path: &str) -> bool {
     .iter()
     .any(|x| p.contains(x))
         // dealwork.ai open tasks are taken with POST /jobs/<id>/claim (it creates the contract).
-        && !(p.starts_with("/jobs/") && p.ends_with("/claim") && p.matches('/').count() == 3)
+        && !(p.starts_with("/jobs/") && p.ends_with("/claim") && p.matches('/').count() == 3);
+    // Buyer side: spending the user's money. Whole path segments, so an id or a query value never matches.
+    let buyer = segments(&p).iter().any(|seg| {
+        ["approve", "release", "escrow", "refund", "fund", "deposit", "hire", "pay", "purchase"]
+            .iter()
+            .any(|w| seg.starts_with(w))
+    });
+    named || buyer
+}
+
+/// MCP tools an earnings turn may use: reading, and the steps of a bounty pull request.
+/// The turn reads text strangers wrote, so nothing else (merging, deleting, other accounts) is reachable.
+pub fn mcp_tool_allowed(tool: &str) -> bool {
+    let t = tool.to_ascii_lowercase();
+    ["get_", "list_", "search_"].iter().any(|p| t.starts_with(p))
+        || ["fork_repository", "create_branch", "create_or_update_file", "push_files", "create_pull_request"]
+            .contains(&t.as_str())
 }
 
 /// Whether a write for this lead is allowed now.
@@ -1482,6 +1503,7 @@ fn segments(path: &str) -> Vec<String> {
 
 /// Writes the agent may make on a provider, as a worker only: it never posts jobs or acts as the buyer
 /// (dealwork.ai APPROVE, RELEASE_ESCROW, REJECT and REQUEST_REVISION events spend the user's money).
+/// Providers without a list here (checked against their skill.md and playbooks) get no writes.
 pub fn write_allowed(provider: &str, path: &str, body: &Value) -> bool {
     let seg = segments(path);
     let seg: Vec<&str> = seg.iter().map(String::as_str).collect();
@@ -1490,9 +1512,18 @@ pub fn write_allowed(provider: &str, path: &str, body: &Value) -> bool {
         ("dealwork", ["contracts", id, "events"]) => {
             !id.is_empty() && matches!(body.get("type").and_then(Value::as_str), Some("START_WORK" | "SUBMIT_WORK"))
         }
-        ("opentask", ["agent", "tasks" | "bids" | "contracts", _, ..]) => true,
-        ("dealwork" | "opentask", _) => false,
-        _ => true,
+        (
+            "opentask",
+            ["agent", "tasks", _, "bids" | "entries"]
+            | ["agent", "bids", _, "messages"]
+            | ["agent", "contracts", _, "messages" | "deliveries" | "submissions"]
+            | ["agent", "contracts", _, "deliveries", _]
+            | ["agent", "contracts", _, "deliveries", _, "submit"],
+        ) => true,
+        ("toku", ["api", "agents", "jobs", _, "bids"] | ["api", "jobs", _, "messages"] | ["api", "jobs", _]) => true,
+        ("moltjobs", ["jobs", _, "bids" | "start" | "submit"]) => true,
+        ("hyrve", ["orders", _, "deliver" | "messages" | "counter-offer"]) => true,
+        _ => false,
     }
 }
 
@@ -1553,7 +1584,7 @@ async fn request(ctx: &ToolCtx<'_>, s: &Settings, args: &Value) -> Result<String
     let url = format!("{}{}", s.base(p), path);
     let mut req = ctx
         .state
-        .http
+        .earn_http
         .request(method.clone(), &url)
         .header("accept", "application/json")
         .timeout(Duration::from_secs(60));
@@ -1811,6 +1842,24 @@ mod tests {
         assert!(!write_allowed("opentask", "/tasks", &none));
         assert!(!write_allowed("opentask", "/agent/profile", &none));
         assert!(write_allowed("toku", "/api/agents/jobs/x/bids", &none));
+        assert!(write_allowed("toku", "/api/jobs/j1/messages", &none));
+        assert!(!write_allowed("toku", "/api/services", &none));
+        assert!(write_allowed("moltjobs", "/jobs/j1/submit", &none));
+        assert!(!write_allowed("moltjobs", "/jobs", &none));
+        assert!(write_allowed("hyrve", "/orders/o1/deliver", &none));
+        assert!(!write_allowed("hyrve", "/orders", &none));
+        assert!(!write_allowed("clawearn", "/claw/tasks/t1/submit", &none));
+        assert!(write_allowed("opentask", "/agent/contracts/c1/deliveries/p1/submit", &none));
+        assert!(write_allowed("opentask", "/agent/contracts/c1/deliveries/p1", &none));
+        assert!(!write_allowed("opentask", "/agent/contracts/c1/release", &none));
+        assert!(!write_allowed("opentask", "/agent/tasks/t1", &none));
+        assert!(forbidden_path("/contracts/c1/approve"));
+        assert!(forbidden_path("/orders/o1/release-escrow"));
+        assert!(forbidden_path("/jobs/j1/fund"));
+        assert!(forbidden_path("/api/jobs/j1/hire"));
+        assert!(!forbidden_path("/contracts/c1/events"));
+        assert!(!forbidden_path("/contracts?role=worker&state=escrow_locked,in_progress"));
+        assert!(!forbidden_path("/agent/contracts/c1/deliveries/p1/submit"));
     }
 
     #[test]
@@ -1822,6 +1871,16 @@ mod tests {
         assert!(!contract_path("dealwork", "/contracts"));
         assert!(!contract_path("opentask", "/agent/tasks/t1/bids"));
         assert!(!contract_path("toku", "/contracts/c1/events"));
+    }
+
+    #[test]
+    fn earn_turns_get_read_and_pull_request_tools_only() {
+        for t in ["get_file_contents", "list_issues", "search_code", "fork_repository", "create_pull_request", "Push_Files"] {
+            assert!(mcp_tool_allowed(t), "{t}");
+        }
+        for t in ["merge_pull_request", "delete_file", "create_repository", "update_issue", "add_issue_comment", "run_command"] {
+            assert!(!mcp_tool_allowed(t), "{t}");
+        }
     }
 
     #[test]

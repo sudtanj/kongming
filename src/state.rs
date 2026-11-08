@@ -108,6 +108,8 @@ pub struct AppState {
     pub cfg: Config,
     pub db: Db,
     pub http: reqwest::Client,
+    /// For earn provider calls: never follows redirects, so the API key header goes to the provider only.
+    pub earn_http: reqwest::Client,
     /// For long streams (LLM replies, legacy MCP SSE): no total timeout, only
     /// connect and idle-read limits.
     pub http_stream: reqwest::Client,
@@ -141,6 +143,15 @@ impl AppState {
             .user_agent(concat!("kongming/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("http client");
+        let earn_http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .pool_max_idle_per_host(2)
+            .redirect(reqwest::redirect::Policy::none())
+            .use_rustls_tls()
+            .user_agent(concat!("kongming/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("http client");
         let http_stream = reqwest::Client::builder()
             .read_timeout(std::time::Duration::from_secs(300))
             .connect_timeout(std::time::Duration::from_secs(15))
@@ -160,6 +171,7 @@ impl AppState {
             cfg,
             db,
             http,
+            earn_http,
             http_stream,
             bus,
             secret,
