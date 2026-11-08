@@ -479,7 +479,8 @@ async fn plan(
         a.extend(mentions.mcp.iter().cloned());
     }
     let mut mcp_tools = state.mcp.tools(allowed.as_deref()).await.unwrap_or_default();
-    if earn_restricted(state, session).await {
+    let restricted = earn_restricted(state, session).await;
+    if restricted {
         mcp_tools.retain(|t| crate::earn::mcp_tool_allowed(&t.tool));
     }
     let mut mcp_names: Vec<String> = mcp_tools.iter().map(|t| t.server_name.clone()).collect();
@@ -499,6 +500,9 @@ async fn plan(
         tool_specs.extend(bridge::specs());
     } else {
         tool_specs.extend(mcp_tools.into_iter().map(|t| t.spec));
+    }
+    if restricted {
+        tool_specs.retain(|t| !crate::earn::builtin_denied(&t.name));
     }
 
     let proactive = crate::proactive::settings(state).await;
@@ -847,12 +851,13 @@ async fn run_call(ctx: &ToolCtx<'_>, plan: &TurnPlan, id: &str, name: &str, args
     }
 }
 
-/// Earnings turns, and the delegations they start, read text written by strangers: their MCP tools are limited.
-async fn earn_restricted(state: &Shared, session: &Session) -> bool {
+/// Earnings turns, and the delegations they start, read text written by strangers: their tools are limited
+/// (`earn::builtin_denied`, `earn::mcp_tool_allowed`). A delegation whose parent cannot be read counts as one.
+pub(crate) async fn earn_restricted(state: &Shared, session: &Session) -> bool {
     match (session.channel.as_str(), &session.parent_session_id) {
         ("earn", _) => true,
         ("delegation", Some(parent)) => {
-            matches!(state.db.session(parent).await, Ok(Some(p)) if p.channel == "earn")
+            !matches!(state.db.session(parent).await, Ok(Some(p)) if p.channel != "earn")
         }
         _ => false,
     }

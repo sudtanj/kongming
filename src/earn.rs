@@ -748,6 +748,7 @@ async fn fetch(state: &Shared, s: &Settings, p: &Provider) -> Result<Vec<Found>>
         req = authorize(req, p, k);
     }
     let resp = req.send().await?;
+    redirect_error(&resp)?;
     let status = resp.status();
     let bytes = resp.bytes().await?;
     if !status.is_success() {
@@ -777,7 +778,9 @@ async fn algora_bounty(state: &Shared, s: &Settings, p: &Provider, issue_url: &s
     if let Some(k) = s.key(p) {
         req = authorize(req, p, k);
     }
-    let resp = req.send().await?.error_for_status()?;
+    let resp = req.send().await?;
+    redirect_error(&resp)?;
+    let resp = resp.error_for_status()?;
     let v: Value = resp.json().await?;
     Ok(algora_amount(&v))
 }
@@ -1028,6 +1031,7 @@ async fn worker_contracts(state: &Shared, s: &Settings, p: &Provider) -> Result<
     let req = authorize(state.earn_http.get(&url), p, key);
     let req = req.header("accept", "application/json").timeout(Duration::from_secs(60));
     let resp = req.send().await?;
+    redirect_error(&resp)?;
     let status = resp.status();
     let bytes = resp.bytes().await?;
     let body = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_BODY)]).replace(key, "<key>");
@@ -1110,7 +1114,7 @@ the shortlist.\n\n",
         if s.auto {
             p.push_str(
                 "Auto mode is on, with no limit on the pay: bid on every shortlisted marketplace lead right away with \
-`earn` op `request` (follow the provider's API steps below, or read its docs with web_fetch) and note the bid id. For \
+`earn` op `request` (follow the provider's API steps below, or read its docs with read_document) and note the bid id. For \
 bounty leads (Algora, Opire) set the status `working` and do them. Once the buyer hires you, do the work and deliver it \
 without asking the user.\n\n",
             );
@@ -1119,7 +1123,7 @@ without asking the user.\n\n",
     if !active.is_empty() {
         p.push_str(
             "## Work in progress\nFollow up on each: check its state on the provider with `earn` op `request` (GET). If \
-the bid was accepted or a contract started, do the work (delegate when it is big) and deliver it through the provider's \
+the bid was accepted or a contract started, do the work and deliver it through the provider's \
 API, then mark it `submitted`. Mark `won`, `lost` or `paid` as it settles, and tell the user (notify_user, requested: \
 true) when a bid is accepted, work is delivered, or money arrives. Bounty leads (Algora, Opire): do the fix and open the \
 pull request yourself from the user's GitHub account with the GitHub tools available through MCP (find them with \
@@ -1317,7 +1321,7 @@ user says `take <ref>`, skipped for `skip <ref>`, then working, submitted, won, 
 get going in the same reply: view it, read the provider docs, bid or prepare the work, and say what you did. request: call a provider's API \
 with the user's saved key (you never see it): GET to read jobs, bids, contracts; POST/PUT/PATCH to bid or deliver, only \
 for a lead the user approved, or in auto mode for a new or shortlisted lead (in auto mode, contract paths of the provider \
-need no ref: contracts a buyer opened with you). Read the provider docs with web_fetch before writing. Never sign up, \
+need no ref: contracts a buyer opened with you). Read the provider docs with read_document before writing. Never sign up, \
 create keys, withdraw or move money: the user does that."
             .into(),
         parameters: json!({
@@ -1433,7 +1437,7 @@ pub async fn tool(ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
 /// Paths the agent never calls: money out, accounts and keys.
 pub fn forbidden_path(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
-    let named = [
+    [
         "withdraw",
         "payout",
         "transfer",
@@ -1454,14 +1458,51 @@ pub fn forbidden_path(path: &str) -> bool {
     .iter()
     .any(|x| p.contains(x))
         // dealwork.ai open tasks are taken with POST /jobs/<id>/claim (it creates the contract).
-        && !(p.starts_with("/jobs/") && p.ends_with("/claim") && p.matches('/').count() == 3);
-    // Buyer side: spending the user's money. Whole path segments, so an id or a query value never matches.
-    let buyer = segments(&p).iter().any(|seg| {
+        && !(p.starts_with("/jobs/") && p.ends_with("/claim") && p.matches('/').count() == 3)
+}
+
+/// Writes to the buyer side: spending the user's money. Whole path segments (`release`, `release_escrow`, `pay-now`), so
+/// `payload`, `funding` or an id never match.
+pub fn buyer_path(path: &str) -> bool {
+    segments(path).iter().any(|seg| {
         ["approve", "release", "escrow", "refund", "fund", "deposit", "hire", "pay", "purchase"]
             .iter()
-            .any(|w| seg.starts_with(w))
-    });
-    named || buyer
+            .any(|w| seg.strip_prefix(w).is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', '_'])))
+    })
+}
+
+/// Built-in tools an earnings turn does not get: they persist something (cron jobs, skills, memory, agents,
+/// settings), start other agents, read other conversations or reach the network beyond the provider. The turn
+/// reads text strangers wrote.
+pub fn builtin_denied(name: &str) -> bool {
+    [
+        "schedule",
+        "skill_manage",
+        "memory",
+        "agent_manage",
+        "read_session",
+        "list_sessions",
+        "delegate_task",
+        "web_fetch",
+        "shell",
+        "setup",
+    ]
+    .contains(&name)
+}
+
+/// A redirect is not followed (the key header must stay with the provider): say so instead of failing on its body.
+fn redirect_error(resp: &reqwest::Response) -> Result<()> {
+    if !resp.status().is_redirection() {
+        return Ok(());
+    }
+    let to = resp
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|l| url::Url::parse(l).ok())
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| "another path".into());
+    bail!("provider redirected (HTTP {}) to {to}; not followed", resp.status().as_u16())
 }
 
 /// MCP tools an earnings turn may use: reading, and the steps of a bounty pull request.
@@ -1553,10 +1594,10 @@ async fn request(ctx: &ToolCtx<'_>, s: &Settings, args: &Value) -> Result<String
     if !plain_path(path) || path.contains("..") || path.contains("://") || path.contains('#') {
         bail!("path must be a path on the provider's API, starting with /");
     }
-    if forbidden_path(path) {
+    let write = method != reqwest::Method::GET;
+    if forbidden_path(path) || (write && buyer_path(path)) {
         bail!("Kongming does not sign up, manage keys or move money; the user does that on {}", p.site);
     }
-    let write = method != reqwest::Method::GET;
     if write {
         if !p.acts {
             bail!("{} work is taken by the user, not through its API: {}", p.name, p.key_help);
@@ -1596,6 +1637,7 @@ async fn request(ctx: &ToolCtx<'_>, s: &Settings, args: &Value) -> Result<String
         req = req.json(args.get("body").unwrap_or(&json!({})));
     }
     let resp = req.send().await?;
+    redirect_error(&resp)?;
     let status = resp.status();
     let bytes = resp.bytes().await?;
     let mut body = String::from_utf8_lossy(&bytes[..bytes.len().min(400_000)]).to_string();
@@ -1854,13 +1896,19 @@ mod tests {
         assert!(write_allowed("opentask", "/agent/contracts/c1/deliveries/p1", &none));
         assert!(!write_allowed("opentask", "/agent/contracts/c1/release", &none));
         assert!(!write_allowed("opentask", "/agent/tasks/t1", &none));
-        assert!(forbidden_path("/contracts/c1/approve"));
-        assert!(forbidden_path("/orders/o1/release-escrow"));
-        assert!(forbidden_path("/jobs/j1/fund"));
-        assert!(forbidden_path("/api/jobs/j1/hire"));
-        assert!(!forbidden_path("/contracts/c1/events"));
-        assert!(!forbidden_path("/contracts?role=worker&state=escrow_locked,in_progress"));
-        assert!(!forbidden_path("/agent/contracts/c1/deliveries/p1/submit"));
+        assert!(buyer_path("/contracts/c1/approve"));
+        assert!(buyer_path("/orders/o1/release-escrow"));
+        assert!(buyer_path("/jobs/j1/fund"));
+        assert!(buyer_path("/api/jobs/j1/hire"));
+        assert!(buyer_path("/orders/o1/release_escrow"));
+        assert!(buyer_path("/jobs/j1/release?x=1"));
+        assert!(buyer_path("/pay-now"));
+        for ok in ["/payload", "/funding", "/payments", "/orders/o1/payload", "/jobs/j1/hired"] {
+            assert!(!buyer_path(ok), "{ok}");
+        }
+        assert!(!buyer_path("/contracts/c1/events"));
+        assert!(!buyer_path("/contracts?role=worker&state=escrow_locked,in_progress"));
+        assert!(!buyer_path("/agent/contracts/c1/deliveries/p1/submit"));
     }
 
     #[test]
@@ -1872,6 +1920,16 @@ mod tests {
         assert!(!contract_path("dealwork", "/contracts"));
         assert!(!contract_path("opentask", "/agent/tasks/t1/bids"));
         assert!(!contract_path("toku", "/contracts/c1/events"));
+    }
+
+    #[test]
+    fn earn_turns_lose_persistent_and_network_builtins() {
+        for t in ["schedule", "skill_manage", "memory", "agent_manage", "read_session", "delegate_task", "web_fetch", "shell"] {
+            assert!(builtin_denied(t), "{t}");
+        }
+        for t in ["earn", "notify_user", "read_document", "skill_view", "tool_search", "tool_call", "current_time"] {
+            assert!(!builtin_denied(t), "{t}");
+        }
     }
 
     #[test]

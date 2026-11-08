@@ -220,6 +220,9 @@ fn strings(v: Option<&Value>) -> Vec<String> {
 
 /// Run a built-in tool. `None` means the name is not a built-in.
 pub async fn run_builtin(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Option<Result<(String, bool)>> {
+    if crate::earn::builtin_denied(name) && super::earn_restricted(ctx.state, ctx.session).await {
+        return Some(Err(anyhow!("{name} is not available while earning")));
+    }
     let r = match name {
         "skill_view" => skill_view(ctx, args).await,
         "skill_manage" => skill_manage(ctx, args).await,
