@@ -93,6 +93,9 @@ const STRINGS = {
     'composer.hint': 'Enter to send · Shift+Enter for a new line',
     'composer.agent': 'Agent',
     'composer.chars': '{{count}} characters',
+    'composer.voice': 'Talk with Kongming (speak, hear the reply)',
+    'composer.voiceStop': 'End voice conversation',
+    'composer.voiceDenied': 'Microphone access was blocked',
     'palette.agents': 'Agents',
     'palette.skills': 'Skills',
     'palette.sessions': 'Sessions',
@@ -825,6 +828,7 @@ function handleEvent(ev) {
       if (open) { S.current.running = false; S.current.lastError = ev.error || null; S.current.lastStop = ev.stopReason; thread.renderTail(); composer.syncSendState(); }
       S.live.delete(sid);
       if (open && (!S.current.session.title) ) openSession(sid, { force: true, quiet: true });
+      if (open) composer.voice.replied();
       return;
     }
     default: return;
@@ -1214,6 +1218,67 @@ const composer = (() => {
   let attached = null; // { name, text }
   let reading = false;
   const MAX_UPLOAD = 10 * 1024 * 1024;
+  // Voice conversation runs on the browser's own speech engines (Chrome, Edge, Safari); the button is left out where they are missing.
+  const voice = (() => {
+    const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let on = false, rec = null, btn = null;
+    function paint(state) {
+      if (!btn) return;
+      btn.classList.toggle('listening', state === 'listening');
+      btn.classList.toggle('speaking', state === 'speaking' || state === 'waiting');
+      btn.title = btn.ariaLabel = on ? t('composer.voiceStop') : t('composer.voice');
+      btn.setAttribute('aria-pressed', String(on));
+    }
+    function off() { on = false; if (rec) rec.abort(); speechSynthesis.cancel(); paint('off'); }
+    function listen() {
+      if (!on) return;
+      let heard = '';
+      rec = new Rec();
+      rec.lang = navigator.language || 'en-US';
+      rec.interimResults = true;
+      rec.onresult = (e) => { heard = Array.from(e.results).map((r) => r[0].transcript).join(''); ta.value = heard; onInput(); };
+      rec.onerror = (e) => {
+        if (e.error === 'no-speech' || e.error === 'aborted') return;
+        toast(e.error === 'not-allowed' || e.error === 'service-not-allowed' ? t('composer.voiceDenied') : e.error, 'err'); off();
+      };
+      // Silence ends recognition: send what was heard, or keep listening if nothing was.
+      rec.onend = () => { rec = null; if (!on) return; if (!heard.trim()) { listen(); return; } paint('waiting'); send(); };
+      rec.start(); paint('listening');
+    }
+    function plain(md) {
+      return md.replace(/```[\s\S]*?```/g, ' ').replace(/`([^`]*)`/g, '$1').replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+        .replace(/https?:\/\/\S+/g, ' ').replace(/[*_#>|~]+/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+    // Called at the end of a turn in the open session: read the reply aloud, then listen again.
+    function replied() {
+      if (!on) return;
+      const last = [...S.current.messages].reverse().find((m) => m.role === 'assistant' && (m.parts || []).some((p) => p.type === 'text' && p.text));
+      const text = last ? plain(last.parts.filter((p) => p.type === 'text').map((p) => p.text).join(' ')) : '';
+      if (!text) { listen(); return; }
+      // Chrome stops a long utterance after about 15 seconds, so speak it sentence by sentence.
+      const chunks = text.split(/(?<=[.!?。])\s+/);
+      chunks.forEach((c, i) => {
+        const u = new SpeechSynthesisUtterance(c);
+        u.lang = navigator.language || 'en-US';
+        if (i === chunks.length - 1) u.onend = listen;
+        speechSynthesis.speak(u);
+      });
+      paint('speaking');
+    }
+    function toggle() {
+      if (on) { off(); return; }
+      on = true;
+      speechSynthesis.speak(new SpeechSynthesisUtterance('')); // Safari only lets a click start speech
+      if (S.current && S.current.running) paint('waiting'); else listen();
+    }
+    function button() {
+      if (!Rec || !window.speechSynthesis) return null;
+      btn = h('button', { class: 'composer-action', type: 'button', onClick: toggle }, icon('mic'));
+      paint('off');
+      return btn;
+    }
+    return { button, replied };
+  })();
 
   function view() {
     ta = h('textarea', { rows: 1, placeholder: t('composer.placeholderGeneric'), 'aria-label': t('composer.send'), autocomplete: 'off', autocapitalize: 'sentences', spellcheck: 'true', 'aria-autocomplete': 'list', 'aria-expanded': 'false', 'aria-controls': 'composer-palette', enterkeyhint: 'send' });
@@ -1232,6 +1297,7 @@ const composer = (() => {
           h('button', { class: 'composer-action', type: 'button', title: t('composer.attach'), 'aria-label': t('composer.attach'), onClick: () => fileEl.click() }, icon('paperclip')),
           h('button', { class: 'composer-action', type: 'button', title: t('composer.mention'), 'aria-label': t('composer.mention'), onClick: () => insertAtCaret('@') }, icon('at')),
           h('button', { class: 'composer-action', type: 'button', title: t('composer.commands'), 'aria-label': t('composer.commands'), onClick: () => { if (!ta.value.trim()) { ta.value = '/'; onInput(); ta.focus(); } else insertAtCaret('/'); } }, icon('slash')),
+          voice.button(),
           h('span', { id: 'composer-agent' }, agentPill()),
           h('span', { class: 'grow' }), metaEl, sendBtn)),
       h('div', { class: 'composer-hint' }, t('composer.hint')));
@@ -1429,7 +1495,7 @@ const composer = (() => {
   }
   function closePalette() { pal = null; if (paletteEl) { paletteEl.hidden = true; clear(paletteEl); } if (ta) { ta.setAttribute('aria-expanded', 'false'); ta.removeAttribute('aria-activedescendant'); } }
 
-  return { view, focus, reset, send, sendText, retry, retryLast, stop, syncSendState, updatePlaceholder };
+  return { view, focus, reset, send, sendText, retry, retryLast, stop, syncSendState, updatePlaceholder, voice };
 })();
 
 /* ============================================================ popover / modal / toast */
