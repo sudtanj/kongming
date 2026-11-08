@@ -966,8 +966,18 @@ fn contracts_url(id: &str, base: &str) -> Option<String> {
 /// Contracts still to work on, one line of fields each, as JSON. Whole contracts are dropped to fit `budget`
 /// characters. Finished ones are left out (dealwork.ai filters by state in its request, OpenTask does not).
 fn compact_contracts(list: &[Value], budget: usize) -> Option<String> {
-    const DONE: &[&str] =
-        &["completed", "complete", "cancelled", "canceled", "closed", "paid", "rejected", "expired", "released", "refunded"];
+    const DONE: &[&str] = &[
+        "completed",
+        "complete",
+        "cancelled",
+        "canceled",
+        "closed",
+        "paid",
+        "rejected",
+        "expired",
+        "released",
+        "refunded",
+    ];
     let mut out = Vec::new();
     let mut size = 2;
     for c in list {
@@ -980,7 +990,12 @@ fn compact_contracts(list: &[Value], budget: usize) -> Option<String> {
             ("id", opt_text(c, "id")),
             ("state", state),
             ("jobId", opt_text(c, "jobId").or_else(|| opt_text(c, "taskId"))),
-            ("title", opt_text(c, "title").or_else(|| c.pointer("/job/title").or(c.pointer("/task/title")).and_then(Value::as_str).map(str::to_string))),
+            (
+                "title",
+                opt_text(c, "title").or_else(|| {
+                    c.pointer("/job/title").or(c.pointer("/task/title")).and_then(Value::as_str).map(str::to_string)
+                }),
+            ),
         ] {
             if let Some(v) = v {
                 o.insert(k.into(), json!(crate::mcp::truncate(&v, 200)));
@@ -1454,7 +1469,8 @@ pub fn may_write(s: &Settings, lead: &EarnLead) -> Result<(), String> {
 pub fn plain_path(path: &str) -> bool {
     let Some(rest) = path.split('?').next().unwrap_or("").strip_prefix('/') else { return false };
     rest.split('/').all(|seg| {
-        !matches!(seg, "" | "." | "..") && seg.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        !matches!(seg, "" | "." | "..")
+            && seg.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
     })
 }
 
