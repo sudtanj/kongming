@@ -1968,7 +1968,9 @@ mod tests {
         ] {
             assert!(!mcp_tool_allowed("github", t), "{t}");
         }
-        for (server, t) in [("fetch", "get_url"), ("brave", "search_web"), ("gmail", "list_messages"), ("drive", "get_file")] {
+        for (server, t) in
+            [("fetch", "get_url"), ("brave", "search_web"), ("gmail", "list_messages"), ("drive", "get_file")]
+        {
             assert!(!mcp_tool_allowed(server, t), "{server} {t}");
         }
     }
