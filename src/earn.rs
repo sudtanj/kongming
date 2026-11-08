@@ -1924,7 +1924,16 @@ mod tests {
 
     #[test]
     fn earn_turns_lose_persistent_and_network_builtins() {
-        for t in ["schedule", "skill_manage", "memory", "agent_manage", "read_session", "delegate_task", "web_fetch", "shell"] {
+        for t in [
+            "schedule",
+            "skill_manage",
+            "memory",
+            "agent_manage",
+            "read_session",
+            "delegate_task",
+            "web_fetch",
+            "shell",
+        ] {
             assert!(builtin_denied(t), "{t}");
         }
         for t in ["earn", "notify_user", "read_document", "skill_view", "tool_search", "tool_call", "current_time"] {

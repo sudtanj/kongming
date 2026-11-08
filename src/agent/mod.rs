@@ -856,9 +856,7 @@ async fn run_call(ctx: &ToolCtx<'_>, plan: &TurnPlan, id: &str, name: &str, args
 pub(crate) async fn earn_restricted(state: &Shared, session: &Session) -> bool {
     match (session.channel.as_str(), &session.parent_session_id) {
         ("earn", _) => true,
-        ("delegation", Some(parent)) => {
-            !matches!(state.db.session(parent).await, Ok(Some(p)) if p.channel != "earn")
-        }
+        ("delegation", Some(parent)) => !matches!(state.db.session(parent).await, Ok(Some(p)) if p.channel != "earn"),
         _ => false,
     }
 }
