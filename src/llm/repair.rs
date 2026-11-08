@@ -357,22 +357,29 @@ fn dsml_calls(text: &str, tools: &[ToolSpec]) -> Option<(String, Vec<(String, Va
     }
     Some((format!("{}{}", &text[..start], &text[end..]).trim().to_string(), calls))
 }
-/// `<tool_call>…</tool_call>` blocks as (start, end, body); a last block may
-/// be left unclosed.
+/// `<tool_call>…</tool_call>` (or `<tool>…</tool>`) blocks as (start, end,
+/// body); a last block may be left unclosed, then its body ends with its
+/// first balanced JSON value when there is one.
 fn tagged_spans(text: &str) -> Vec<(usize, usize, &str)> {
-    const OPEN: &str = "<tool_call>";
-    const CLOSE: &str = "</tool_call>";
     let mut out = Vec::new();
-    let mut from = 0;
-    while let Some(i) = text[from..].find(OPEN) {
-        let start = from + i;
-        let body_start = start + OPEN.len();
-        let (body_end, end) = match text[body_start..].find(CLOSE) {
-            Some(j) => (body_start + j, body_start + j + CLOSE.len()),
-            None => (text.len(), text.len()),
-        };
-        out.push((start, end, &text[body_start..body_end]));
-        from = end;
+    for (open, close) in [("<tool_call>", "</tool_call>"), ("<tool>", "</tool>")] {
+        let mut from = 0;
+        while let Some(i) = text[from..].find(open) {
+            let start = from + i;
+            let body_start = start + open.len();
+            let (body_end, end) = match text[body_start..].find(close) {
+                Some(j) => (body_start + j, body_start + j + close.len()),
+                None => {
+                    let json = text[body_start..].find(['{', '[']).and_then(|j| matching_close(text, body_start + j));
+                    (json.unwrap_or(text.len()), text.len())
+                }
+            };
+            out.push((start, end, &text[body_start..body_end]));
+            from = end;
+        }
+        if !out.is_empty() {
+            break;
+        }
     }
     out
 }
@@ -661,6 +668,11 @@ mod tests {
         let (rest, calls) = extract_text_calls(text, &t).expect("dsml call");
         assert_eq!(rest, "");
         assert_eq!(calls, vec![("web_fetch".to_string(), json!({"url": "https://x/a?b=1", "max_chars": 6000}))]);
+
+        // A `<tool>` tag left open, followed by DSML closing tags.
+        let text = "<tool>{\"name\":\"web_fetch\",\"arguments\":{\"url\":\"https://x\"}}</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>";
+        let (_, calls) = extract_text_calls(text, &t).expect("open tool tag");
+        assert_eq!(calls, vec![("web_fetch".to_string(), json!({"url": "https://x"}))]);
     }
 
     #[test]

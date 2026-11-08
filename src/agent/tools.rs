@@ -54,7 +54,7 @@ pub fn builtin_specs(agent: &Agent, can_delegate: bool, sh: Option<&shell::Shell
         },
         ToolSpec {
             name: "read_document".into(),
-            description: "Fetch a public http(s) URL that is a document (PDF, docx, xlsx, pptx, odt, ods, odp, txt, md, csv, tsv; up to 10 MB) and return its text. Use this instead of web_fetch for PDFs and office files. offset continues a long document.".into(),
+            description: "Fetch a public http(s) URL that is a document (PDF, docx, xlsx, pptx, odt, ods, odp, txt, md, csv, tsv; up to 10 MB) and return its text. Scanned or image-only PDFs are OCRed here (built-in OCR, first 5 pages), so never use an MCP or Composio OCR/PDF service, web_fetch or `curl | strings` for these files. For an email attachment, pass the download link from the mail tool (e.g. Gmail GMAIL_GET_ATTACHMENT `s3url`). offset continues a long document.".into(),
             parameters: obj(json!({"url": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "max_chars": {"type": "integer", "minimum": 500, "maximum": 20000}}), &["url"]),
         },
         ToolSpec {
@@ -508,7 +508,11 @@ async fn run_shell(ctx: &ToolCtx<'_>, args: &Value) -> Result<(String, bool)> {
         bail!("command is empty");
     }
     let timeout = args.get("timeout_secs").and_then(Value::as_u64).unwrap_or(shell::DEFAULT_TIMEOUT);
-    sh.run(command, timeout).await
+    let (mut out, failed) = sh.run(command, timeout).await?;
+    if out.contains("%PDF-") {
+        out.push_str("\n\n[kongming] That is a PDF. Read it with `read_document` and the same URL: it extracts the text and OCRs scanned pages.");
+    }
+    Ok((out, failed))
 }
 
 async fn web_fetch(_ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
@@ -521,6 +525,9 @@ async fn web_fetch(_ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
     let ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     let bytes = resp.bytes().await?;
     let body = String::from_utf8_lossy(&bytes[..bytes.len().min(1_500_000)]).to_string();
+    if ct.contains("pdf") || body.starts_with("%PDF-") {
+        bail!("this is a PDF: use read_document with the same url (it OCRs scanned pages)");
+    }
     let text = if ct.contains("html") { html_to_text(&body) } else { body };
     Ok(format!("HTTP {status} {ct}\n\n{}", crate::mcp::truncate(text.trim(), max)))
 }
