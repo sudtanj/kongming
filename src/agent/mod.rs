@@ -479,7 +479,7 @@ async fn plan(
         a.extend(mentions.mcp.iter().cloned());
     }
     let mut mcp_tools = state.mcp.tools(allowed.as_deref()).await.unwrap_or_default();
-    if earn_restricted(state, &session).await {
+    if earn_restricted(state, session).await {
         mcp_tools.retain(|t| crate::earn::mcp_tool_allowed(&t.tool));
     }
     let mut mcp_names: Vec<String> = mcp_tools.iter().map(|t| t.server_name.clone()).collect();
