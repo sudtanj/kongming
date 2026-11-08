@@ -3,7 +3,7 @@
 
 use axum::http::{HeaderMap, HeaderValue};
 use kongming::db::EarnLead;
-use kongming::earn::{may_write, Kind, Settings};
+use kongming::earn::{may_write, Settings};
 use kongming::net::{check_url, is_public_ip};
 use kongming::web::{names_this_host, origin_authority};
 
@@ -87,9 +87,9 @@ fn origin_must_name_the_host_it_was_sent_to() {
 fn working_and_submitted_need_the_same_approval_as_a_write() {
     let mut lead = EarnLead { id: "abcdef123".into(), status: "shortlisted".into(), ..Default::default() };
     let s = Settings::default();
-    assert!(may_write(&s, Kind::Market, &lead).is_err());
+    assert!(may_write(&s, &lead).is_err());
     lead.status = "approved".into();
-    assert!(may_write(&s, Kind::Market, &lead).is_ok());
+    assert!(may_write(&s, &lead).is_ok());
 }
 
 #[test]

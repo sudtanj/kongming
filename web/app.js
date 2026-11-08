@@ -355,9 +355,7 @@ const STRINGS = {
     'earn.maxAlerts': 'Leads per digest',
     'earn.maxAlertsDesc': 'At most this many leads in one Telegram message.',
     'earn.auto': 'Bid without asking',
-    'earn.autoDesc': 'Off: Kongming only bids after you reply take <ref>. On: it bids on shortlisted marketplace jobs up to the limit below by itself. Code bounties always wait for you.',
-    'earn.autoMax': 'Bid without asking up to (USD)',
-    'earn.autoMaxDesc': 'Jobs paying more always wait for your go-ahead.',
+    'earn.autoDesc': 'Off: Kongming only bids after you reply take <ref>. On: it bids on shortlisted jobs, does the work and delivers by itself, with no limit on the pay. Code bounties are done and sent as a pull request from your GitHub account.',
     'earn.providers': 'Providers',
     'earn.kind.market': 'Marketplace',
     'earn.kind.bounty': 'Code bounty',
@@ -1931,7 +1929,6 @@ const settings = (() => {
     const scanMinutes = input({ value: String(st.scanMinutes ?? 120), inputmode: 'numeric', placeholder: '120' });
     const minUsd = input({ value: String(st.minUsd ?? 5), inputmode: 'decimal', placeholder: '5' });
     const maxAlerts = input({ value: String(st.maxAlerts ?? 3), inputmode: 'numeric', placeholder: '3' });
-    const autoMax = input({ value: String(st.autoMaxUsd ?? 25), inputmode: 'decimal', placeholder: '25' });
     const profile = textarea({ value: st.profile || '', rows: 4, placeholder: t('earn.profilePh') });
     wrap.appendChild(section(t('earn.general'),
       row(t('earn.enabled'), t('earn.enabledDesc'), switchEl(!!st.enabled, (v) => api.put('/api/earn', { enabled: v }), t('earn.enabled')), { switch: true }),
@@ -1940,8 +1937,7 @@ const settings = (() => {
       row(t('earn.minUsd'), t('earn.minUsdDesc'), minUsd),
       row(t('earn.maxAlerts'), t('earn.maxAlertsDesc'), maxAlerts),
       row(t('earn.auto'), t('earn.autoDesc'), switchEl(!!st.auto, (v) => api.put('/api/earn', { auto: v }), t('earn.auto')), { switch: true }),
-      row(t('earn.autoMax'), t('earn.autoMaxDesc'), autoMax),
-      h('div', { class: 'settings-footer' }, h('span'), h('div', { class: 'acts' }, saveBtn(null, async () => { await api.put('/api/earn', { profile: profile.value, scanMinutes: scanMinutes.value.trim(), minUsd: minUsd.value.trim(), maxAlerts: maxAlerts.value.trim(), autoMaxUsd: autoMax.value.trim() }); reload(); })))));
+      h('div', { class: 'settings-footer' }, h('span'), h('div', { class: 'acts' }, saveBtn(null, async () => { await api.put('/api/earn', { profile: profile.value, scanMinutes: scanMinutes.value.trim(), minUsd: minUsd.value.trim(), maxAlerts: maxAlerts.value.trim() }); reload(); })))));
 
     const plist = h('div', {});
     for (const p of d.providers || []) {
