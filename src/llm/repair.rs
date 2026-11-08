@@ -324,7 +324,6 @@ pub fn extract_text_calls(text: &str, tools: &[ToolSpec]) -> Option<(String, Vec
     Some((rest.trim().to_string(), calls))
 }
 
-
 /// DeepSeek's own call markup when it leaks into the text instead of coming
 /// back as tool calls: `<｜DSML｜invoke name="t"><｜DSML｜parameter name="k"
 /// string="true">v</｜DSML｜parameter></｜DSML｜invoke>`, usually inside a
