@@ -74,7 +74,7 @@ async fn debug_mcp_is_off_until_a_token_exists_and_never_shows_secrets() {
     let list = rpc(&app, &token, json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).await;
     let tools = list["result"]["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["get_status", "get_config", "get_logs"]);
+    assert_eq!(names, ["get_status", "get_config", "get_logs", "get_sessions"]);
     let unknown = rpc(&app, &token, json!({"jsonrpc": "2.0", "id": 3, "method": "nope"})).await;
     assert_eq!(unknown["error"]["code"], json!(-32601));
 
@@ -95,6 +95,11 @@ async fn debug_mcp_is_off_until_a_token_exists_and_never_shows_secrets() {
     tool_text(&logs);
     let bad = rpc(&app, &token, call("get_logs", json!({"level": "loud"}))).await;
     assert_eq!(bad["result"]["isError"], json!(true));
+
+    let sessions = rpc(&app, &token, call("get_sessions", json!({}))).await;
+    assert!(serde_json::from_str::<Value>(tool_text(&sessions)).unwrap().is_array());
+    let missing = rpc(&app, &token, call("get_sessions", json!({"session_id": "nope"}))).await;
+    assert_eq!(missing["result"]["isError"], json!(true));
 
     app.delete("/api/debug-mcp/token").await;
     let r = within(app.plain.post(app.url("/mcp")).bearer_auth(&token).json(&ping).send()).await.unwrap();
