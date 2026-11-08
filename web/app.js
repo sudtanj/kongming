@@ -93,6 +93,8 @@ const STRINGS = {
     'composer.hint': 'Enter to send · Shift+Enter for a new line',
     'composer.agent': 'Agent',
     'composer.chars': '{{count}} characters',
+    'composer.voice': 'Talk with Kongming (speak, hear the reply)',
+    'composer.voiceDenied': 'Microphone access was blocked',
     'palette.agents': 'Agents',
     'palette.skills': 'Skills',
     'palette.sessions': 'Sessions',
@@ -825,6 +827,7 @@ function handleEvent(ev) {
       if (open) { S.current.running = false; S.current.lastError = ev.error || null; S.current.lastStop = ev.stopReason; thread.renderTail(); composer.syncSendState(); }
       S.live.delete(sid);
       if (open && (!S.current.session.title) ) openSession(sid, { force: true, quiet: true });
+      composer.voice.replied(sid);
       return;
     }
     default: return;
@@ -852,7 +855,7 @@ async function onRoute() {
   else {
     settings.hide();
     if (S.route.id) { if (!S.current || S.current.id !== S.route.id) await openSession(S.route.id); else thread.show(); }
-    else { S.current = null; thread.show(); }
+    else { composer.voice.off(); S.current = null; thread.show(); }
     renderTopbar(); composer.reset(); renderSidebarList();
   }
 }
@@ -860,6 +863,7 @@ window.addEventListener('hashchange', onRoute);
 
 async function openSession(id, opts) {
   opts = opts || {};
+  if (S.current && S.current.id !== id) composer.voice.off();
   if (!opts.quiet) thread.showLoading();
   try {
     const data = await api.get('/api/sessions/' + encodeURIComponent(id));
@@ -1214,6 +1218,86 @@ const composer = (() => {
   let attached = null; // { name, text }
   let reading = false;
   const MAX_UPLOAD = 10 * 1024 * 1024;
+  // Voice conversation runs on the browser's own speech engines (Chrome, Edge, Safari); the button is left out where they are missing.
+  const voice = (() => {
+    const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let on = false, rec = null, btn = null, quickEnds = 0;
+    function paint(state) {
+      if (!btn) return;
+      btn.classList.toggle('listening', state === 'listening');
+      btn.classList.toggle('speaking', state === 'speaking' || state === 'waiting');
+      btn.setAttribute('aria-pressed', String(on));
+    }
+    function off() { on = false; const r = rec; rec = null; if (r) r.abort(); speechSynthesis.cancel(); paint('off'); }
+    function listen() {
+      if (!on || rec || root.hidden) { if (root.hidden) off(); return; }
+      const r = rec = new Rec();
+      const prefix = ta.value.trim() ? ta.value.trim() + ' ' : '';
+      const started = Date.now();
+      let heard = '';
+      r.lang = navigator.language || 'en-US';
+      r.interimResults = true;
+      r.onresult = (e) => { if (rec !== r) return; heard = Array.from(e.results).map((x) => x[0].transcript).join(''); ta.value = prefix + heard; onInput(); };
+      r.onerror = (e) => {
+        if (rec !== r || e.error === 'no-speech' || e.error === 'aborted') return;
+        toast(e.error === 'not-allowed' || e.error === 'service-not-allowed' ? t('composer.voiceDenied') : e.error, 'err'); off();
+      };
+      // Silence ends recognition: send what was heard, or keep listening if nothing was.
+      r.onend = async () => {
+        if (rec !== r) return;
+        rec = null;
+        if (!heard.trim()) {
+          // An engine that ends at once without hearing anything would otherwise restart in a tight loop.
+          quickEnds = Date.now() - started < 1000 ? quickEnds + 1 : 0;
+          if (quickEnds >= 3) off(); else listen();
+          return;
+        }
+        quickEnds = 0; paint('waiting');
+        if (!(await send())) listen();
+      };
+      try { r.start(); } catch (e) { toast(e.message, 'err'); off(); return; }
+      paint('listening');
+    }
+    function plain(md) {
+      return md.replace(/```[\s\S]*?```/g, ' ').replace(/`([^`]*)`/g, '$1').replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+        .replace(/https?:\/\/\S+/g, ' ').replace(/[*_#>|~]+/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+    // Called when a turn ends: read this turn's reply aloud, then listen again.
+    function replied(sid) {
+      if (!on) return;
+      if (!S.current || S.current.id !== sid) return;
+      let text = '';
+      for (let i = S.current.messages.length - 1; i >= 0 && S.current.messages[i].role !== 'user'; i--) {
+        const m = S.current.messages[i];
+        if (m.role === 'assistant') { text = plain((m.parts || []).filter((p) => p.type === 'text').map((p) => p.text).join(' ')); if (text) break; }
+      }
+      if (!text) { listen(); return; }
+      // Chrome stops a long utterance after about 15 seconds, so speak it sentence by sentence.
+      const chunks = text.match(/[^.!?。！？]+[.!?。！？]*/g) || [text];
+      const done = () => { if (on) listen(); };
+      chunks.forEach((c, i) => {
+        const u = new SpeechSynthesisUtterance(c);
+        u.lang = navigator.language || 'en-US';
+        if (i === chunks.length - 1) u.onend = done;
+        u.onerror = (e) => { if (e.error !== 'canceled' && e.error !== 'interrupted') { speechSynthesis.cancel(); done(); } };
+        speechSynthesis.speak(u);
+      });
+      paint('speaking');
+    }
+    function toggle() {
+      if (on) { off(); return; }
+      on = true; quickEnds = 0;
+      speechSynthesis.speak(new SpeechSynthesisUtterance('')); // Safari only lets a click start speech
+      if (S.current && S.current.running) paint('waiting'); else listen();
+    }
+    function button() {
+      if (!Rec || !window.speechSynthesis) return null;
+      btn = h('button', { class: 'composer-action', type: 'button', title: t('composer.voice'), 'aria-label': t('composer.voice'), onClick: toggle }, icon('mic'));
+      paint('off');
+      return btn;
+    }
+    return { button, replied, off };
+  })();
 
   function view() {
     ta = h('textarea', { rows: 1, placeholder: t('composer.placeholderGeneric'), 'aria-label': t('composer.send'), autocomplete: 'off', autocapitalize: 'sentences', spellcheck: 'true', 'aria-autocomplete': 'list', 'aria-expanded': 'false', 'aria-controls': 'composer-palette', enterkeyhint: 'send' });
@@ -1232,6 +1316,7 @@ const composer = (() => {
           h('button', { class: 'composer-action', type: 'button', title: t('composer.attach'), 'aria-label': t('composer.attach'), onClick: () => fileEl.click() }, icon('paperclip')),
           h('button', { class: 'composer-action', type: 'button', title: t('composer.mention'), 'aria-label': t('composer.mention'), onClick: () => insertAtCaret('@') }, icon('at')),
           h('button', { class: 'composer-action', type: 'button', title: t('composer.commands'), 'aria-label': t('composer.commands'), onClick: () => { if (!ta.value.trim()) { ta.value = '/'; onInput(); ta.focus(); } else insertAtCaret('/'); } }, icon('slash')),
+          voice.button(),
           h('span', { id: 'composer-agent' }, agentPill()),
           h('span', { class: 'grow' }), metaEl, sendBtn)),
       h('div', { class: 'composer-hint' }, t('composer.hint')));
@@ -1324,9 +1409,10 @@ const composer = (() => {
     lastSent = text;
     try {
       await ws.send({ type: 'send', sessionId: sid, text });
+      return true;
     } catch (e) {
       // Fall back to HTTP when the socket is down; the reply still streams on the bus.
-      try { await api.post('/api/sessions/' + sid + '/messages', { text }); }
+      try { await api.post('/api/sessions/' + sid + '/messages', { text }); return true; }
       catch (e2) { optimistic.pending = false; optimistic.failed = true; if (S.current && S.current.id === sid) thread.rebuild(); toast(e2.message || e.message, 'err'); }
     }
   }
@@ -1429,7 +1515,7 @@ const composer = (() => {
   }
   function closePalette() { pal = null; if (paletteEl) { paletteEl.hidden = true; clear(paletteEl); } if (ta) { ta.setAttribute('aria-expanded', 'false'); ta.removeAttribute('aria-activedescendant'); } }
 
-  return { view, focus, reset, send, sendText, retry, retryLast, stop, syncSendState, updatePlaceholder };
+  return { view, focus, reset, send, sendText, retry, retryLast, stop, syncSendState, updatePlaceholder, voice };
 })();
 
 /* ============================================================ popover / modal / toast */
