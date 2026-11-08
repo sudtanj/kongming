@@ -882,7 +882,7 @@ pub async fn scan(state: &Shared, manual: bool) -> Result<ScanReport> {
     let fresh = state.db.earn_leads(&["new"], RATE_PER_SCAN, true).await?;
     let active = state.db.earn_leads(ACTIVE, 20, false).await?;
     // Shortlisted in an earlier scan whose turn did not get to the bid (model or network failure).
-    let pending = if s.auto { open_shortlisted(state.db.earn_leads(&["shortlisted"], 10, false).await?) } else { vec![] };
+    let pending = if s.auto { open_shortlisted(state.db.earn_leads(&["shortlisted"], 10, false).await?, now_ms()) } else { vec![] };
     let mut contracts = Vec::new();
     let mut contracts_failed = false;
     if s.auto {
@@ -1022,12 +1022,13 @@ fn compact_contracts(list: &[Value], budget: usize) -> Option<String> {
     (!out.is_empty()).then(|| format!("[{}]", out.join(",")))
 }
 
-/// Whether a scan needs the agent: leads to handle, or a contracts list that differs from the last one acted on.
-/// Shortlisted leads whose deadline (RFC 3339 when known) has not passed.
-fn open_shortlisted(leads: Vec<EarnLead>) -> Vec<EarnLead> {
+/// Shortlisted leads whose deadline (RFC 3339 when known) has not passed, dropped after a week so a bid the
+/// agent can never place (no provider key, API down) does not cost a turn every scan.
+fn open_shortlisted(leads: Vec<EarnLead>, now_ms: i64) -> Vec<EarnLead> {
     let now = time::OffsetDateTime::now_utc();
     leads
         .into_iter()
+        .filter(|l| now_ms - l.updated_at < 7 * 86_400_000)
         .filter(|l| {
             l.deadline
                 .as_deref()
@@ -1037,6 +1038,7 @@ fn open_shortlisted(leads: Vec<EarnLead>) -> Vec<EarnLead> {
         .collect()
 }
 
+/// Whether a scan needs the agent: leads to handle, or a contracts list that differs from the last one acted on.
 fn wants_turn(has_leads: bool, contracts_hash: &str, last_hash: &str) -> bool {
     has_leads || (!contracts_hash.is_empty() && contracts_hash != last_hash)
 }
@@ -1781,17 +1783,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn open_shortlisted_drops_past_deadlines() {
-        let lead = |deadline: Option<&str>| EarnLead {
+    fn open_shortlisted_drops_past_deadlines_and_stale_leads() {
+        let now = 10 * 86_400_000;
+        let lead = |deadline: Option<&str>, updated_at: i64| EarnLead {
             deadline: deadline.map(str::to_string),
+            updated_at,
             ..EarnLead::default()
         };
-        let out = open_shortlisted(vec![
-            lead(None),
-            lead(Some("2099-01-01T00:00:00.000Z")),
-            lead(Some("2020-01-01T00:00:00Z")),
-            lead(Some("someday")),
-        ]);
+        let out = open_shortlisted(
+            vec![
+                lead(None, now),
+                lead(Some("2099-01-01T00:00:00.000Z"), now - 86_400_000),
+                lead(Some("2020-01-01T00:00:00Z"), now),
+                lead(Some("someday"), now),
+                lead(None, now - 8 * 86_400_000),
+            ],
+            now,
+        );
         assert_eq!(out.iter().map(|l| l.deadline.as_deref()).collect::<Vec<_>>(), [
             None,
             Some("2099-01-01T00:00:00.000Z"),
