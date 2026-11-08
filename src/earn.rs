@@ -772,7 +772,8 @@ pub fn algora_amount(comments: &Value) -> Option<f64> {
 async fn algora_bounty(state: &Shared, s: &Settings, p: &Provider, issue_url: &str) -> Result<Option<f64>> {
     let path = issue_url.strip_prefix("https://github.com/").ok_or_else(|| anyhow!("not a GitHub issue"))?;
     let url = format!("{}/repos/{path}/comments?per_page=50", s.base(p));
-    let mut req = state.earn_http.get(&url).header("accept", "application/vnd.github+json").timeout(Duration::from_secs(20));
+    let mut req =
+        state.earn_http.get(&url).header("accept", "application/vnd.github+json").timeout(Duration::from_secs(20));
     if let Some(k) = s.key(p) {
         req = authorize(req, p, k);
     }
@@ -1875,10 +1876,19 @@ mod tests {
 
     #[test]
     fn earn_turns_get_read_and_pull_request_tools_only() {
-        for t in ["get_file_contents", "list_issues", "search_code", "fork_repository", "create_pull_request", "Push_Files"] {
+        for t in
+            ["get_file_contents", "list_issues", "search_code", "fork_repository", "create_pull_request", "Push_Files"]
+        {
             assert!(mcp_tool_allowed(t), "{t}");
         }
-        for t in ["merge_pull_request", "delete_file", "create_repository", "update_issue", "add_issue_comment", "run_command"] {
+        for t in [
+            "merge_pull_request",
+            "delete_file",
+            "create_repository",
+            "update_issue",
+            "add_issue_comment",
+            "run_command",
+        ] {
             assert!(!mcp_tool_allowed(t), "{t}");
         }
     }
