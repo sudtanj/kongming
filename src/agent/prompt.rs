@@ -287,6 +287,7 @@ final answer is a one-line log entry nobody is notified about.\n",
     if !memory.is_empty() {
         s.push_str("\n# Memory\n");
         s.push_str(&memory);
+        s.push_str("A memory saying one of your own tools cannot do something may predate an upgrade: try the tool before repeating it.\n");
     }
     if !p.recent.is_empty() {
         s.push_str("\n# Recent conversations\n");

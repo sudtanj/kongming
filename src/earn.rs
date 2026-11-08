@@ -881,6 +881,12 @@ pub async fn scan(state: &Shared, manual: bool) -> Result<ScanReport> {
 
     let fresh = state.db.earn_leads(&["new"], RATE_PER_SCAN, true).await?;
     let active = state.db.earn_leads(ACTIVE, 20, false).await?;
+    // Shortlisted in an earlier scan whose turn did not get to the bid (model or network failure).
+    let pending = if s.auto {
+        open_shortlisted(state.db.earn_leads(&["shortlisted"], 10, false).await?, now_ms())
+    } else {
+        vec![]
+    };
     let mut contracts = Vec::new();
     let mut contracts_failed = false;
     if s.auto {
@@ -907,14 +913,14 @@ pub async fn scan(state: &Shared, manual: bool) -> Result<ScanReport> {
     if hash.is_empty() && !contracts_failed && !last_hash.is_empty() {
         let _ = state.db.set_setting(CONTRACTS_KEY, &json!("")).await;
     }
-    let has_leads = !fresh.is_empty() || !active.is_empty();
+    let has_leads = !fresh.is_empty() || !active.is_empty() || !pending.is_empty();
     if !wants_turn(has_leads, &hash, &last_hash) || crate::telegram::active_token(state).await.is_none() {
         tracing::info!(?report, "earn scan: nothing for the agent");
         return Ok(report);
     }
     let agent = agent::ensure_default_agent(state).await?;
     let session = state.db.create_session(&agent.id, "earn", None, None, "💰 Earnings scan").await?;
-    let prompt = scan_prompt(&s, &fresh, &active, &contracts, state).await;
+    let prompt = scan_prompt(&s, &fresh, &pending, &active, &contracts, state).await;
     let res = agent::run_turn(
         state.clone(),
         session.clone(),
@@ -1020,6 +1026,22 @@ fn compact_contracts(list: &[Value], budget: usize) -> Option<String> {
     (!out.is_empty()).then(|| format!("[{}]", out.join(",")))
 }
 
+/// Shortlisted leads whose deadline (RFC 3339 when known) has not passed, dropped after a week so a bid the
+/// agent can never place (no provider key, API down) does not cost a turn every scan.
+fn open_shortlisted(leads: Vec<EarnLead>, now_ms: i64) -> Vec<EarnLead> {
+    let now = time::OffsetDateTime::now_utc();
+    leads
+        .into_iter()
+        .filter(|l| now_ms - l.updated_at < 7 * 86_400_000)
+        .filter(|l| {
+            l.deadline
+                .as_deref()
+                .and_then(|d| time::OffsetDateTime::parse(d, &time::format_description::well_known::Rfc3339).ok())
+                .is_none_or(|d| d > now)
+        })
+        .collect()
+}
+
 /// Whether a scan needs the agent: leads to handle, or a contracts list that differs from the last one acted on.
 fn wants_turn(has_leads: bool, contracts_hash: &str, last_hash: &str) -> bool {
     has_leads || (!contracts_hash.is_empty() && contracts_hash != last_hash)
@@ -1067,6 +1089,7 @@ fn line(l: &EarnLead) -> String {
 async fn scan_prompt(
     s: &Settings,
     fresh: &[EarnLead],
+    pending: &[EarnLead],
     active: &[EarnLead],
     contracts: &[(&Provider, String)],
     state: &Shared,
@@ -1121,6 +1144,22 @@ without asking the user.\n\n",
             );
         }
     }
+    if !pending.is_empty() {
+        p.push_str(
+            "## Shortlisted earlier, no bid yet\nA previous scan shortlisted these but did not get to bid. Bid on each \
+now with `earn` op `request` (follow the provider's API steps below), note the bid id and set the status `working`. \
+If the listing is gone, closed or no longer a fit, rate it with `shortlist: false` so it drops. Tell the user \
+(notify_user, requested: true) what you bid on.\n",
+        );
+        for l in pending {
+            p.push_str(&line(l));
+            if !l.note.is_empty() {
+                p.push_str(&format!(" | note: {}", crate::mcp::truncate(&l.note, 300)));
+            }
+            p.push('\n');
+        }
+        p.push('\n');
+    }
     if !active.is_empty() {
         p.push_str(
             "## Work in progress\nFollow up on each: check its state on the provider with `earn` op `request` (GET). If \
@@ -1150,6 +1189,7 @@ and deliver each. For one not tied to a lead above, call `earn` op `request` wit
     let mut ids: Vec<&str> = active
         .iter()
         .chain(fresh.iter().filter(|_| s.auto))
+        .chain(pending.iter())
         .map(|l| l.provider.as_str())
         .chain(contracts.iter().map(|(p, _)| p.id))
         .collect();
@@ -1745,6 +1785,30 @@ pub async fn status_html(state: &Shared) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_shortlisted_drops_past_deadlines_and_stale_leads() {
+        let now = 10 * 86_400_000;
+        let lead = |deadline: Option<&str>, updated_at: i64| EarnLead {
+            deadline: deadline.map(str::to_string),
+            updated_at,
+            ..EarnLead::default()
+        };
+        let out = open_shortlisted(
+            vec![
+                lead(None, now),
+                lead(Some("2099-01-01T00:00:00.000Z"), now - 86_400_000),
+                lead(Some("2020-01-01T00:00:00Z"), now),
+                lead(Some("someday"), now),
+                lead(None, now - 8 * 86_400_000),
+            ],
+            now,
+        );
+        assert_eq!(
+            out.iter().map(|l| l.deadline.as_deref()).collect::<Vec<_>>(),
+            [None, Some("2099-01-01T00:00:00.000Z"), Some("someday")]
+        );
+    }
 
     #[test]
     fn settings_round_trip_and_validation() {
