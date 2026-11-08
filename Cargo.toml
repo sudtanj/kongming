@@ -44,6 +44,10 @@ libc = "0.2"
 zip = { version = "=2.6.1", default-features = false, features = ["deflate"] }
 quick-xml = "0.37"
 lopdf = { version = "0.34", default-features = false, features = ["nom_parser"] }
+ocrs = { version = "=0.13.1", default-features = false, features = ["onnx"] }
+rten = { version = "=0.26.0", default-features = false }
+zune-jpeg = "0.5"
+zune-core = "0.5"
 
 [dev-dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }
