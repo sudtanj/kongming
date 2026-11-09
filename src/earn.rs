@@ -1714,13 +1714,16 @@ async fn request(ctx: &ToolCtx<'_>, s: &Settings, args: &Value) -> Result<String
 /// `file.txt` looks like a host too; the call to it just fails to connect.
 fn listing_hosts(l: &EarnLead) -> Vec<String> {
     let mut hosts: Vec<String> = Vec::new();
-    for tok in format!("{} {}", l.description, l.url).split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-')) {
+    for tok in
+        format!("{} {}", l.description, l.url).split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+    {
         let tok = tok.trim_matches('.');
         let tld = tok.rsplit('.').next().unwrap_or("");
         if !tok.contains('.') || tld.len() < 2 || !tld.chars().all(|c| c.is_ascii_alphabetic()) {
             continue;
         }
-        if let Some(h) = url::Url::parse(&format!("https://{tok}")).ok().and_then(|u| u.host_str().map(str::to_string)) {
+        if let Some(h) = url::Url::parse(&format!("https://{tok}")).ok().and_then(|u| u.host_str().map(str::to_string))
+        {
             if !hosts.contains(&h) {
                 hosts.push(h);
             }
@@ -1745,7 +1748,9 @@ fn site_url(hosts: &[String], raw: &str) -> Result<url::Url> {
 
 /// Money-moving words as a whole path segment (the job's own site, so `forbidden_path` is not applied).
 fn money_path(path: &str) -> bool {
-    segments(path).iter().any(|s| ["withdraw", "transfer", "send", "payout", "swap", "bridge", "stake"].contains(&s.as_str()))
+    segments(path)
+        .iter()
+        .any(|s| ["withdraw", "transfer", "send", "payout", "swap", "bridge", "stake"].contains(&s.as_str()))
 }
 
 /// The optional JSON body, small enough to be what a job asks for.
