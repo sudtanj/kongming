@@ -1738,6 +1738,10 @@ fn site_url(hosts: &[String], raw: &str) -> Result<url::Url> {
     if u.scheme() != "https" || !u.username().is_empty() || u.password().is_some() || u.port().is_some() {
         bail!("url must be https on the default port, without user:pass@");
     }
+    // Escapes would hide words from `money_path`; a long URL would carry data past the body cap.
+    if u.path().contains('%') || u.as_str().len() > 2048 {
+        bail!("url path must not be percent-encoded and the url must be at most 2048 bytes");
+    }
     crate::net::check_url(&u)?;
     let host = u.host_str().unwrap_or_default().to_ascii_lowercase();
     if !hosts.contains(&host) {
@@ -1746,11 +1750,16 @@ fn site_url(hosts: &[String], raw: &str) -> Result<url::Url> {
     Ok(u)
 }
 
-/// Money-moving words as a whole path segment (the job's own site, so `forbidden_path` is not applied).
+/// Money-moving words starting a path segment (the job's own site, so `forbidden_path` is not applied):
+/// `withdraw`, `withdrawals`, `send-funds`, `swap.json`, but not `sender` or `stakeholders`.
 fn money_path(path: &str) -> bool {
-    segments(path)
-        .iter()
-        .any(|s| ["withdraw", "transfer", "send", "payout", "swap", "bridge", "stake"].contains(&s.as_str()))
+    segments(path).iter().any(|s| {
+        ["withdraw", "transfer", "send", "payout", "swap", "bridge", "stake"].iter().any(|w| {
+            s.strip_prefix(w).is_some_and(|rest| {
+                matches!(rest, "" | "s" | "al" | "als") || rest.starts_with(['-', '_', '.'])
+            })
+        })
+    })
 }
 
 /// The optional JSON body, small enough to be what a job asks for.
@@ -1805,7 +1814,7 @@ async fn site(ctx: &ToolCtx<'_>, s: &Settings, args: &Value) -> Result<String> {
     };
     let url = site_url(&listing_hosts(&l), arg(args, "url"))?;
     let body = site_body(args)?;
-    if method != reqwest::Method::GET && (buyer_path(url.path()) || money_path(url.path())) {
+    if buyer_path(url.path()) || money_path(url.path()) {
         bail!("Kongming does not move money or spend the user's funds; the user does that");
     }
     if !within_cap(SITE_CALLS.lock().entry(l.id.clone()).or_default(), now_ms()) {
@@ -1829,8 +1838,16 @@ async fn site(ctx: &ToolCtx<'_>, s: &Settings, args: &Value) -> Result<String> {
             .unwrap_or_else(|| "another path".into());
         bail!("{host} redirected (HTTP {}) to {to}; not followed", status.as_u16());
     }
-    let bytes = resp.bytes().await?;
-    let body = String::from_utf8_lossy(&bytes[..bytes.len().min(400_000)]).to_string();
+    // Stop reading at the cap: a hostile listed host could stream more than the 1 GB board holds.
+    let mut resp = resp;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        bytes.extend_from_slice(&chunk[..chunk.len().min(400_000 - bytes.len())]);
+        if bytes.len() >= 400_000 {
+            break;
+        }
+    }
+    let body = String::from_utf8_lossy(&bytes).to_string();
     Ok(format!("HTTP {status}\n\n{}", crate::mcp::truncate(body.trim(), 8000)))
 }
 
@@ -2254,6 +2271,7 @@ mod tests {
             "https://127.0.0.1/wallet",
             "https://user:pw@api.nonsynthetic.net/wallet",
             "https://api.nonsynthetic.net:8443/wallet",
+            "https://api.nonsynthetic.net/wallet/%77ithdraw",
             "/wallet",
         ] {
             assert!(site_url(&hosts, bad).is_err(), "{bad}");
@@ -2268,6 +2286,11 @@ mod tests {
         assert!(money_path("/v1/send/now"));
         assert!(!money_path("/wallet"));
         assert!(!money_path("/board/tasks/sender-1"));
+        assert!(!money_path("/stakeholders"));
+        assert!(money_path("/wallet/withdrawals"));
+        assert!(money_path("/v1/transfers"));
+        assert!(money_path("/send-funds"));
+        assert!(money_path("/swap.json"));
     }
 
     #[test]
