@@ -1755,9 +1755,8 @@ fn site_url(hosts: &[String], raw: &str) -> Result<url::Url> {
 fn money_path(path: &str) -> bool {
     segments(path).iter().any(|s| {
         ["withdraw", "transfer", "send", "payout", "swap", "bridge", "stake"].iter().any(|w| {
-            s.strip_prefix(w).is_some_and(|rest| {
-                matches!(rest, "" | "s" | "al" | "als") || rest.starts_with(['-', '_', '.'])
-            })
+            s.strip_prefix(w)
+                .is_some_and(|rest| matches!(rest, "" | "s" | "al" | "als") || rest.starts_with(['-', '_', '.']))
         })
     })
 }
