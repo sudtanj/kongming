@@ -1694,6 +1694,11 @@ async fn request(ctx: &ToolCtx<'_>, s: &Settings, args: &Value) -> Result<String
         body = body.replace(k, "<key>");
     }
     tracing::info!(provider = p.id, %method, path, %status, "earn request");
+    // Quiet scans delete their session, so a refused write would otherwise leave no trace of why.
+    if !status.is_success() {
+        let reason: String = body.trim().chars().take(300).collect();
+        tracing::warn!(provider = p.id, %method, path, %status, reason, "earn request refused");
+    }
     Ok(format!("HTTP {status}\n\n{}", crate::mcp::truncate(body.trim(), 8000)))
 }
 
