@@ -207,7 +207,7 @@ const STRINGS = {
     'debugMcp.off': 'Off',
     'debugMcp.once': 'Copy this now; it is not shown again. Creating a new token replaces the old one.',
     'debugMcp.chat': 'Chat from debug MCP',
-    'debugMcp.chatDesc': 'Also let the token send messages to Kongming in a separate "debug" chat, with your chats' tools except setup, schedules, memories, skills, agents and delegation. Off by default. While on, anyone with the token can act as you, for example send email through your MCP apps or run shell commands; turn it off after testing.',
+    'debugMcp.chatDesc': 'Also let the token send messages to Kongming in a separate "debug" chat, with the tools of your chats except setup, schedules, memories, skills, agents and delegation. Off by default. While on, anyone with the token can act as you, for example send email through your MCP apps or run shell commands; turn it off after testing.',
     'agents.title': 'Agents',
     'agents.desc': 'Kongming hires, adjusts and retires the team and hands it work. You talk to Kongming; the others are read-only here.',
     'agents.orgChart': 'Org chart',
