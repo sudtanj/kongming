@@ -129,7 +129,7 @@ jobs:
           cross test --target aarch64-unknown-linux-musl --no-run --message-format=json-render-diagnostics > build.jsonl
           mkdir -p sim/tests
           jq -rR 'fromjson? | select(.reason == "compiler-artifact" and .profile.test and .executable != null) | .executable' build.jsonl |
-            while read -r exe; do cp "target/aarch64-unknown-linux-musl/debug/deps/$(basename "$exe")" sim/tests/; done
+            while read -r exe; do cp "$(find target/aarch64-unknown-linux-musl -type f -name "$(basename "$exe")" | head -1)" sim/tests/; done
           ls -la sim/tests
           tar -C sim -cf orangepi-tests.tar tests
       - uses: actions/upload-artifact@v4

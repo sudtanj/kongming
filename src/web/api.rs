@@ -161,7 +161,13 @@ pub async fn info(State(state): State<Shared>) -> R {
 
 pub async fn debug_mcp_status(State(state): State<Shared>) -> R {
     let enabled = state.db.setting(debug_mcp::HASH_KEY).await?.is_some();
-    Ok(Json(json!({"enabled": enabled})))
+    Ok(Json(json!({"enabled": enabled, "chat": debug_mcp::chat_enabled(&state).await?})))
+}
+
+pub async fn debug_mcp_chat(State(state): State<Shared>, Json(body): Json<Value>) -> R {
+    let on = body.get("enabled").and_then(Value::as_bool).ok_or_else(|| bad("enabled must be true or false"))?;
+    state.db.set_setting(debug_mcp::CHAT_KEY, &json!(on)).await?;
+    Ok(Json(json!({"chat": on})))
 }
 
 /// Replaces any earlier token. The token is returned this once; only its hash is kept.

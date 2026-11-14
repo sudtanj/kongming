@@ -1,4 +1,4 @@
-//! The read-only debug MCP server: token lifecycle, authentication and redaction.
+//! The debug MCP server: token lifecycle, authentication, redaction and the opt-in chat tool.
 
 mod support;
 
@@ -74,7 +74,7 @@ async fn debug_mcp_is_off_until_a_token_exists_and_never_shows_secrets() {
     let list = rpc(&app, &token, json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).await;
     let tools = list["result"]["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["get_status", "get_config", "get_logs", "get_sessions"]);
+    assert_eq!(names, ["get_status", "get_config", "get_logs", "get_sessions", "send_message"]);
     let unknown = rpc(&app, &token, json!({"jsonrpc": "2.0", "id": 3, "method": "nope"})).await;
     assert_eq!(unknown["error"]["code"], json!(-32601));
 
@@ -100,6 +100,19 @@ async fn debug_mcp_is_off_until_a_token_exists_and_never_shows_secrets() {
     assert!(serde_json::from_str::<Value>(tool_text(&sessions)).unwrap().is_array());
     let missing = rpc(&app, &token, call("get_sessions", json!({"session_id": "nope"}))).await;
     assert_eq!(missing["result"]["isError"], json!(true));
+
+    // Chat is off until the dashboard switch turns it on, and never writes to the user's own chats.
+    let off = rpc(&app, &token, call("send_message", json!({"text": "hi"}))).await;
+    assert_eq!(off["result"]["isError"], json!(true));
+    assert!(off["result"]["content"][0]["text"].as_str().unwrap().contains("chat is off"), "{off}");
+    assert_eq!(app.get("/api/debug-mcp").await["chat"], json!(false));
+    app.put("/api/debug-mcp/chat", json!({"enabled": true})).await;
+    assert_eq!(app.get("/api/debug-mcp").await["chat"], json!(true));
+    let web = app.post("/api/sessions", json!({})).await;
+    let into_web = rpc(&app, &token, call("send_message", json!({"text": "hi", "session_id": web["id"]}))).await;
+    assert_eq!(into_web["result"]["isError"], json!(true));
+    let empty = rpc(&app, &token, call("send_message", json!({"text": "  "}))).await;
+    assert_eq!(empty["result"]["isError"], json!(true));
 
     app.delete("/api/debug-mcp/token").await;
     let r = within(app.plain.post(app.url("/mcp")).bearer_auth(&token).json(&ping).send()).await.unwrap();

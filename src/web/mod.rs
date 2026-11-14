@@ -183,6 +183,7 @@ pub fn router(state: Shared) -> Router {
         .route("/mcp/:id/oauth/disconnect", post(api::mcp_oauth_disconnect))
         .route("/debug-mcp", get(api::debug_mcp_status))
         .route("/debug-mcp/token", post(api::debug_mcp_create).delete(api::debug_mcp_revoke))
+        .route("/debug-mcp/chat", axum::routing::put(api::debug_mcp_chat))
         .route("/settings", get(api::get_settings).put(api::put_settings))
         .route("/settings/test-llm", post(api::test_llm))
         .route("/proactive/run", post(api::run_check_in))

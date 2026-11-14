@@ -223,6 +223,9 @@ pub async fn run_builtin(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Option<
     if crate::earn::builtin_denied(name) && super::earn_restricted(ctx.state, ctx.session).await {
         return Some(Err(anyhow!("{name} is not available while earning")));
     }
+    if super::debug_denied(ctx.session, name) {
+        return Some(Err(anyhow!("{name} is not available in a debug chat")));
+    }
     let r = match name {
         "skill_view" => skill_view(ctx, args).await,
         "skill_manage" => skill_manage(ctx, args).await,
