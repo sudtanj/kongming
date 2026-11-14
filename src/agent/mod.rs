@@ -504,6 +504,7 @@ async fn plan(
     if restricted {
         tool_specs.retain(|t| !crate::earn::builtin_denied(&t.name));
     }
+    tool_specs.retain(|t| !debug_denied(session, &t.name));
 
     let proactive = crate::proactive::settings(state).await;
     let local_time = match proactive.utc_offset_minutes {
@@ -849,6 +850,12 @@ async fn run_call(ctx: &ToolCtx<'_>, plan: &TurnPlan, id: &str, name: &str, args
         }
         Err(problem) => error_result(id, name, format!("error: {problem}")),
     }
+}
+
+/// Chats started over the debug MCP leave nothing behind that later turns would run or read: no cron jobs,
+/// skills, memories or agents, and no delegations (which would run on another channel with every tool).
+pub(crate) fn debug_denied(session: &Session, name: &str) -> bool {
+    session.channel == "debug" && ["schedule", "skill_manage", "memory", "agent_manage", "delegate_task"].contains(&name)
 }
 
 /// Earnings turns, and the delegations they start, read text written by strangers: their tools are limited

@@ -12,7 +12,9 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Map, Value};
+
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicBool, Ordering};
 use subtle::ConstantTimeEq;
 use tracing::Level;
 
@@ -22,6 +24,7 @@ use crate::state::Shared;
 
 pub const HASH_KEY: &str = "debug_mcp_token_hash";
 pub const CHAT_KEY: &str = "debug_mcp_chat";
+static TURN_RUNNING: AtomicBool = AtomicBool::new(false);
 const VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const MAX_TEXT: usize = 60_000;
 const LOG_BUDGET: usize = 50_000;
@@ -133,14 +136,18 @@ pub async fn chat_enabled(state: &Shared) -> Result<bool> {
     Ok(state.db.setting(CHAT_KEY).await? == Some(Value::Bool(true)))
 }
 
-/// Starts a turn in a "debug" chat and returns its id. That channel gets no `setup` tool and cannot approve
-/// earn leads, and the user's own chats are never written to.
+/// Starts a turn in a "debug" chat and returns its id. That channel gets no `setup` tool, cannot approve
+/// earn leads or persist anything (`agent::debug_denied`, no reflection), and the user's own chats are never
+/// written to. One debug turn runs at a time, so a leaked token cannot pile up turns on the 1 GB board.
 async fn send_message(state: &Shared, args: &Value) -> Result<String> {
     if !chat_enabled(state).await? {
         bail!("chat is off: turn on \"Chat from debug MCP\" under Settings > Models in the dashboard");
     }
     let text = args.get("text").and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty());
     let text = text.ok_or_else(|| anyhow!("text is required"))?.to_string();
+    if TURN_RUNNING.load(Ordering::Acquire) {
+        bail!("a debug reply is already in progress; wait for it (get_sessions) and try again");
+    }
     let session = match args.get("session_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
         Some(id) => {
             let s = state.db.session(id).await?.ok_or_else(|| anyhow!("no session {id}"))?;
@@ -154,16 +161,18 @@ async fn send_message(state: &Shared, args: &Value) -> Result<String> {
             state.db.create_session(&agent.id, "debug", None, None, "Debug MCP").await?
         }
     };
-    if state.is_running(&session.id) {
-        bail!("a reply is already in progress in {}", session.id);
+    if TURN_RUNNING.swap(true, Ordering::AcqRel) {
+        bail!("a debug reply is already in progress; wait for it (get_sessions) and try again");
     }
     let id = session.id.clone();
     tracing::info!(session = %id, "debug mcp message");
     let st = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = crate::agent::run_turn(st, session, text, crate::agent::TurnOptions::default()).await {
+        let opts = crate::agent::TurnOptions { no_reflect: true, ..Default::default() };
+        if let Err(e) = crate::agent::run_turn(st, session, text, opts).await {
             tracing::warn!("debug mcp turn failed: {e:#}");
         }
+        TURN_RUNNING.store(false, Ordering::Release);
     });
     Ok(format!("started in session {id}; read the reply with get_sessions session_id={id}"))
 }
