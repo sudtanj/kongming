@@ -1,10 +1,11 @@
-//! Read-only MCP server at `POST /mcp` so a developer's agent can inspect this
-//! daemon: status, settings with secrets redacted, recent logs and chats. No tool
-//! changes anything. Authenticated by its own bearer token (only the SHA-256
-//! is stored, in the `debug_mcp_token_hash` setting); without a token the
-//! endpoint does not exist. JSON responses only, no SSE.
+//! MCP server at `POST /mcp` so a developer's agent can inspect this daemon:
+//! status, settings with secrets redacted, recent logs and chats. Only
+//! `send_message` changes anything, and only when the `debug_mcp_chat` setting is
+//! on (off by default, switched in the dashboard). Authenticated by its own
+//! bearer token (only the SHA-256 is stored, in the `debug_mcp_token_hash`
+//! setting); without a token the endpoint does not exist. JSON responses only, no SSE.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
@@ -20,6 +21,7 @@ use crate::mcp::truncate;
 use crate::state::Shared;
 
 pub const HASH_KEY: &str = "debug_mcp_token_hash";
+pub const CHAT_KEY: &str = "debug_mcp_chat";
 const VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const MAX_TEXT: usize = 60_000;
 const LOG_BUDGET: usize = 50_000;
@@ -116,7 +118,54 @@ fn tool_list() -> Value {
                 "limit": {"type": "integer", "description": "Chats to list (default 20) or newest messages to show (default 30), max 100"},
             }},
         },
+        {
+            "name": "send_message",
+            "description": "Send a message to Kongming as the user, in a chat on the \"debug\" channel (a new one unless session_id names an earlier debug chat). Returns the session id at once; the reply runs in the background, read it with get_sessions. Works only when the dashboard's \"Chat from debug MCP\" switch is on.",
+            "inputSchema": {"type": "object", "properties": {
+                "text": {"type": "string"},
+                "session_id": {"type": "string", "description": "A debug chat from an earlier send_message"},
+            }, "required": ["text"]},
+        },
     ])
+}
+
+pub async fn chat_enabled(state: &Shared) -> Result<bool> {
+    Ok(state.db.setting(CHAT_KEY).await? == Some(Value::Bool(true)))
+}
+
+/// Starts a turn in a "debug" chat and returns its id. That channel gets no `setup` tool and cannot approve
+/// earn leads, and the user's own chats are never written to.
+async fn send_message(state: &Shared, args: &Value) -> Result<String> {
+    if !chat_enabled(state).await? {
+        bail!("chat is off: turn on \"Chat from debug MCP\" under Settings > Models in the dashboard");
+    }
+    let text = args.get("text").and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty());
+    let text = text.ok_or_else(|| anyhow!("text is required"))?.to_string();
+    let session = match args.get("session_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        Some(id) => {
+            let s = state.db.session(id).await?.ok_or_else(|| anyhow!("no session {id}"))?;
+            if s.channel != "debug" {
+                bail!("session {id} is not a debug chat");
+            }
+            s
+        }
+        None => {
+            let agent = state.db.default_agent().await?;
+            state.db.create_session(&agent.id, "debug", None, None, "Debug MCP").await?
+        }
+    };
+    if state.is_running(&session.id) {
+        bail!("a reply is already in progress in {}", session.id);
+    }
+    let id = session.id.clone();
+    tracing::info!(session = %id, "debug mcp message");
+    let st = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = crate::agent::run_turn(st, session, text, crate::agent::TurnOptions::default()).await {
+            tracing::warn!("debug mcp turn failed: {e:#}");
+        }
+    });
+    Ok(format!("started in session {id}; read the reply with get_sessions session_id={id}"))
 }
 
 async fn sessions(state: &Shared, args: &Value) -> Result<String> {
@@ -145,6 +194,7 @@ async fn call_tool(state: &Shared, params: &Value) -> Result<Value, (i32, String
         Some("get_config") => config(state).await,
         Some("get_logs") => logs(&args),
         Some("get_sessions") => sessions(state, &args).await,
+        Some("send_message") => send_message(state, &args).await,
         other => return Err((-32602, format!("unknown tool: {}", other.unwrap_or("")))),
     };
     Ok(match out {
