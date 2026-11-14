@@ -855,7 +855,8 @@ async fn run_call(ctx: &ToolCtx<'_>, plan: &TurnPlan, id: &str, name: &str, args
 /// Chats started over the debug MCP leave nothing behind that later turns would run or read: no cron jobs,
 /// skills, memories or agents, and no delegations (which would run on another channel with every tool).
 pub(crate) fn debug_denied(session: &Session, name: &str) -> bool {
-    session.channel == "debug" && ["schedule", "skill_manage", "memory", "agent_manage", "delegate_task"].contains(&name)
+    session.channel == "debug"
+        && ["schedule", "skill_manage", "memory", "agent_manage", "delegate_task"].contains(&name)
 }
 
 /// Earnings turns, and the delegations they start, read text written by strangers: their tools are limited
