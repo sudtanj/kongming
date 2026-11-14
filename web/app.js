@@ -1744,7 +1744,8 @@ const settings = (() => {
         h('div', { class: 'settings-footer' }, h('div', {}, test, testOut), h('div', { class: 'acts' }, save))),
       section(t('models.reflection'), row(t('models.reflection'), t('models.reflectionDesc'), switchEl(!(st.reflection && st.reflection.enabled === false), (v) => api.put('/api/settings', { reflection: { enabled: v } }), t('models.reflection')), { switch: true })),
       section(t('models.publicUrl'), row(t('models.publicUrl'), t('models.publicUrlDesc'), publicUrl), h('div', { class: 'settings-footer' }, h('span'), h('div', { class: 'acts' }, saveBtn(null, () => api.put('/api/settings', { publicUrl: publicUrl.value.trim() }))))),
-      section(t('debugMcp.title'), row(t('debugMcp.title'), t('debugMcp.desc'), h('div', { class: 'row' }, h('span', { class: 'pill ' + (dbg.enabled ? 'ok' : '') }, dbg.enabled ? t('debugMcp.on') : t('debugMcp.off')), dbgCreate, dbgRevoke)), dbgOut));
+      section(t('debugMcp.title'), row(t('debugMcp.title'), t('debugMcp.desc'), h('div', { class: 'row' }, h('span', { class: 'pill ' + (dbg.enabled ? 'ok' : '') }, dbg.enabled ? t('debugMcp.on') : t('debugMcp.off')), dbgCreate, dbgRevoke)), dbgOut,
+        row(t('debugMcp.chat'), t('debugMcp.chatDesc'), switchEl(dbg.chat, (v) => api.put('/api/debug-mcp/chat', { enabled: v }), t('debugMcp.chat')), { switch: true })));
   };
 
   /* ---- agents ---- */
