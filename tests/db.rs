@@ -186,22 +186,24 @@ async fn memories_save_and_search() {
     let private = db.save_memory(Some("a1"), "fact", "Server is called orion", &[], 1).await.unwrap();
     assert_eq!(private.agent_id.as_deref(), Some("a1"));
     db.save_memory(None, "fact", "unrelated note", &[], 1).await.unwrap();
+    db.save_memory(None, "project", "important but unrelated plan", &[], 4).await.unwrap();
 
-    assert_eq!(db.memories(None, 10).await.unwrap().len(), 3);
+    assert_eq!(db.memories(None, 10).await.unwrap().len(), 4);
     // Agent scoping: shared + own, not another agent's.
-    assert_eq!(db.memories(Some("a1"), 10).await.unwrap().len(), 3);
-    assert_eq!(db.memories(Some("zz"), 10).await.unwrap().len(), 2);
+    assert_eq!(db.memories(Some("a1"), 10).await.unwrap().len(), 4);
+    assert_eq!(db.memories(Some("zz"), 10).await.unwrap().len(), 3);
 
     let found = db.search_memories(None, "green tea", 10).await.unwrap();
     assert!(!found.is_empty());
     assert_eq!(found[0].id, m.id);
     let orion = db.search_memories(Some("a1"), "orion", 10).await.unwrap();
     assert!(orion.iter().any(|x| x.id == private.id));
-    assert!(!orion.iter().any(|x| x.content == "unrelated note"), "non-matching low-importance memories are dropped");
+    assert_eq!(orion.len(), 1, "memories matching no word are dropped, however important: {orion:?}");
+    assert_eq!(db.search_memories(Some("a1"), "server-orion", 10).await.unwrap()[0].id, private.id);
     assert!(!db.search_memories(Some("zz"), "orion", 10).await.unwrap().iter().any(|x| x.id == private.id));
 
     db.delete_memory(&m.id).await.unwrap();
-    assert_eq!(db.memories(None, 10).await.unwrap().len(), 2);
+    assert_eq!(db.memories(None, 10).await.unwrap().len(), 3);
 }
 
 #[tokio::test(flavor = "multi_thread")]

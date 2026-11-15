@@ -119,6 +119,7 @@ pub async fn run_job(state: Shared, job: CronJob) {
             return;
         }
     };
+    let (session_id, agent_id) = (session.id.clone(), agent.id.clone());
     let res = agent::run_turn(
         state.clone(),
         session,
@@ -131,6 +132,12 @@ pub async fn run_job(state: Shared, job: CronJob) {
         Ok(r) => format!("error: {}", r.error.clone().unwrap_or_default()),
         Err(e) => format!("error: {e:#}"),
     };
+    // Otherwise a failed run's transcript is only the prompt, with no sign of why.
+    if status != "ok" && !res.as_ref().is_ok_and(|r| !r.text.trim().is_empty()) {
+        tracing::warn!(job = %job.name, %status, "cron job failed");
+        let note = [crate::db::Part::Text { text: format!("[cron run failed] {status}") }];
+        let _ = state.db.append_message(&session_id, "assistant", &note, Some(&agent_id)).await;
+    }
     let next = if job.enabled { next_run(&job.schedule, crate::db::now_ms()) } else { None };
     let _ = state.db.mark_cron_run(&job.id, next, &status).await;
     if is_one_off(&job.schedule) {

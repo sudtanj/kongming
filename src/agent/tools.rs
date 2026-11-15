@@ -105,7 +105,7 @@ particular jobs."
             parameters: obj(
                 json!({
                     "action": {"type": "string", "enum": ["add", "update", "search", "remove"]},
-                    "content": {"type": "string", "description": "add, update: the fact to remember (one or two sentences)"},
+                    "content": {"type": "string", "description": "add, update: the fact to remember (one or two sentences, at most 2000 characters; for a list of seen items keep only the newest)"},
                     "kind": {"type": "string", "enum": ["fact", "preference", "lesson", "project", "interest", "watch"]},
                     "keywords": {"type": "array", "items": {"type": "string"}},
                     "importance": {"type": "integer", "minimum": 1, "maximum": 5},

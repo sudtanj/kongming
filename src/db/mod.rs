@@ -664,17 +664,21 @@ impl Db {
 
     pub async fn search_memories(&self, agent_id: Option<&str>, query: &str, limit: i64) -> Result<Vec<Memory>> {
         let all = self.memories(agent_id, 500).await?;
-        let terms: Vec<String> =
-            query.to_ascii_lowercase().split_whitespace().map(str::to_string).filter(|t| t.len() > 2).collect();
+        // "wsj-seen-urls" searches for its words too.
+        let terms: Vec<String> = query
+            .to_ascii_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .map(str::to_string)
+            .filter(|t| t.len() > 2)
+            .collect();
         let mut scored: Vec<(i64, Memory)> = all
             .into_iter()
-            .map(|m| {
+            .filter_map(|m| {
                 let hay = format!("{} {}", m.content, m.keywords.join(" ")).to_ascii_lowercase();
-                let score: i64 =
-                    terms.iter().map(|t| if hay.contains(t.as_str()) { 2 } else { 0 }).sum::<i64>() + m.importance;
-                (score, m)
+                let hits = terms.iter().filter(|t| hay.contains(t.as_str())).count() as i64;
+                // Importance only ranks matches: it must not pull in memories that match nothing.
+                (terms.is_empty() || hits > 0).then(|| (2 * hits + m.importance, m))
             })
-            .filter(|(s, _)| terms.is_empty() || *s > 1)
             .collect();
         scored.sort_by_key(|a| std::cmp::Reverse(a.0));
         Ok(scored.into_iter().take(limit as usize).map(|(_, m)| m).collect())
