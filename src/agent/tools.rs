@@ -68,8 +68,9 @@ pub fn builtin_specs(agent: &Agent, can_delegate: bool, sh: Option<&shell::Shell
 sort, wc, nc, nslookup, …, plus `curl` and `wget` with real TLS that always write to stdout, and `cdp`, a Chrome \
 DevTools Protocol client) and get its output and exit code. It is for interacting, not for storage: nothing can be \
 written to disk (files cannot be created, changed or deleted), so pass data along with pipes instead, e.g. \
-`curl -sS URL | head -c 3000` or `wget -qO- URL | grep …`. Nothing secret is reachable from it. Skills say how to use \
-it for particular jobs."
+`curl -sS URL | head -c 3000` or `wget -qO- URL | grep …`. Nothing secret is reachable from it. Never install or start \
+a browser or packages here (1 GB board): browsing uses the remote chrome-cdp session. Skills say how to use it for \
+particular jobs."
             .to_string();
         v.push(ToolSpec {
             name: "shell".into(),
