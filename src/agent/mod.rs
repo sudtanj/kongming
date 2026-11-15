@@ -1580,6 +1580,7 @@ The `shell` tool runs one `sh -c` script in a read-only BusyBox sandbox on the k
 ## Rules of the sandbox
 - Nothing can be written to disk: `> file`, `tee`, `curl -o file`, `wget -O file`, `mkdir`, `touch`, `rm` fail ("Permission denied", "Read-only file system" or "File too large"). Pass data along with pipes and do everything a step needs in one command; nothing carries over between calls, so keep what matters in your own reply.
 - The environment is empty: no tokens or passwords. Never paste secrets into a command.
+- Never install, download or start a browser or other large software (Chrome, Chromium, Firefox, Playwright, Puppeteer, `apk`/`apt`/`pip`/`npm` packages): the board has 1 GB of RAM and little disk. Browsing goes through the remote chrome-cdp session (browser-session skill).
 - Time limit 30 s (`timeout_secs` up to 300). Background jobs are killed when the command ends.
 - The output starts with `exit N`; anything but `exit 0` failed, so read the message and fix the command instead of repeating it. Output over ~12,000 characters is cut in the middle: narrow it with `grep`, `sed -n`, `head -c`, `tail`.
 
@@ -1679,7 +1680,7 @@ Pasted keys are cut out of the message before you see it and replaced by `[secre
         "Use when a task needs a real browser (logged-in sites, pages that need JavaScript, clicking through a flow): start the chrome-cdp session on GitHub Actions, wait for it, drive it with cdp, let it stop.",
         r##"# Browser tasks on the chrome-cdp session
 
-Chrome never runs on this board. It runs in the `chrome-cdp-session.yaml` workflow on GitHub Actions (by default `sudtanj/infrastructure-tools`, branch `main`), joins the tailnet as `chrome-cdp`, and keeps its profile and logins between runs. You drive it with `cdp` from the `shell` tool (see the shell-and-browser skill). Never try to install or start a browser here.
+Chrome never runs on this board. It runs in the `chrome-cdp-session.yaml` workflow on GitHub Actions (by default `sudtanj/infrastructure-tools`, branch `main`), joins the tailnet as `chrome-cdp`, and keeps its profile and logins between runs. You drive it with `cdp` from the `shell` tool (see the shell-and-browser skill). Never install, download or start a browser here (Chrome, Chromium, Firefox, headless shells, Playwright, Puppeteer or similar): the board has 1 GB of RAM and little disk, and a browser would take it down. Use the Actions session.
 
 ## 1. Find the address
 CDP needs the 100.x tailnet IP, not the `chrome-cdp` name (Chrome refuses a Host that is not an IP). Look in memory first. Else try `nslookup chrome-cdp`; if that gives no 100.x address, ask the user once and save it with `memory` (kind `fact`, keywords `chrome-cdp browser cdp`). The IP stays the same across runs.
