@@ -258,11 +258,8 @@ fn pdf_text(bytes: &[u8]) -> Result<String> {
 fn widen_code_spaces(doc: &mut lopdf::Document) {
     const BEGIN: &str = "begincodespacerange";
     const END: &str = "endcodespacerange";
-    let ids: Vec<_> = doc
-        .objects
-        .values()
-        .filter_map(|o| o.as_dict().ok()?.get(b"ToUnicode").ok()?.as_reference().ok())
-        .collect();
+    let ids: Vec<_> =
+        doc.objects.values().filter_map(|o| o.as_dict().ok()?.get(b"ToUnicode").ok()?.as_reference().ok()).collect();
     for id in ids {
         let Ok(stream) = doc.get_object_mut(id).and_then(lopdf::Object::as_stream_mut) else { continue };
         let Ok(plain) = stream.get_plain_content() else { continue };
