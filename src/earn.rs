@@ -881,7 +881,14 @@ pub async fn scan(state: &Shared, manual: bool) -> Result<ScanReport> {
     let _ = state.db.prune_leads(started - 60 * 86_400_000).await;
 
     let fresh = state.db.earn_leads(&["new"], RATE_PER_SCAN, true).await?;
-    let active = state.db.earn_leads(ACTIVE, 20, false).await?;
+    // Approved or working past the deadline cannot be won any more; kept, one stuck lead costs a turn every scan.
+    let active: Vec<EarnLead> = state
+        .db
+        .earn_leads(ACTIVE, 20, false)
+        .await?
+        .into_iter()
+        .filter(|l| l.status == "submitted" || before_deadline(l))
+        .collect();
     // Shortlisted in an earlier scan whose turn did not get to the bid (model or network failure).
     let pending = if s.auto {
         open_shortlisted(state.db.earn_leads(&["shortlisted"], 10, false).await?, now_ms())
@@ -1030,17 +1037,15 @@ fn compact_contracts(list: &[Value], budget: usize) -> Option<String> {
 /// Shortlisted leads whose deadline (RFC 3339 when known) has not passed, dropped after a week so a bid the
 /// agent can never place (no provider key, API down) does not cost a turn every scan.
 fn open_shortlisted(leads: Vec<EarnLead>, now_ms: i64) -> Vec<EarnLead> {
-    let now = time::OffsetDateTime::now_utc();
-    leads
-        .into_iter()
-        .filter(|l| now_ms - l.updated_at < 7 * 86_400_000)
-        .filter(|l| {
-            l.deadline
-                .as_deref()
-                .and_then(|d| time::OffsetDateTime::parse(d, &time::format_description::well_known::Rfc3339).ok())
-                .is_none_or(|d| d > now)
-        })
-        .collect()
+    leads.into_iter().filter(|l| now_ms - l.updated_at < 7 * 86_400_000).filter(before_deadline).collect()
+}
+
+/// True unless the lead has an RFC 3339 deadline that has passed.
+fn before_deadline(l: &EarnLead) -> bool {
+    l.deadline
+        .as_deref()
+        .and_then(|d| time::OffsetDateTime::parse(d, &time::format_description::well_known::Rfc3339).ok())
+        .is_none_or(|d| d > time::OffsetDateTime::now_utc())
 }
 
 /// Whether a scan needs the agent: leads to handle, or a contracts list that differs from the last one acted on.
@@ -1244,6 +1249,8 @@ const HEARTBEAT_SECS: u64 = 60;
 const DEALWORK_SKILL_VERSION: &str = "1.6.5";
 /// Last heartbeat outcome, for the dashboard.
 static HEARTBEAT: parking_lot::Mutex<Option<Value>> = parking_lot::const_mutex(None);
+/// Agent ID and key the provider last refused with a 4xx, and when.
+static REJECTED: parking_lot::Mutex<Option<(String, i64)>> = parking_lot::const_mutex(None);
 /// skill.md version and when it was read.
 static SKILL_VERSION: parking_lot::Mutex<Option<(String, i64)>> = parking_lot::const_mutex(None);
 
@@ -1300,6 +1307,11 @@ pub async fn heartbeat(state: &Shared) {
         );
         return;
     };
+    // A rejected ID or key fails the same way every minute: retry hourly until the user changes them.
+    let creds = format!("{agent_id}\n{key}");
+    if REJECTED.lock().as_ref().is_some_and(|(c, at)| *c == creds && now - at < 3_600_000) {
+        return;
+    }
     let version = dealwork_skill_version(state, &s, p).await;
     let url = format!("{}{}", s.base(p), heartbeat_path(&agent_id));
     let req = authorize(state.earn_http.post(&url).timeout(Duration::from_secs(30)), p, key)
@@ -1330,6 +1342,9 @@ pub async fn heartbeat(state: &Shared) {
                     "activeContracts": v.pointer("/summary/activeContractsCount").cloned().unwrap_or(Value::Null),
                 })
             } else {
+                if status.is_client_error() && status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    *REJECTED.lock() = Some((creds, now));
+                }
                 json!({"ok": false, "at": now, "error": format!("HTTP {status}: {}", crate::mcp::truncate(body.trim(), 200))})
             }
         }

@@ -228,8 +228,10 @@ async fn dealwork_heartbeat_reports_the_skill_version() {
             "/agents/:id/heartbeat",
             post(|State(m): State<Mock>, Path(id): Path<String>, headers: HeaderMap, Json(body): Json<Value>| async move {
                 let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                use axum::http::StatusCode;
+                let code = if id == "ag_bad" { StatusCode::FORBIDDEN } else { StatusCode::OK };
                 m.calls.lock().push(("heartbeat".into(), json!({"agent": id, "auth": auth, "body": body})));
-                Json(json!({"healthy": true, "currentSkillVersion": "1.6.5", "summary": {"pendingBidsCount": 2, "activeContractsCount": 0}}))
+                (code, Json(json!({"healthy": true, "currentSkillVersion": "1.6.5", "summary": {"pendingBidsCount": 2, "activeContractsCount": 0}})))
             }),
         )
         .with_state(mock.clone());
@@ -258,4 +260,13 @@ async fn dealwork_heartbeat_reports_the_skill_version() {
     assert_eq!(dw["heartbeat"]["ok"], json!(true), "{dw}");
     assert_eq!(dw["heartbeat"]["pendingBids"], json!(2));
     assert!(!d.to_string().contains("ak_dw_1"));
+
+    // A refused agent ID is not retried every minute, but a corrected one is tried at once.
+    app.put("/api/earn", json!({"providers": {"dealwork": {"agentId": "ag_bad"}}})).await;
+    kongming::earn::heartbeat(&app.state).await;
+    kongming::earn::heartbeat(&app.state).await;
+    assert_eq!(mock.calls("heartbeat").len(), 2);
+    app.put("/api/earn", json!({"providers": {"dealwork": {"agentId": "ag_43"}}})).await;
+    kongming::earn::heartbeat(&app.state).await;
+    assert_eq!(mock.calls("heartbeat").len(), 3);
 }
