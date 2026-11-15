@@ -1592,7 +1592,7 @@ The `shell` tool runs one `sh -c` script in a read-only BusyBox sandbox on the k
 - `busybox --list` shows every applet.
 
 ## Driving Chrome with cdp
-The browser address (`http://<ip>:9222`) comes from another skill or from the user. Give it in every command, since nothing is kept between calls: `cdp --url http://<ip>:9222 tabs`, or `export CDP_URL=http://<ip>:9222; cdp tabs && cdp text`. `cdp help` lists everything; page commands act on the first open tab unless you pass `--tab ID`.
+The browser address (`http://<ip>:9222`) comes from the browser-session skill or from the user. Give it in every command, since nothing is kept between calls: `cdp --url http://<ip>:9222 tabs`, or `export CDP_URL=http://<ip>:9222; cdp tabs && cdp text`. `cdp help` lists everything; page commands act on the first open tab unless you pass `--tab ID`.
 1. `cdp tabs` lists the tabs (id, title, url).
 2. `cdp goto URL` loads a page and waits for it.
 3. Read it: `cdp text | head -c 4000`, or search it: `cdp text | grep -i -n -A2 'price'`.
@@ -1601,7 +1601,7 @@ The browser address (`http://<ip>:9222`) comes from another skill or from the us
 6. Anything else is a raw CDP command: `cdp call Page.reload`, `cdp call Emulation.setGeolocationOverride '{"latitude":1.3,"longitude":103.8,"accuracy":10}'`.
 - Chain steps in one call with `&&`, e.g. `cdp goto https://example.com && cdp click 'a.more' && cdp text | head -c 2000`.
 - Selectors: prefer ids, names and visible attributes (`input[name=q]`, `button[type=submit]`); find them with `cdp eval 'document.querySelector("form").outerHTML.slice(0,2000)'`.
-- The browser is the user's real profile and may be logged in: never buy, post, send, delete or change settings without the user's explicit OK, and never open a URL ending in `#stop-session` (it ends the browser session).
+- The browser is the user's real profile and may be logged in: never buy, post, send, delete or change settings without the user's explicit OK, and never open a URL ending in `#stop-session` (it ends the browser session) unless the user asks to stop it.
 - If `cdp` says the browser cannot be reached, the chrome-cdp session is probably not running, or the address is wrong: tell the user instead of retrying."##,
         &["tools", "browser"],
     ),
@@ -1673,6 +1673,39 @@ Pasted keys are cut out of the message before you see it and replaced by `[secre
 - Earnings needs to be switched on separately (`/earn on`, or `setup` op `earn` enabled true when the user asks for it).
 "##,
         &["setup", "settings"],
+    ),
+    (
+        "browser-session",
+        "Use when a task needs a real browser (logged-in sites, pages that need JavaScript, clicking through a flow): start the chrome-cdp session on GitHub Actions, wait for it, drive it with cdp, let it stop.",
+        r##"# Browser tasks on the chrome-cdp session
+
+Chrome never runs on this board. It runs in the `chrome-cdp-session.yaml` workflow on GitHub Actions (by default `sudtanj/infrastructure-tools`, branch `main`), joins the tailnet as `chrome-cdp`, and keeps its profile and logins between runs. You drive it with `cdp` from the `shell` tool (see the shell-and-browser skill). Never try to install or start a browser here.
+
+## 1. Find the address
+CDP needs the 100.x tailnet IP, not the `chrome-cdp` name (Chrome refuses a Host that is not an IP). Look in memory first. Else try `nslookup chrome-cdp`; if that gives no 100.x address, ask the user once and save it with `memory` (kind `fact`, keywords `chrome-cdp browser cdp`). The IP stays the same across runs.
+
+## 2. Is it running?
+`cdp --url http://IP:9222 version` with `timeout_secs` 10. A version line means go to step 4.
+
+## 3. Start it
+1. Through the gateway: `GITHUB_CREATE_A_WORKFLOW_DISPATCH_EVENT` with owner `sudtanj`, repo `infrastructure-tools`, workflow_id `chrome-cdp-session.yaml`, ref `main`, inputs `{"idle_minutes": "15"}` (higher only for long jobs: every minute is billed Actions time). Do not start a second run while one is queued or running: check `GITHUB_LIST_WORKFLOW_RUNS_FOR_A_WORKFLOW` with status `in_progress`, then `queued`, first.
+2. Wait in one shell call with `timeout_secs` 300: `for i in $(seq 1 28); do cdp --url http://IP:9222 version && exit 0; sleep 10; done; exit 1`. Boot takes 2-6 minutes; repeat once if it fails, then check the run's status and tell the user what it says instead of waiting longer.
+
+## 4. Drive it like an agent
+Work in short observe, act, check rounds, one shell call each, all commands with `--url http://IP:9222` (or `export CDP_URL=...;` at the start of the call):
+- Observe small: `cdp url && cdp text | head -c 3000`, or `grep` the text for what you need. Never dump a whole page; every character costs context.
+- Act: `cdp goto`, `cdp click`, `cdp type`, `cdp press Enter`, `cdp wait`, then check with `cdp url` and a short `cdp text`.
+- Stop after about 15 rounds without progress and report what blocks you (captcha, login, unclear page). A captcha or a login the user must do: tell them to open the session over VNC (`chrome-cdp:5900`, or `http://IP:6080/vnc.html`) and say when done.
+- A long job (many pages, a whole checkout or form flow): `delegate_task` it to a team agent with the IP, the goal, the stop rules above and the expected output, so this chat stays small.
+
+## 5. Finish
+Leave the session alone: it saves the profile and stops itself after `idle_minutes` with no CDP or VNC connection. Open `about:blank#stop-session` only when the user asks to stop it now.
+
+## Rules
+- It is the user's real, logged-in profile: never buy, post, send, delete or change account settings without the user's explicit OK for that action.
+- Never put passwords or tokens in a cdp command; logins happen over VNC by the user.
+- `cdp` cannot reach the IP at all (not even after a run is in progress): the board may be off the tailnet; tell the user."##,
+        &["tools", "browser"],
     ),
 ];
 
