@@ -1244,6 +1244,8 @@ const HEARTBEAT_SECS: u64 = 60;
 const DEALWORK_SKILL_VERSION: &str = "1.6.5";
 /// Last heartbeat outcome, for the dashboard.
 static HEARTBEAT: parking_lot::Mutex<Option<Value>> = parking_lot::const_mutex(None);
+/// Agent ID and key the provider last refused with a 4xx, and when.
+static REJECTED: parking_lot::Mutex<Option<(String, i64)>> = parking_lot::const_mutex(None);
 /// skill.md version and when it was read.
 static SKILL_VERSION: parking_lot::Mutex<Option<(String, i64)>> = parking_lot::const_mutex(None);
 
@@ -1300,6 +1302,11 @@ pub async fn heartbeat(state: &Shared) {
         );
         return;
     };
+    // A rejected ID or key fails the same way every minute: retry hourly until the user changes them.
+    let creds = format!("{agent_id}\n{key}");
+    if REJECTED.lock().as_ref().is_some_and(|(c, at)| *c == creds && now - at < 3_600_000) {
+        return;
+    }
     let version = dealwork_skill_version(state, &s, p).await;
     let url = format!("{}{}", s.base(p), heartbeat_path(&agent_id));
     let req = authorize(state.earn_http.post(&url).timeout(Duration::from_secs(30)), p, key)
@@ -1330,6 +1337,9 @@ pub async fn heartbeat(state: &Shared) {
                     "activeContracts": v.pointer("/summary/activeContractsCount").cloned().unwrap_or(Value::Null),
                 })
             } else {
+                if status.is_client_error() && status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    *REJECTED.lock() = Some((creds, now));
+                }
                 json!({"ok": false, "at": now, "error": format!("HTTP {status}: {}", crate::mcp::truncate(body.trim(), 200))})
             }
         }
