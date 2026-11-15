@@ -229,13 +229,14 @@ pub fn pdf_main() -> i32 {
 
 fn pdf_text(bytes: &[u8]) -> Result<String> {
     check_pdf(bytes)?;
-    let doc = lopdf::Document::load_mem(bytes).map_err(|e| anyhow!("the PDF could not be read: {e}"))?;
+    let mut doc = lopdf::Document::load_mem(bytes).map_err(|e| anyhow!("the PDF could not be read: {e}"))?;
     if doc.is_encrypted() {
         bail!("the PDF is encrypted");
     }
+    widen_code_spaces(&mut doc);
     let mut out = String::new();
-    for page in doc.get_pages().keys() {
-        if let Ok(t) = doc.extract_text(&[*page]) {
+    for page in doc.get_pages().into_values() {
+        if let Ok(t) = page_text(&doc, page) {
             out.push_str(&t);
             out.push('\n');
         }
@@ -250,6 +251,90 @@ fn pdf_text(bytes: &[u8]) -> Result<String> {
         }
     }
     Ok(cap(out))
+}
+
+/// lopdf rejects a ToUnicode CMap whose code space is not exactly `<0000><FFFF>`, but writers
+/// such as PDFsharp declare only the codes they use; without this the font's text is lost.
+fn widen_code_spaces(doc: &mut lopdf::Document) {
+    const BEGIN: &str = "begincodespacerange";
+    const END: &str = "endcodespacerange";
+    let ids: Vec<_> = doc
+        .objects
+        .values()
+        .filter_map(|o| o.as_dict().ok()?.get(b"ToUnicode").ok()?.as_reference().ok())
+        .collect();
+    for id in ids {
+        let Ok(stream) = doc.get_object_mut(id).and_then(lopdf::Object::as_stream_mut) else { continue };
+        let Ok(plain) = stream.get_plain_content() else { continue };
+        let Ok(cmap) = std::str::from_utf8(&plain) else { continue };
+        let (Some(a), Some(b)) = (cmap.find(BEGIN), cmap.find(END)) else { continue };
+        let ranges = cmap.get(a + BEGIN.len()..b).unwrap_or("");
+        // Only two-byte code spaces: lopdf decodes ToUnicode text two bytes at a time anyway.
+        let two_byte = ranges.split(['<', '>']).map(str::trim).filter(|s| !s.is_empty()).all(|s| s.len() == 4);
+        if ranges.trim().is_empty() || !two_byte {
+            continue;
+        }
+        let head = cmap[..a].trim_end().trim_end_matches(|c: char| c.is_ascii_digit());
+        let widened = format!("{head}1 {BEGIN}\n<0000><FFFF>\n{}", &cmap[b..]);
+        stream.set_plain_content(widened.into_bytes());
+    }
+}
+
+/// One page's text with a space or line break wherever the text position moves. lopdf's
+/// `extract_text` runs separately placed words together and drops the page on one unreadable font.
+fn page_text(doc: &lopdf::Document, page: lopdf::ObjectId) -> Result<String> {
+    fn gap(out: &mut String, c: char) {
+        match out.chars().last() {
+            None | Some('\n') => {}
+            Some(' ') if c == '\n' => {
+                out.pop();
+                out.push('\n');
+            }
+            Some(' ') => {}
+            _ => out.push(c),
+        }
+    }
+    fn strings(out: &mut String, encoding: Option<&lopdf::Encoding>, operands: &[lopdf::Object]) {
+        for o in operands {
+            match o {
+                lopdf::Object::String(bytes, _) => {
+                    if let Some(s) = encoding.and_then(|e| lopdf::Document::decode_text(e, bytes).ok()) {
+                        out.push_str(&s);
+                    }
+                }
+                lopdf::Object::Array(items) => strings(out, encoding, items),
+                n if n.as_float().is_ok_and(|v| v < -100.0) => gap(out, ' '),
+                _ => {}
+            }
+        }
+    }
+    let encodings: HashMap<Vec<u8>, lopdf::Encoding> = doc
+        .get_page_fonts(page)?
+        .into_iter()
+        .filter_map(|(name, font)| Some((name, font.get_font_encoding(doc).ok()?)))
+        .collect();
+    let content = lopdf::content::Content::decode(&doc.get_page_content(page)?)?;
+    let (mut out, mut encoding, mut tm_y) = (String::new(), None, None);
+    for op in &content.operations {
+        let arg = |i: usize| op.operands.get(i).and_then(|o| o.as_float().ok()).unwrap_or(0.0);
+        match op.operator.as_str() {
+            "Tf" => encoding = op.operands.first().and_then(|n| n.as_name().ok()).and_then(|n| encodings.get(n)),
+            "Td" | "TD" => gap(&mut out, if arg(1) == 0.0 { ' ' } else { '\n' }),
+            "Tm" => {
+                let y = arg(5);
+                gap(&mut out, if tm_y.is_some_and(|last| last != y) { '\n' } else { ' ' });
+                tm_y = Some(y);
+            }
+            "T*" | "ET" => gap(&mut out, '\n'),
+            "'" | "\"" => {
+                gap(&mut out, '\n');
+                strings(&mut out, encoding, &op.operands);
+            }
+            "Tj" | "TJ" => strings(&mut out, encoding, &op.operands),
+            _ => {}
+        }
+    }
+    Ok(out)
 }
 
 fn ocr_pdf(doc: &lopdf::Document) -> Result<String> {
@@ -781,6 +866,23 @@ mod tests {
     fn pdf_extracts_text() {
         let text = extract("a.pdf", &tiny_pdf("Hello PDF")).unwrap();
         assert!(text.contains("Hello PDF"), "{text:?}");
+    }
+
+    #[test]
+    fn pdf_cid_font_with_narrow_code_space() {
+        let cmap = "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CMapName /Adobe-Identity-UCS def /CMapType 2 def\n1 begincodespacerange\n<000F><0058>\nendcodespacerange\n5 beginbfrange\n<0033><0033><0050>\n<0037><0037><0054>\n<002F><002F><004C>\n<002C><002C><0049>\n<0014><0014><0031>\nendbfrange\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend";
+        let stream = "BT /F0 10 Tf 10 700 Td <00330037> Tj 18 0 Td <002F002C> Tj -18 -10 Td <0014> Tj ET";
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 800] /Contents 4 0 R /Resources << /Font << /F0 5 0 R >> >> >>"
+                .to_string(),
+            format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
+            "<< /Type /Font /Subtype /Type0 /BaseFont /CourierNew /Encoding /Identity-H /ToUnicode 6 0 R >>".to_string(),
+            format!("<< /Length {} >>\nstream\n{cmap}\nendstream", cmap.len()),
+        ];
+        let text = extract("r.pdf", &assemble(&objs)).unwrap();
+        assert!(text.contains("PT LI\n1"), "{text:?}");
     }
 
     #[test]
