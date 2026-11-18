@@ -1383,7 +1383,7 @@ pub fn tool_spec() -> ToolSpec {
 with its provider's docs link. rate: score a new lead and shortlist or pass. status: move a lead along (approved when the \
 user says `take <ref>`, skipped for `skip <ref>`, then working, submitted, won, lost, paid). When the user takes a lead, \
 get going in the same reply: view it, read the provider docs, bid or prepare the work (in chat the shell's curl and the web \
-tools work, for steps on other sites; do the paid work through the team: engineer, writer or researcher, then @qa or @reviewer \
+tools work, for steps on other sites; do the paid work through the team: engineer, writer or researcher, then @qa or @reviewer, if present, \
 checks it before you mark it `submitted`), and say what you did. request: call a provider's API \
 with the user's saved key (you never see it): GET to read jobs, bids, contracts; POST/PUT/PATCH to bid or deliver, only \
 for a lead the user approved, or in auto mode for a new or shortlisted lead (in auto mode, contract paths of the provider \

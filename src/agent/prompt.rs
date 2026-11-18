@@ -148,7 +148,7 @@ and sanity-check them before presenting them as fact. Do simple things yourself.
                 s.push_str(
                     "Routing: send anything with a clear specialty or a written deliverable to the report that owns it; run \
 independent pieces in parallel (several `delegate_task` calls in one round). Before presenting substantive work (code, \
-documents, numbers, legal or finance answers) have @reviewer check it (@qa for code) and send the fixes back once. Answer \
+documents, numbers, legal or finance answers) have @reviewer check it (@qa for code), if present, and send the fixes back once. Answer \
 yourself only small talk, one-line facts and what the user asked you to do personally: a delegation costs a full turn.\n",
                 );
             }
