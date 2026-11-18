@@ -262,3 +262,49 @@ async fn kongming_corrects_and_retires_its_reports() {
     let imps = app.get("/api/improvements").await;
     assert!(imps.as_array().unwrap().iter().any(|i| i["kind"] == json!("agent_retired")), "{imps}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_starter_team_is_hired_once_and_follows_its_souls() {
+    let app = spawn_app(vec![]).await;
+    let db = &app.state.db;
+    let lead = app.default_agent().await;
+    let mine = app.hire("pm", "My own PM", Some(&lead.id)).await;
+
+    kongming::agent::seed_team(&app.state).await.unwrap();
+    let team = db.agents().await.unwrap();
+    assert_eq!(team.len(), kongming::agent::SEED_TEAM.len() + 1);
+    for (handle, .., tools) in kongming::agent::SEED_TEAM.iter().filter(|s| s.0 != "pm") {
+        let a = db.agent_by_handle(handle).await.unwrap().unwrap_or_else(|| panic!("@{handle} missing"));
+        assert_eq!(a.manager_id.as_deref(), Some(lead.id.as_str()), "@{handle}");
+        assert!(!a.self_improve && a.mcp_servers.is_none() && a.model.is_none(), "@{handle}");
+        assert_eq!(a.tools.is_some(), !tools.is_empty(), "@{handle}");
+        assert!(a.description.len() < 140 && !a.system_prompt.is_empty(), "@{handle}");
+    }
+    let pm = db.agent_by_handle("pm").await.unwrap().unwrap();
+    assert_eq!((pm.id.as_str(), pm.role.as_str(), pm.system_prompt.as_str()), (mine.id.as_str(), "My own PM", ""));
+    assert!(db.default_agent().await.unwrap().is_default);
+
+    kongming::agent::seed_team(&app.state).await.unwrap();
+    assert_eq!(db.agents().await.unwrap().len(), team.len(), "a second run changes nothing");
+
+    let qa = db.agent_by_handle("qa").await.unwrap().unwrap();
+    db.delete_agent(&qa.id).await.unwrap();
+    kongming::agent::seed_team(&app.state).await.unwrap();
+    assert!(db.agent_by_handle("qa").await.unwrap().is_none(), "a retired agent stays retired");
+
+    // An unedited soul follows the built-in text, an edited one is kept.
+    let mut writer = db.agent_by_handle("writer").await.unwrap().unwrap();
+    let mut legal = db.agent_by_handle("legal").await.unwrap().unwrap();
+    let old = "You are the old writer.".to_string();
+    writer.system_prompt = old.clone();
+    legal.system_prompt = "You are my legal.".into();
+    db.upsert_agent(&writer).await.unwrap();
+    db.upsert_agent(&legal).await.unwrap();
+    let mut prompts = db.setting("seeded_agent_prompts").await.unwrap().unwrap();
+    prompts["writer"] = json!(old);
+    db.set_setting("seeded_agent_prompts", &prompts).await.unwrap();
+    kongming::agent::seed_team(&app.state).await.unwrap();
+    let builtin = |h: &str| kongming::agent::SEED_TEAM.iter().find(|s| s.0 == h).unwrap().4;
+    assert_eq!(db.agent_by_handle("writer").await.unwrap().unwrap().system_prompt, builtin("writer"));
+    assert_eq!(db.agent_by_handle("legal").await.unwrap().unwrap().system_prompt, "You are my legal.");
+}

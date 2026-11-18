@@ -144,6 +144,14 @@ happen again, or retire it.\n",
 Give each delegate everything it needs in `task` and `context`; it cannot see this conversation. Treat results as self-reports \
 and sanity-check them before presenting them as fact. Do simple things yourself.\n",
             );
+            if a.is_default {
+                s.push_str(
+                    "Routing: send anything with a clear specialty or a written deliverable to the report that owns it; run \
+independent pieces in parallel (several `delegate_task` calls in one round). Before presenting substantive work (code, \
+documents, numbers, legal or finance answers) have @reviewer check it (@qa for code) and send the fixes back once. Answer \
+yourself only small talk, one-line facts and what the user asked you to do personally: a delegation costs a full turn.\n",
+                );
+            }
         }
         let others: Vec<&Agent> = p
             .team
@@ -436,6 +444,9 @@ mod tests {
         let s2 = build(&p2);
         assert!(s2.contains("Your manager is **BOSS**"));
         assert!(!s2.contains("delegate_task"));
+        assert!(s.contains("Routing:") && s.contains("@reviewer") && s.contains("in parallel"), "{s}");
+        let reports_prompt = build(&PromptInput { agent: &Agent { is_default: false, ..boss.clone() }, ..p });
+        assert!(!reports_prompt.contains("Routing:"), "only the lead gets the routing rules");
         assert!(s2.contains("the user does not talk to you directly"), "{s2}");
         assert!(!s2.contains("# Reaching the user"), "only the lead reaches the user");
         assert!(s.contains("# Setup") && !s2.contains("# Setup"), "only the lead sets things up");

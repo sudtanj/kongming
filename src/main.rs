@@ -70,6 +70,9 @@ async fn run(cfg: config::Config) -> Result<()> {
     if let Err(e) = agent::seed_skills(&state).await {
         tracing::warn!("seeding skills failed: {e:#}");
     }
+    if let Err(e) = agent::seed_team(&state).await {
+        tracing::warn!("seeding the team failed: {e:#}");
+    }
 
     // Background work: MCP tool discovery, Telegram, cron, proactive check-ins, earnings scans.
     {
