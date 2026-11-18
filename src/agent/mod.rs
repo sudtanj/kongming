@@ -2118,12 +2118,21 @@ pub async fn seed_team(state: &Shared) -> Result<()> {
             continue;
         }
         let Some(mut agent) = existing else { continue };
-        if agent.system_prompt == *soul {
-            prompts.insert(handle.to_string(), soul.to_string());
-        } else if prompts.get(*handle) == Some(&agent.system_prompt) {
+        let mut changed = false;
+        if agent.system_prompt != *soul && prompts.get(*handle) == Some(&agent.system_prompt) {
             agent.system_prompt = soul.to_string();
+            changed = true;
+        }
+        // Draft-only roles seeded before the MCP cut-off still had every server; only ever tighten.
+        if agent.mcp_servers.is_none() && !SEED_TEAM_MCP.contains(handle) {
+            agent.mcp_servers = Some(vec![]);
+            changed = true;
+        }
+        if changed {
             agent.updated_at = crate::db::now_ms();
             state.db.upsert_agent(&agent).await?;
+        }
+        if agent.system_prompt == *soul {
             prompts.insert(handle.to_string(), soul.to_string());
         }
     }

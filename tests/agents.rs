@@ -300,6 +300,8 @@ async fn the_starter_team_is_hired_once_and_follows_its_souls() {
     let old = "You are the old writer.".to_string();
     writer.system_prompt = old.clone();
     legal.system_prompt = "You are my legal.".into();
+    // Seeded before draft-only roles lost MCP access: tightened on the next boot, edits or not.
+    legal.mcp_servers = None;
     db.upsert_agent(&writer).await.unwrap();
     db.upsert_agent(&legal).await.unwrap();
     let mut prompts = db.setting("seeded_agent_prompts").await.unwrap().unwrap();
@@ -308,7 +310,9 @@ async fn the_starter_team_is_hired_once_and_follows_its_souls() {
     kongming::agent::seed_team(&app.state).await.unwrap();
     let builtin = |h: &str| kongming::agent::SEED_TEAM.iter().find(|s| s.0 == h).unwrap().4;
     assert_eq!(db.agent_by_handle("writer").await.unwrap().unwrap().system_prompt, builtin("writer"));
-    assert_eq!(db.agent_by_handle("legal").await.unwrap().unwrap().system_prompt, "You are my legal.");
+    let legal = db.agent_by_handle("legal").await.unwrap().unwrap();
+    assert_eq!(legal.system_prompt, "You are my legal.");
+    assert_eq!(legal.mcp_servers, Some(vec![]));
 }
 
 #[tokio::test(flavor = "multi_thread")]
