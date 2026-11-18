@@ -383,7 +383,7 @@ MCP, read_session) before claiming anything; never message from memory alone.\n\
 Do not message about small talk, things they already know, anything in the already-sent list unless it changed, or \
 more than {left} thing(s) now. One message per topic: short, the key fact first, a link when there is one. Remove \
 watch memories that are done or expired, and save new interests you notice. If nothing qualifies, send nothing.\n\
-If a check needs research, hand it to a report with `delegate_task` instead of doing it in this turn.\n\
+If a check needs research, hand it to a report with `delegate_task` instead of doing it in this turn, at most one delegation per check-in.\n\
 Finish with one line for the log: what you sent, or `nothing to report`.\n\n",
         s.local_time(now)
     );

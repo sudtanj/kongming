@@ -276,7 +276,9 @@ async fn the_starter_team_is_hired_once_and_follows_its_souls() {
     for (handle, .., tools) in kongming::agent::SEED_TEAM.iter().filter(|s| s.0 != "pm") {
         let a = db.agent_by_handle(handle).await.unwrap().unwrap_or_else(|| panic!("@{handle} missing"));
         assert_eq!(a.manager_id.as_deref(), Some(lead.id.as_str()), "@{handle}");
-        assert!(!a.self_improve && a.mcp_servers.is_none() && a.model.is_none(), "@{handle}");
+        assert!(!a.self_improve && a.model.is_none(), "@{handle}");
+        let open = ["engineer", "qa", "analyst"].contains(handle);
+        assert_eq!(a.mcp_servers, if open { None } else { Some(vec![]) }, "@{handle}");
         assert_eq!(a.tools.is_some(), !tools.is_empty(), "@{handle}");
         assert!(a.description.len() < 140 && !a.system_prompt.is_empty(), "@{handle}");
     }
@@ -298,6 +300,8 @@ async fn the_starter_team_is_hired_once_and_follows_its_souls() {
     let old = "You are the old writer.".to_string();
     writer.system_prompt = old.clone();
     legal.system_prompt = "You are my legal.".into();
+    // Seeded before draft-only roles lost MCP access: tightened on the next boot, edits or not.
+    legal.mcp_servers = None;
     db.upsert_agent(&writer).await.unwrap();
     db.upsert_agent(&legal).await.unwrap();
     let mut prompts = db.setting("seeded_agent_prompts").await.unwrap().unwrap();
@@ -306,5 +310,22 @@ async fn the_starter_team_is_hired_once_and_follows_its_souls() {
     kongming::agent::seed_team(&app.state).await.unwrap();
     let builtin = |h: &str| kongming::agent::SEED_TEAM.iter().find(|s| s.0 == h).unwrap().4;
     assert_eq!(db.agent_by_handle("writer").await.unwrap().unwrap().system_prompt, builtin("writer"));
-    assert_eq!(db.agent_by_handle("legal").await.unwrap().unwrap().system_prompt, "You are my legal.");
+    let legal = db.agent_by_handle("legal").await.unwrap().unwrap();
+    assert_eq!(legal.system_prompt, "You are my legal.");
+    assert_eq!(legal.mcp_servers, Some(vec![]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_seeded_tool_name_is_a_real_builtin() {
+    let app = spawn_app(vec![]).await;
+    let sh = kongming::agent::shell::Shell::from_config("/bin/sh").unwrap();
+    let all: Vec<String> = kongming::agent::tools::builtin_specs(&app.default_agent().await, true, Some(&sh))
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    for (handle, .., tools) in kongming::agent::SEED_TEAM {
+        for t in *tools {
+            assert!(all.iter().any(|n| n == t), "@{handle} lists unknown tool {t}");
+        }
+    }
 }
