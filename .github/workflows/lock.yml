@@ -1,0 +1,13 @@
+name: lock
+on: workflow_dispatch
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo update -p lopdf
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lock
+          path: Cargo.lock
