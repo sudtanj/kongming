@@ -33,7 +33,7 @@ fn field_matches(field: &str, value: u32, min: u32, max: u32) -> Option<bool> {
             }
             (v, max)
         };
-        if value >= lo && value <= hi && (value - lo) % step == 0 {
+        if value >= lo && value <= hi && (value - lo).is_multiple_of(step) {
             return Some(true);
         }
     }

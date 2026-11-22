@@ -594,7 +594,7 @@ async fn document_block(tg: &Telegram, doc: &Value) -> Result<String> {
     }
     let file_id = doc.get("file_id").and_then(Value::as_str).ok_or_else(|| anyhow!("the document has no file id"))?;
     let bytes = tg.download(file_id, crate::doc::MAX_UPLOAD).await?;
-    let text = crate::doc::extract_async(name.to_string(), bytes).await?;
+    let text = crate::doc::extract_async(name.to_string(), bytes, "").await?;
     Ok(crate::doc::attachment(name, &text))
 }
 

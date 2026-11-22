@@ -1344,7 +1344,7 @@ async fn should_reflect(state: &Shared, session_id: &str, used_tools: bool, user
             .iter()
             .any(|k| lower.contains(k));
     if small && !correction {
-        return used_tools && state.count_tool_turn(session_id) % SMALL_REFLECT_EVERY == 0;
+        return used_tools && state.count_tool_turn(session_id).is_multiple_of(SMALL_REFLECT_EVERY);
     }
     if used_tools || correction {
         return true;

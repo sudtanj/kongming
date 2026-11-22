@@ -38,6 +38,11 @@ const OCR_MAX_PIXELS: i64 = 16_000_000;
 static DETECTION_MODEL: &[u8] = include_bytes!("../models/text-detection.onnx");
 static RECOGNITION_MODEL: &[u8] = include_bytes!("../models/text-recognition.onnx");
 const PDF_FAILED: &str = "could not read this PDF";
+const PDF_LOCKED: &str = "the PDF is password-protected: call read_document again with `password` (bank statements \
+usually tell you the format, e.g. birth date ddmmyyyy); a wrong password gives this same message";
+const MAX_PASSWORD: usize = 256;
+/// Exit code of `kongming doc-pdf` for a PDF whose password is missing or wrong.
+const PDF_LOCKED_EXIT: i32 = 2;
 
 /// One extraction at a time: a parse can use a lot of memory on a small board.
 static GATE: Semaphore = Semaphore::const_new(1);
@@ -78,14 +83,14 @@ fn check_size(bytes: &[u8]) -> Result<()> {
 }
 
 /// Extract the text of a document. Off the async worker, one at a time, and
-/// PDFs in a child process.
-pub async fn extract_async(name: String, bytes: impl Into<Bytes>) -> Result<String> {
+/// PDFs in a child process. `password` opens an encrypted PDF (empty: none) and is never kept.
+pub async fn extract_async(name: String, bytes: impl Into<Bytes>, password: &str) -> Result<String> {
     let bytes: Bytes = bytes.into();
     let ext = allowed_extension(&name)?;
     check_size(&bytes)?;
     let _turn = GATE.acquire().await?;
     let text = if ext == "pdf" {
-        pdf_in_child(&bytes).await?
+        pdf_in_child(&bytes, password).await?
     } else {
         tokio::task::spawn_blocking(move || text_of(&ext, &bytes))
             .await
@@ -170,9 +175,13 @@ fn check_pdf(bytes: &[u8]) -> Result<()> {
 }
 
 /// Run `kongming doc-pdf` on the bytes: killed after 2 minutes, output capped, any
-/// failure (exit code, signal, limit) is the one generic error.
-async fn pdf_in_child(bytes: &Bytes) -> Result<String> {
+/// failure (exit code, signal, limit) is the one generic error, except a missing or wrong
+/// password. The password goes in on stdin as the first line, never in argv or env.
+async fn pdf_in_child(bytes: &Bytes, password: &str) -> Result<String> {
     check_pdf(bytes)?;
+    if password.len() > MAX_PASSWORD || password.contains(['\n', '\r']) {
+        bail!("the password must be one line of at most {MAX_PASSWORD} bytes");
+    }
     let failed = || anyhow!(PDF_FAILED);
     let mut child = tokio::process::Command::new(std::env::current_exe().context(PDF_FAILED)?)
         .arg("doc-pdf")
@@ -187,6 +196,7 @@ async fn pdf_in_child(bytes: &Bytes) -> Result<String> {
     let io = async {
         // The child may stop reading (and exit) early; its status says what happened.
         let feed = async {
+            let _ = stdin.write_all(format!("{password}\n").as_bytes()).await;
             let _ = stdin.write_all(bytes).await;
             drop(stdin);
         };
@@ -198,14 +208,17 @@ async fn pdf_in_child(bytes: &Bytes) -> Result<String> {
     };
     let out = tokio::time::timeout(PDF_TIMEOUT, io).await.map_err(|_| failed())?.map_err(|_| failed())?;
     let status = tokio::time::timeout(Duration::from_secs(5), child.wait()).await.map_err(|_| failed())?;
+    if status.as_ref().is_ok_and(|s| s.code() == Some(PDF_LOCKED_EXIT)) {
+        bail!(PDF_LOCKED);
+    }
     if !status.is_ok_and(|s| s.success()) || out.len() > MAX_OUTPUT {
         return Err(failed());
     }
     String::from_utf8(out).map_err(|_| failed())
 }
 
-/// The `kongming doc-pdf` child: PDF on stdin, text on stdout, exit code 0 on
-/// success. Memory and CPU are limited before the parser sees any input.
+/// The `kongming doc-pdf` child: password line then PDF on stdin, text on stdout, exit code 0 on
+/// success, 2 when the PDF needs a password. Memory and CPU are limited before the parser sees any input.
 pub fn pdf_main() -> i32 {
     let limit = |resource, value: u64| {
         let l = libc::rlimit { rlim_cur: value, rlim_max: value };
@@ -217,21 +230,48 @@ pub fn pdf_main() -> i32 {
     if !limit(libc::RLIMIT_AS, 512 * 1024 * 1024) || !limit(libc::RLIMIT_CPU, 90) {
         return 1;
     }
-    let mut bytes = Vec::new();
-    if std::io::stdin().take(MAX_UPLOAD as u64 + 1).read_to_end(&mut bytes).is_err() || bytes.len() > MAX_UPLOAD {
+    let mut input = Vec::new();
+    let room = (MAX_UPLOAD + MAX_PASSWORD + 2) as u64;
+    if std::io::stdin().take(room).read_to_end(&mut input).is_err() {
         return 1;
     }
-    match pdf_text(&bytes) {
+    let Some(line) = input.iter().position(|&b| b == b'\n') else { return 1 };
+    let (password, bytes) = (&input[..line], &input[line + 1..]);
+    let Ok(password) = std::str::from_utf8(password) else { return 1 };
+    if password.len() > MAX_PASSWORD || bytes.len() > MAX_UPLOAD {
+        return 1;
+    }
+    match pdf_text(bytes, password) {
         Ok(text) => i32::from(std::io::stdout().write_all(text.as_bytes()).is_err()),
+        Err(e) if e.is::<PasswordNeeded>() => PDF_LOCKED_EXIT,
         Err(_) => 1,
     }
 }
 
-fn pdf_text(bytes: &[u8]) -> Result<String> {
+#[derive(Debug)]
+struct PasswordNeeded;
+
+impl std::fmt::Display for PasswordNeeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(PDF_LOCKED)
+    }
+}
+
+impl std::error::Error for PasswordNeeded {}
+
+/// lopdf tries the empty password by itself, then `password`; a document still encrypted after
+/// loading, or an `InvalidPassword` error, means the password is missing or wrong.
+fn pdf_text(bytes: &[u8], password: &str) -> Result<String> {
     check_pdf(bytes)?;
-    let mut doc = lopdf::Document::load_mem(bytes).map_err(|e| anyhow!("the PDF could not be read: {e}"))?;
+    let options =
+        if password.is_empty() { lopdf::LoadOptions::default() } else { lopdf::LoadOptions::with_password(password) };
+    let mut doc = match lopdf::Document::load_mem_with_options(bytes, options) {
+        Ok(doc) => doc,
+        Err(lopdf::Error::InvalidPassword) => return Err(PasswordNeeded.into()),
+        Err(e) => bail!("the PDF could not be read: {e}"),
+    };
     if doc.is_encrypted() {
-        bail!("the PDF is encrypted");
+        return Err(PasswordNeeded.into());
     }
     widen_code_spaces(&mut doc);
     let mut out = String::new();
@@ -305,12 +345,12 @@ fn page_text(doc: &lopdf::Document, page: lopdf::ObjectId) -> Result<String> {
             }
         }
     }
-    let encodings: HashMap<Vec<u8>, lopdf::Encoding> = doc
+    let encodings: HashMap<Vec<u8>, lopdf::Encoding<'_>> = doc
         .get_page_fonts(page)?
         .into_iter()
         .filter_map(|(name, font)| Some((name, font.get_font_encoding(doc).ok()?)))
         .collect();
-    let content = lopdf::content::Content::decode(&doc.get_page_content(page)?)?;
+    let content = lopdf::content::Content::decode(&doc.get_page_content(page))?;
     let (mut out, mut encoding, mut tm_y) = (String::new(), None, None);
     for op in &content.operations {
         let arg = |i: usize| op.operands.get(i).and_then(|o| o.as_float().ok()).unwrap_or(0.0);
@@ -377,7 +417,7 @@ fn image_rgb(stream: &lopdf::Stream) -> Option<(usize, usize, Vec<u8>)> {
         return None;
     }
     let filters = if dict.has(b"Filter") { stream.filters().ok()? } else { Vec::new() };
-    let (w, h, channels, pixels) = if filters.len() == 1 && filters[0] == "DCTDecode" {
+    let (w, h, channels, pixels) = if filters.len() == 1 && filters[0] == b"DCTDecode" {
         let mut decoder = zune_jpeg::JpegDecoder::new(zune_core::bytestream::ZCursor::new(&stream.content));
         let pixels = decoder.decode().ok()?;
         let (w, h) = decoder.dimensions()?;
@@ -385,7 +425,7 @@ fn image_rgb(stream: &lopdf::Stream) -> Option<(usize, usize, Vec<u8>)> {
             return None;
         }
         (w, h, pixels.len() / (w * h), pixels)
-    } else if filters.is_empty() || (filters.len() == 1 && filters[0] == "FlateDecode") {
+    } else if filters.is_empty() || (filters.len() == 1 && filters[0] == b"FlateDecode") {
         let channels = match dict.get(b"ColorSpace").and_then(Object::as_name).ok()? {
             b"DeviceGray" => 1,
             b"DeviceRGB" => 3,
@@ -751,7 +791,7 @@ mod tests {
     fn extract(name: &str, bytes: &[u8]) -> Result<String> {
         let ext = allowed_extension(name)?;
         check_size(bytes)?;
-        finish(if ext == "pdf" { pdf_text(bytes)? } else { text_of(&ext, bytes)? })
+        finish(if ext == "pdf" { pdf_text(bytes, "")? } else { text_of(&ext, bytes)? })
     }
 
     fn zip(files: &[(&str, &str)]) -> Vec<u8> {
@@ -863,6 +903,63 @@ mod tests {
     fn pdf_extracts_text() {
         let text = extract("a.pdf", &tiny_pdf("Hello PDF")).unwrap();
         assert!(text.contains("Hello PDF"), "{text:?}");
+    }
+
+    fn encrypted_pdf(aes256: bool) -> Vec<u8> {
+        use lopdf::encryption::crypt_filters::{Aes128CryptFilter, Aes256CryptFilter, CryptFilter};
+        use std::{collections::BTreeMap, sync::Arc};
+        let mut doc = lopdf::Document::load_mem(&tiny_pdf("Statement 4242")).unwrap();
+        let id = |s: &[u8]| lopdf::Object::string_literal(s);
+        doc.trailer.set("ID", lopdf::Object::Array(vec![id(b"0123456789abcdef"), id(b"fedcba9876543210")]));
+        let state = if aes256 {
+            let filter: Arc<dyn CryptFilter> = Arc::new(Aes256CryptFilter);
+            lopdf::EncryptionState::try_from(lopdf::EncryptionVersion::V5 {
+                encrypt_metadata: true,
+                crypt_filters: BTreeMap::from([(b"StdCF".to_vec(), filter)]),
+                file_encryption_key: &[7u8; 32],
+                stream_filter: b"StdCF".to_vec(),
+                string_filter: b"StdCF".to_vec(),
+                owner_password: "owner-secret",
+                user_password: "19900101",
+                permissions: lopdf::Permissions::all(),
+            })
+        } else {
+            let filter: Arc<dyn CryptFilter> = Arc::new(Aes128CryptFilter);
+            lopdf::EncryptionState::try_from(lopdf::EncryptionVersion::V4 {
+                document: &doc,
+                encrypt_metadata: true,
+                crypt_filters: BTreeMap::from([(b"StdCF".to_vec(), filter)]),
+                stream_filter: b"StdCF".to_vec(),
+                string_filter: b"StdCF".to_vec(),
+                owner_password: "owner-secret",
+                user_password: "19900101",
+                permissions: lopdf::Permissions::all(),
+            })
+        }
+        .unwrap();
+        doc.encrypt(&state).unwrap();
+        let mut out = Vec::new();
+        doc.save_to(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn encrypted_pdf_needs_the_right_password() {
+        for aes256 in [false, true] {
+            let pdf = encrypted_pdf(aes256);
+            for wrong in ["", "nope", "19900102"] {
+                let e = pdf_text(&pdf, wrong).unwrap_err();
+                assert!(e.is::<PasswordNeeded>(), "aes256={aes256} {wrong:?}: {e:#}");
+                assert!(e.to_string().contains("password"), "{e:#}");
+            }
+            let text = pdf_text(&pdf, "19900101").unwrap();
+            assert!(text.contains("Statement 4242"), "aes256={aes256}: {text:?}");
+        }
+    }
+
+    #[test]
+    fn password_is_ignored_for_a_plain_pdf() {
+        assert!(pdf_text(&tiny_pdf("Open"), "unused").unwrap().contains("Open"));
     }
 
     #[test]
