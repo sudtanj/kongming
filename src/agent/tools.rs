@@ -54,8 +54,8 @@ pub fn builtin_specs(agent: &Agent, can_delegate: bool, sh: Option<&shell::Shell
         },
         ToolSpec {
             name: "read_document".into(),
-            description: "Fetch a public http(s) URL that is a document (PDF, docx, xlsx, pptx, odt, ods, odp, txt, md, csv, tsv; up to 10 MB) and return its text. Scanned or image-only PDFs are OCRed here (built-in OCR, first 5 pages), so never use an MCP or Composio OCR/PDF service, web_fetch or `curl | strings` for these files, and never judge a PDF unreadable from its raw bytes: call this first. For an email attachment, pass the download link from the mail tool (e.g. Gmail GMAIL_GET_ATTACHMENT `s3url`). offset continues a long document.".into(),
-            parameters: obj(json!({"url": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "max_chars": {"type": "integer", "minimum": 500, "maximum": 20000}}), &["url"]),
+            description: "Fetch a public http(s) URL that is a document (PDF, docx, xlsx, pptx, odt, ods, odp, txt, md, csv, tsv; up to 10 MB) and return its text. Scanned or image-only PDFs are OCRed here (built-in OCR, first 5 pages), so never use an MCP or Composio OCR/PDF service, web_fetch or `curl | strings` for these files, and never judge a PDF unreadable from its raw bytes: call this first. For an email attachment, pass the download link from the mail tool (e.g. Gmail GMAIL_GET_ATTACHMENT `s3url`). offset continues a long document. For a password-protected PDF (e.g. a bank statement) pass its `password`; it is never stored.".into(),
+            parameters: obj(json!({"url": {"type": "string"}, "password": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "max_chars": {"type": "integer", "minimum": 500, "maximum": 20000}}), &["url"]),
         },
         ToolSpec {
             name: "current_time".into(),
@@ -579,7 +579,7 @@ async fn read_document(_ctx: &ToolCtx<'_>, args: &Value) -> Result<String> {
         }
         bytes.extend_from_slice(&chunk);
     }
-    let text = crate::doc::extract_async(name, bytes).await?;
+    let text = crate::doc::extract_async(name, bytes, s(args, "password")).await?;
     let rest: String = text.chars().skip(offset).collect();
     Ok(crate::mcp::truncate(&rest, max))
 }

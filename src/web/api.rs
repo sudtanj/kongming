@@ -305,7 +305,7 @@ pub struct UploadQuery {
 /// returned for the client to put in a message; nothing is stored.
 pub async fn upload(Query(q): Query<UploadQuery>, body: axum::body::Bytes) -> R {
     let name = crate::doc::clean_name(&q.name);
-    let text = crate::doc::extract_async(name.clone(), body).await.map_err(|e| bad(format!("{e:#}")))?;
+    let text = crate::doc::extract_async(name.clone(), body, "").await.map_err(|e| bad(format!("{e:#}")))?;
     Ok(Json(json!({"name": name, "chars": text.chars().count(), "text": crate::doc::inline(&text)})))
 }
 
