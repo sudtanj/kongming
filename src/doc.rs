@@ -263,11 +263,8 @@ impl std::error::Error for PasswordNeeded {}
 /// loading, or an `InvalidPassword` error, means the password is missing or wrong.
 fn pdf_text(bytes: &[u8], password: &str) -> Result<String> {
     check_pdf(bytes)?;
-    let options = if password.is_empty() {
-        lopdf::LoadOptions::default()
-    } else {
-        lopdf::LoadOptions::with_password(password)
-    };
+    let options =
+        if password.is_empty() { lopdf::LoadOptions::default() } else { lopdf::LoadOptions::with_password(password) };
     let mut doc = match lopdf::Document::load_mem_with_options(bytes, options) {
         Ok(doc) => doc,
         Err(lopdf::Error::InvalidPassword) => return Err(PasswordNeeded.into()),
