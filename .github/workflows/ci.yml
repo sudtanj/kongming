@@ -37,6 +37,12 @@ jobs:
         id: fmt
         continue-on-error: true
         run: cargo fmt --all --check || { cargo fmt --all && git diff > fmt.patch; exit 1; }
+      - name: TEMP lock
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lock
+          path: Cargo.lock
       - name: Upload rustfmt patch
         if: steps.fmt.outcome == 'failure'
         uses: actions/upload-artifact@v4
